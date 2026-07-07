@@ -1,6 +1,7 @@
 """Deep evaluation: statistical confidence, drift, segments, and betting realism.
 
-Extends evaluate.py with the questions it can't answer:
+The full accuracy + betting workup on a held-out season, answering the
+questions a single accuracy table can't:
 
   1. Is the edge REAL?         bootstrap 95% CIs on AUC and the logloss edge
                                (resampling whole days, since games cluster)
@@ -16,12 +17,30 @@ Extends evaluate.py with the questions it can't answer:
   7. K / totals / winner       P(over) line calibration, Poisson dispersion
                                checks, win-prob calibration, and significance
                                of the winner model vs always-picking-home
+  8. Did a change HELP?        --set-baseline snapshots the headline metrics;
+                               later runs print a per-metric better/worse/same
+                               diff so a retrain's effect is visible at a glance
 
 Usage:
-    python Model/evaluate_deep.py [--year 2026] [--prop hr] [--boot 400]
+    python Model/evaluate_deep.py [--prop hr] [--boot 400]   # SELECTION suite on 2025
+    python Model/evaluate_deep.py --confirm [--year 2026]    # shipping suite on 2026
+
+The DEFAULT run scores the selection suite (train<=2023, cal 2024) on 2025 —
+safe to run as often as you like. 2026 is CONFIRM-ONLY: iterating
+features/params against its numbers quietly overfits the holdout, so looking
+at it takes an explicit --confirm. The iteration loop is:
+
+    python Model/evaluate_deep.py --set-baseline   # snapshot before changing
+    ...make a change...
+    python Model/train.py --rebuild --select       # retrain the selection suite
+    python Model/evaluate_deep.py                  # Section 11 diff on 2025
+    ...iterate; only when satisfied:
+    python Model/train.py                          # both suites
+    python Model/evaluate_deep.py --confirm        # ONE confirming look at 2026
 """
 
 import argparse
+import json
 import math
 import sys
 from pathlib import Path
@@ -35,11 +54,36 @@ from sklearn.metrics import log_loss, mean_absolute_error, roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import features as F  # noqa: E402
+import odds as O  # noqa: E402
+import recalibrate as R  # noqa: E402
 from predict import (american_odds, nb_over, poisson_over,  # noqa: E402
                      poisson_win, predict_prop, predict_win)
 from train import PROPS  # noqa: E402
 
 ART = Path(__file__).resolve().parent / "artifacts"
+
+# How the --set-baseline diff judges each metric's movement, matched by key
+# suffix. Anything not listed here is "higher is better" (AUC, edge, top10,
+# winner_acc). Keeps the verdict honest for metrics where up isn't good.
+LOWER_BETTER = ("_ece", "_mae", "_logloss")   # smaller = better
+TARGET_ONE = ("_dispersion",)                 # ideal is 1.0; closer = better
+
+# Retrain-to-retrain noise bands, matched by key suffix. Two runs of train.py
+# on IDENTICAL code differ by this much anyway (LightGBM bagging draws depend
+# on row order — train.py documents ~0.005-0.01 MAE from row order alone — and
+# the daily job adds a day of data), so a delta inside the band says nothing
+# about whether a change helped. Sized to observed jitter: top-10 daily hit
+# rate on ~1,000 picks has a ±1.4pp binomial SE before any model change.
+NOISE_BAND = {"_auc": 0.004, "_edge": 0.001, "_ece": 0.003, "_top10": 0.02,
+              "_mae": 0.008, "_dispersion": 0.02, "_acc": 0.008,
+              "_logloss": 0.002}
+
+
+def noise_band(metric):
+    for suf, band in NOISE_BAND.items():
+        if metric.endswith(suf):
+            return band
+    return 5e-5
 
 
 def prep(df, cols, cat_levels):
@@ -284,16 +328,22 @@ def section_strikeouts(sf_y, art):
                      "mae": round(mean_absolute_error(d["y"], d["mu"]), 2)})
     print(pd.DataFrame(rows).to_string(index=False))
 
-    print("\n--- P(over) line calibration (the sellable output) ---")
+    k_disp = float(art.get("k_disp", 1.0))
+    dist = (f"negative binomial, disp {k_disp:.2f} from cal year"
+            if k_disp > 1.001 else "Poisson")
+    print(f"\n--- P(over) line calibration (the sellable output; uses {dist}) ---")
     rows = []
     for line in (3.5, 4.5, 5.5, 6.5, 7.5):
-        p_over = np.array([poisson_over(l, line) for l in mu])
+        p_over = np.array([nb_over(l, line, k_disp) for l in mu])
         actual = (y > line).astype(int)
         rows.append({"line": line, "mean P(over)": f"{p_over.mean():.3f}",
                      "actual over rate": f"{actual.mean():.3f}",
                      "logloss": f"{log_loss(actual, np.clip(p_over, 1e-4, 1 - 1e-4)):.4f}",
                      "base logloss": f"{log_loss(actual, np.full_like(p_over, actual.mean())):.4f}"})
     print(pd.DataFrame(rows).to_string(index=False))
+
+    return {"k_mae": round(float(mean_absolute_error(y, mu)), 4),
+            "k_dispersion": round(float(disp), 4)}
 
 
 def section_games(gf_y, art):
@@ -337,14 +387,20 @@ def section_games(gf_y, art):
         print("\n  (winner probabilities from Poisson means — no win model "
               "in artifacts)")
     actual_home = (home_y > away_y).astype(int)
+    ll = log_loss(actual_home, np.clip(p_home, 1e-4, 1 - 1e-4))
+    ll_base = log_loss(actual_home, np.full_like(p_home, actual_home.mean(),
+                                                 dtype=float))
+    print("\n--- winner: PROBABILITY quality (the intended output) ---")
+    print(f"  win-prob log loss {ll:.4f} vs always-home base rate "
+          f"{ll_base:.4f}  (edge {ll_base - ll:+.4f})")
+    print("  The product is a calibrated home-win probability, NOT a side to "
+          "bet.")
+
     model_pick = (p_home >= 0.5).astype(int)
     model_right = model_pick == actual_home
     home_right = actual_home == 1
     acc = model_right.mean()
     lo, hi = wilson(int(model_right.sum()), len(model_right))
-    print(f"\n--- winner ---")
-    print(f"  model accuracy {acc:.1%} [{lo:.1%}, {hi:.1%}] | always-home "
-          f"baseline {home_right.mean():.1%}")
     b = int((model_right & ~home_right).sum())
     c = int((~model_right & home_right).sum())
     if b + c == 0:
@@ -354,16 +410,274 @@ def section_games(gf_y, art):
             pval = stats.binomtest(b, b + c).pvalue
         except AttributeError:  # scipy < 1.7
             pval = stats.binom_test(b, b + c)
-    print(f"  games model wins vs home-pick: {b} | loses: {c} | "
-          f"McNemar p-value {pval:.3f}")
-    print("  (p > 0.05 = no statistical evidence the winner model beats "
-          "just picking the home team)")
+    print(f"\n  [reference only, not a bet] straight-up pick accuracy "
+          f"{acc:.1%} [{lo:.1%}, {hi:.1%}] vs always-home "
+          f"{home_right.mean():.1%};")
+    print(f"  beats the home pick on {b} games, loses on {c}, McNemar "
+          f"p={pval:.3f} -> {'no' if pval > 0.05 else 'some'} evidence of an "
+          f"actual moneyline edge.")
 
     q = pd.qcut(p_home, 5, duplicates="drop")
     tab = pd.DataFrame({"p": p_home, "y": actual_home}).groupby(q, observed=True).agg(
         predicted=("p", "mean"), actual=("y", "mean"), n=("y", "size"))
-    print("\n--- win-prob calibration (quintiles) ---")
+    print("\n--- win-prob calibration (quintiles: predicted should ~ actual) ---")
     print(tab.round(3).to_string())
+
+    return {
+        "total_mae": round(float(mean_absolute_error(total_y, total_mu)), 4),
+        "total_dispersion": round(float(disp), 4),
+        "winner_acc": round(float(acc), 4),
+        "winner_logloss": round(
+            float(log_loss(actual_home, np.clip(p_home, 1e-4, 1 - 1e-4))), 4),
+    }
+
+
+# --------------------------------------------------------- vs. the market
+
+
+def _dayblock_roi_ci(days, profit, n_boot, seed=0):
+    """Day-block bootstrap 95% CI for ROI (mean profit per bet): resample whole
+    days, since a slate's bets share weather/park/pitcher context."""
+    rng = np.random.default_rng(seed)
+    uniq = pd.unique(days)
+    idx_by_day = {d: np.flatnonzero(days == d) for d in uniq}
+    rois = []
+    for _ in range(n_boot):
+        take = rng.choice(uniq, size=len(uniq), replace=True)
+        idx = np.concatenate([idx_by_day[d] for d in take])
+        if len(idx):
+            rois.append(profit[idx].mean())
+    if not rois:
+        return float("nan"), float("nan")
+    lo, hi = np.percentile(rois, [2.5, 97.5])
+    return lo, hi
+
+
+def _market_consensus(store, api, line):
+    """Per (Date, PlayerId): de-vig each book's two-sided price to a fair
+    P(over), then keep the consensus (median) fair prob plus the best (most
+    generous) over/under price across books for ROI line-shopping."""
+    m = store[(store["Market"] == api) & ((store["Line"] - line).abs() < 1e-6)]
+    recs = []
+    for _, r in m.iterrows():
+        fo, hold = O.devig_two_way(r["OverPrice"], r["UnderPrice"])
+        if np.isnan(fo):
+            continue
+        recs.append((r["Date"], r["PlayerId"], fo, hold,
+                     r["OverPrice"], r["UnderPrice"]))
+    cols = ["Date", "PlayerId", "fair", "hold", "best_over", "best_under",
+            "n_books"]
+    if not recs:
+        return pd.DataFrame(columns=cols)
+    md = pd.DataFrame(recs, columns=["Date", "PlayerId", "fair", "hold",
+                                     "over", "under"])
+    return md.groupby(["Date", "PlayerId"], dropna=False).agg(
+        fair=("fair", "median"), hold=("hold", "median"),
+        best_over=("over", "max"), best_under=("under", "max"),
+        n_books=("fair", "size")).reset_index()
+
+
+def section_market(results, year, store_path, n_boot):
+    print("\n=== 9. Model vs. the market ===")
+    store = O.load_odds(store_path, year=year)
+    if store.empty:
+        print(f"  No odds captured for {year} (store: {store_path}).")
+        print("  Run `python Scripts/scrape_odds.py` near game time to start "
+              "collecting closing\n  lines; this section grades the model "
+              "against them as they accrue. Everything\n  above is model vs. a "
+              "naive base rate — this is the only section that asks whether\n"
+              "  the edge survives a real sportsbook price.")
+        return
+    n_days = store["Date"].nunique()
+    if n_days < 15:
+        print(f"  WARNING: the odds store covers only {n_days} day(s). The "
+              f"day-block bootstrap\n  resamples whole days, so with this few "
+              f"the ROI confidence intervals collapse\n  toward the point "
+              f"estimate (with 1 day they ARE the point estimate). Nothing\n"
+              f"  below is statistically meaningful until ~15+ days of lines "
+              f"accrue — treat it\n  as anecdote.")
+    rows = []
+    for name, meta in O.PROP_MARKET.items():
+        r = results[name]
+        model = pd.DataFrame({"Date": pd.to_datetime(r["d"]).date,
+                              "PlayerId": pd.to_numeric(r["pid"]),
+                              "p": r["p"], "y": r["y"]})
+        cons = _market_consensus(store, meta["api"], meta["line"])
+        if cons.empty:
+            continue
+        cons["PlayerId"] = pd.to_numeric(cons["PlayerId"], errors="coerce")
+        j = model.merge(cons, on=["Date", "PlayerId"], how="inner")
+        if len(j) < 20:
+            continue
+        yv = j["y"].to_numpy()
+        mp = np.clip(j["p"].to_numpy(), 1e-4, 1 - 1e-4)
+        fq = np.clip(j["fair"].to_numpy(), 1e-4, 1 - 1e-4)
+        both = len(np.unique(yv)) > 1
+        m_ll = log_loss(yv, mp) if both else float("nan")
+        k_ll = log_loss(yv, fq) if both else float("nan")
+        # flat 1u on every side the model prices +EV, at the best book price,
+        # settled at the real outcome
+        profit, bdays = [], []
+        for _, row in j.iterrows():
+            side, _ev = O.pick_side(row["p"], row["best_over"], row["best_under"])
+            if side is None:
+                continue
+            price = row["best_over"] if side == "over" else row["best_under"]
+            won = (row["y"] == 1) if side == "over" else (row["y"] == 0)
+            profit.append(O.settle(price, bool(won)))
+            bdays.append(row["Date"])
+        if profit:
+            profit, days = np.array(profit), np.array(bdays)
+            lo, hi = _dayblock_roi_ci(days, profit, n_boot)
+            roi_s = f"{profit.mean():+.1%} [{lo:+.1%},{hi:+.1%}]"
+        else:
+            roi_s = "—"
+        holds = j["hold"].dropna()
+        rows.append({
+            "prop": name, "events": len(j),
+            "med hold": f"{holds.median():.1%}" if len(holds) else "—",
+            "model ll": f"{m_ll:.4f}" if both else "—",
+            "market ll": f"{k_ll:.4f}" if both else "—",
+            "model<mkt": ("yes" if (both and m_ll < k_ll) else "no"),
+            "+EV bets": len(profit),
+            "flat ROI [95% CI]": roi_s,
+        })
+    if not rows:
+        print("  Odds present, but none matched the holdout predictions on "
+              "(date, player).\n  Check that scraped player names resolved to "
+              "PlayerIds (Scripts/scrape_odds.py).")
+        return
+    print(pd.DataFrame(rows).to_string(index=False))
+    print("  'model ll' vs 'market ll': log loss on the SAME events (de-vigged "
+          "market as the\n  forecast) — lower wins. If the market is sharper, "
+          "base-rate lift is not an edge.")
+    print("  'flat ROI' bets 1u on every side the model prices +EV at the best "
+          "book price and\n  settles at the outcome. Negative = the vig eats "
+          "the edge.")
+
+
+# ------------------------------------------------ in-season recalibration
+
+
+def section_inseason(results, min_n=300):
+    print("\n=== 10. In-season recalibration (drift guard) ===")
+    rows, n_better = [], 0
+    for name, r in results.items():
+        corrected, applied, order = R.inseason_correct(
+            r["d"], r["p"], r["y"], min_n=min_n)
+        y, p, m = r["y"][order], r["p"][order], applied
+        if m.sum() < 50 or len(np.unique(y[m])) < 2:
+            rows.append({"prop": name, "corrected n": int(m.sum()),
+                         "logloss raw": "-", "logloss recal": "-",
+                         "ll gain": "-", "drift raw": "-",
+                         "drift recal": "-", "verdict": "n/a"})
+            continue
+        ll_raw = log_loss(y[m], np.clip(p[m], 1e-4, 1 - 1e-4))
+        ll_rec = log_loss(y[m], corrected[m])
+        better = ll_rec < ll_raw - 1e-6
+        n_better += int(better)
+        rows.append({"prop": name, "corrected n": int(m.sum()),
+                     "logloss raw": f"{ll_raw:.4f}",
+                     "logloss recal": f"{ll_rec:.4f}",
+                     "ll gain": f"{ll_raw - ll_rec:+.4f}",
+                     "drift raw": f"{(y[m].mean() - p[m].mean()) * 100:+.2f}",
+                     "drift recal": f"{(y[m].mean() - corrected[m].mean()) * 100:+.2f}",
+                     "verdict": "better" if better else "worse/flat"})
+    print(pd.DataFrame(rows).to_string(index=False))
+    print(f"  A per-prop log-odds shift, refit ONLY on in-season games before "
+          f"each date (after\n  {min_n} games of history accrue) - strictly "
+          f"causal. 'll gain' > 0 means the drift\n  guard helped; 'drift' "
+          f"(actual - predicted, points) should move toward 0. Helped "
+          f"{n_better}/{len(rows)} props.")
+    print("  If this consistently wins, enable it in serving: "
+          "`python Model/predict.py --recal`\n  (the daily retrain refreshes "
+          "the stored offset with all in-season data through today).")
+
+
+# ----------------------------------------------------- baseline tracking
+
+
+def prop_summary(results):
+    """Flat, JSON-able headline scalars per prop for the --set-baseline diff:
+    AUC and logloss edge (higher = better), ECE (lower = better), and the
+    daily top-10 hit rate (higher = better)."""
+    s = {}
+    for name, r in results.items():
+        day = pd.DataFrame({"d": r["d"], "p": r["p"], "y": r["y"]})
+        top10 = day.sort_values("p", ascending=False).groupby(
+            "d").head(10)["y"].mean()
+        s[f"{name}_auc"] = round(float(r["auc"]), 4)
+        s[f"{name}_edge"] = round(float(r["edge"]), 4)
+        s[f"{name}_ece"] = round(ece(r["p"], r["y"]), 4)
+        s[f"{name}_top10"] = round(float(top10), 4)
+    return s
+
+
+def verdict(metric, was, now):
+    """better / worse / within-noise for one metric, honoring its direction.
+    For dispersion-type metrics, "better" means moving closer to the ideal
+    1.0. A delta inside the metric's NOISE_BAND is "within noise" — retrain
+    jitter alone moves it that much, so it must not drive a keep/revert."""
+    band = noise_band(metric)
+    if any(metric.endswith(s) for s in TARGET_ONE):
+        was_d, now_d = abs(was - 1.0), abs(now - 1.0)
+        if abs(now_d - was_d) <= band:
+            return "within noise"
+        return "better" if now_d < was_d else "worse"
+    delta = now - was
+    if abs(delta) <= band:
+        return "within noise"
+    lower = any(metric.endswith(s) for s in LOWER_BETTER)
+    return "better" if (delta < 0) == lower else "worse"
+
+
+def handle_baseline(summary, year, set_baseline, select=False):
+    """Save this run's headline metrics as the baseline, or (default) diff the
+    current run against a saved one and report what improved / regressed.
+    Selection mode keeps its own baseline file, so iterating on 2025 never
+    collides with the confirm-only 2026 snapshot."""
+    tag = "select_" if select else ""
+    base_path = ART / f"eval_baseline_{tag}{year}.json"
+    if set_baseline:
+        base_path.write_text(json.dumps(summary, indent=2))
+        print("\n=== Baseline set ===")
+        print(f"  snapshotted {len(summary)} metrics -> {base_path.name}")
+        print("  Re-run without --set-baseline after a change to see the diff.")
+        return
+
+    print("\n=== 11. Change vs baseline ===")
+    if not base_path.exists():
+        print(f"  No baseline for {year} yet. Run with --set-baseline to "
+              f"snapshot this\n  model, then re-run after a change to see what "
+              f"moved.")
+        return
+    base = json.loads(base_path.read_text())
+    rows = []
+    for k in summary:
+        if k not in base:
+            continue
+        was, now = float(base[k]), float(summary[k])
+        rows.append({"metric": k, "baseline": round(was, 4),
+                     "now": round(now, 4), "delta": f"{now - was:+.4f}",
+                     "band": noise_band(k),
+                     "result": verdict(k, was, now)})
+    print(f"  (baseline: {base_path.name})")
+    print(pd.DataFrame(rows).to_string(index=False))
+    n_better = sum(1 for r in rows if r["result"] == "better")
+    n_worse = sum(1 for r in rows if r["result"] == "worse")
+    print(f"\n  {n_better} better, {n_worse} worse, "
+          f"{len(rows) - n_better - n_worse} within noise.")
+    print("  'band' is the retrain-to-retrain jitter for that metric type; "
+          "only deltas\n  beyond it say anything about the change. A real "
+          "improvement should move\n  several related metrics beyond their "
+          "bands, not one metric barely past it.")
+    new = [k for k in summary if k not in base]
+    missing = [k for k in base if k not in summary]
+    if new:
+        print(f"  new since baseline ({len(new)}): {', '.join(new)}")
+    if missing:
+        print(f"  in baseline but not reported now ({len(missing)}): "
+              f"{', '.join(missing)}  (re-run --set-baseline to refresh)")
 
 
 # ------------------------------------------------------------------- main
@@ -376,16 +690,57 @@ def main():
                     help="prop for the threshold/segment sections")
     ap.add_argument("--boot", type=int, default=400,
                     help="bootstrap resamples (lower = faster)")
+    ap.add_argument("--set-baseline", action="store_true",
+                    help="snapshot this run's headline metrics as the baseline "
+                         "to diff future runs against")
+    ap.add_argument("--select", action="store_true",
+                    help="(default) score the SELECTION suite "
+                         "(models_bt.joblib: train<=2023, cal 2024) on its "
+                         "2025 test year. Iterate here.")
+    ap.add_argument("--confirm", action="store_true",
+                    help="score the SHIPPING suite (models.joblib) on the "
+                         "2026 confirm-only holdout. Use once per finished "
+                         "change, not to iterate.")
+    ap.add_argument("--odds", default=str(O.DEFAULT_STORE),
+                    help="odds store CSV for the vs-market section "
+                         "(Scripts/scrape_odds.py writes it)")
     args = ap.parse_args()
+    if args.select and args.confirm:
+        sys.exit("--select and --confirm are mutually exclusive")
+    select = not args.confirm
 
-    art = joblib.load(ART / "models.joblib")
+    if select:
+        art_path = ART / "models_bt.joblib"
+        if not art_path.exists():
+            sys.exit("no selection artifacts found — run "
+                     "`python Model/train.py --select` (or a plain train.py "
+                     "run) first")
+        art = joblib.load(art_path)
+        if args.year != 2026 and args.year != 2025:
+            print(f"(the default run scores the selection suite on its 2025 "
+                  f"test year; ignoring --year {args.year}. For the shipping "
+                  f"suite use --confirm.)")
+        args.year = 2025
+        print("*** SELECTION mode (default): train<=2023, cal 2024, scored "
+              "on 2025. Iterate\n*** freely — 2026 stays untouched until you "
+              "confirm a finished change there\n*** once, with --confirm. ***")
+    else:
+        art = joblib.load(ART / "models.joblib")
+        if args.year <= 2024:
+            print("*** WARNING: training year -> in-sample, inflated numbers ***")
+        elif args.year == 2025:
+            print("*** NOTE: calibration year -> mildly optimistic numbers "
+                  "(early stop, blend\n*** weights and isotonic all fit on "
+                  "2025). For honest 2025 numbers use the\n*** default "
+                  "(selection) run. ***")
+        else:
+            print("*** CONFIRM mode: 2026 is the confirm-only holdout. Use "
+                  "this to confirm a\n*** finished change once — iterating "
+                  "against these numbers quietly overfits\n*** the holdout. "
+                  "Day-to-day, run without --confirm (selection suite, "
+                  "2025). ***")
     frames = joblib.load(ART / "frames.joblib")
     bf, sf, gf = frames["bf"], frames["sf"], frames["gf"]
-
-    if args.year <= 2024:
-        print("*** WARNING: training year -> in-sample, inflated numbers ***")
-    elif args.year == 2025:
-        print("*** NOTE: calibration year -> mildly optimistic numbers ***")
 
     bf_y = bf[(bf["Season"] == args.year) & ~bf["ShortGame"].fillna(False)]
     X = prep(bf_y, art["bat_cols"], art["cat_levels"])
@@ -399,6 +754,7 @@ def main():
         results[name] = {
             "p": p, "y": y, "d": bf_y["Date"].to_numpy(),
             "g": bf_y["GamePk"].to_numpy(),
+            "pid": bf_y["PlayerId"].to_numpy(),
             "auc": roc_auc_score(y, p),
             "edge": log_loss(y, base) - log_loss(y, p),
         }
@@ -410,11 +766,23 @@ def main():
     section_segments(bf_y, results, args.prop)
     section_concentration(results)
 
+    summary = prop_summary(results)
+
     sf_y = sf[(sf["Season"] == args.year) & ~sf["ShortGame"].fillna(False)]
-    section_strikeouts(sf_y, art)
+    summary.update(section_strikeouts(sf_y, art))
 
     gf_y = gf[gf["Season"] == args.year].dropna(subset=["total_runs"])
-    section_games(gf_y, art)
+    summary.update(section_games(gf_y, art))
+
+    if select:
+        print("\n=== 9. Model vs. the market === (skipped in selection mode: "
+              "no odds store\n  exists for 2025, and market grading belongs "
+              "to the --confirm run anyway)")
+    else:
+        section_market(results, args.year, args.odds, args.boot)
+    section_inseason(results)
+
+    handle_baseline(summary, args.year, args.set_baseline, select=select)
 
     print("""
 How to read this:
@@ -426,7 +794,18 @@ How to read this:
   - Section 4 catches environment drift the models can't see (juiced ball,
     hot summer). Consistent positive rows = consider recalibrating in-season.
   - Sections 7-8 dispersion: if the index is well above 1.00, Poisson-based
-    P(over) is overconfident at extreme lines - shade those probabilities.""")
+    P(over) is overconfident at extreme lines - shade those probabilities.
+  - Section 9 is the real-money test: model vs. de-vigged sportsbook prices on
+    the same events, plus flat-stake ROI. Needs an odds store (scrape_odds.py);
+    everything above only beats a naive base rate.
+  - Section 10 asks whether a strictly-causal in-season bias shift would beat
+    the frozen model as the environment drifts (a growing Section-4 miss).
+  - Section 11 diffs this run against the --set-baseline snapshot. Deltas
+    inside each metric's noise band (retrain jitter) are "within noise" —
+    only movement beyond the band says a change did anything. Dispersion
+    counts as "better" when it moves toward 1.0.
+  - The default run scores the selection suite on 2025 — iterate here.
+    Look at 2026 (--confirm) only to confirm a finished change.""")
 
 
 if __name__ == "__main__":

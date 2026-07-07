@@ -1,16 +1,31 @@
-# regenerable data — Scripts/update_all.py rebuilds everything in Data/
-Data/
+# regenerable data — Scripts/update_all.py rebuilds everything in Data/;
+# the schema doc stays committed
+Data/*
+!Data/GLOSSARY.md
 Logs/
+*.log
 Predictions/
 
 # trained model binaries are large and regenerable (Model/train.py);
 # the small JSONs (metrics.json, eval baselines) stay committed as
 # evidence of results
-Model/artifacts/*.joblib
+Model/artifacts/*
+!Model/artifacts/*.json
+*.joblib
+*.pkl
+*.pickle
+*.pt
+*.h5
+*.onnx
 
 # python
 __pycache__/
 *.pyc
+
+# local/env files
+.venv/
+venv/
+.env
 
 # local tooling
 .claude/

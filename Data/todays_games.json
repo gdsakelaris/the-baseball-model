@@ -1,165 +1,127 @@
 {
- "scraped_at": "2026-07-04T20:13:50",
- "date": "2026-07-04",
+ "scraped_at": "2026-07-06T17:22:45",
+ "date": "2026-07-06",
  "games": [
   {
-   "date": "2026-07-04",
-   "away_team": "BAL",
-   "home_team": "CIN",
-   "venue": "Great American Ball Park",
+   "date": "2026-07-06",
+   "away_team": "NYY",
+   "home_team": "TB",
+   "venue": "Tropicana Field",
    "day_night": "night",
-   "away_starter": 687064,
-   "home_starter": 668881,
+   "away_starter": 693645,
+   "home_starter": 643377,
    "away_lineup": [
     [
-     683002,
+     663757,
      1
     ],
     [
-     668939,
+     700250,
      2
     ],
     [
-     621493,
+     502671,
      3
     ],
     [
-     624413,
+     641355,
      4
     ],
     [
-     694212,
+     691176,
      5
     ],
     [
-     681297,
+     665862,
      6
     ],
     [
-     665750,
+     676609,
      7
     ],
     [
-     702616,
+     641857,
      8
     ],
     [
-     677942,
+     669224,
      9
     ]
    ],
    "home_lineup": [
     [
-     682829,
+     650490,
      1
     ],
     [
-     701398,
+     666018,
      2
     ],
     [
-     668709,
+     691406,
      3
     ],
     [
-     553993,
+     656775,
      4
     ],
     [
-     663993,
+     676356,
      5
     ],
     [
-     668715,
+     802415,
      6
     ],
     [
-     624431,
+     663743,
      7
     ],
     [
-     670770,
+     680700,
      8
     ],
     [
-     680574,
+     670764,
      9
     ]
    ],
    "names": {
-    "687064": "Brandon Young",
-    "668881": "Hunter Greene",
-    "683002": "Gunnar Henderson",
-    "668939": "Adley Rutschman",
-    "621493": "Taylor Ward",
-    "624413": "Pete Alonso",
-    "694212": "Samuel Basallo",
-    "681297": "Colton Cowser",
-    "665750": "Leody Taveras",
-    "702616": "Jackson Holliday",
-    "677942": "Blaze Alexander",
-    "682829": "Elly De La Cruz",
-    "701398": "Sal Stewart",
-    "668709": "JJ Bleday",
-    "553993": "Eugenio Su\u00e1rez",
-    "663993": "Nathaniel Lowe",
-    "668715": "Spencer Steer",
-    "624431": "Jose Trevino",
-    "670770": "TJ Friedl",
-    "680574": "Matt McLain"
+    "693645": "Cam Schlittler",
+    "643377": "Griffin Jax",
+    "663757": "Trent Grisham",
+    "700250": "Ben Rice",
+    "502671": "Paul Goldschmidt",
+    "641355": "Cody Bellinger",
+    "691176": "Jasson Dom\u00ednguez",
+    "665862": "Jazz Chisholm Jr.",
+    "676609": "Jos\u00e9 Caballero",
+    "641857": "Ryan McMahon",
+    "669224": "Austin Wells",
+    "650490": "Yandy D\u00edaz",
+    "666018": "Jonathan Aranda",
+    "691406": "Junior Caminero",
+    "656775": "Cedric Mullins",
+    "676356": "Jonny DeLuca",
+    "802415": "Chandler Simpson",
+    "663743": "Nick Fortes",
+    "680700": "Richie Palacios",
+    "670764": "Taylor Walls"
    },
-   "temp": 89.0,
-   "wind_speed": 10.0,
-   "wind_dir": "Out To Lf",
-   "condition": "Clear"
+   "temp": 72.0,
+   "wind_speed": 0.0,
+   "wind_dir": "Calm",
+   "condition": "Dome"
   },
   {
-   "date": "2026-07-04",
-   "away_team": "TB",
-   "home_team": "HOU",
-   "venue": "Daikin Park",
+   "date": "2026-07-06",
+   "away_team": "HOU",
+   "home_team": "WSH",
+   "venue": "Nationals Park",
    "day_night": "night",
-   "away_starter": 656876,
-   "home_starter": 686613,
+   "away_starter": 681347,
+   "home_starter": 571945,
    "away_lineup": [
-    [
-     666018,
-     1
-    ],
-    [
-     691406,
-     2
-    ],
-    [
-     656775,
-     3
-    ],
-    [
-     668723,
-     4
-    ],
-    [
-     683748,
-     5
-    ],
-    [
-     676356,
-     6
-    ],
-    [
-     680700,
-     7
-    ],
-    [
-     670764,
-     8
-    ],
-    [
-     676439,
-     9
-    ]
-   ],
-   "home_lineup": [
     [
      514888,
      1
@@ -189,26 +151,55 @@
      7
     ],
     [
-     666211,
+     669699,
      8
     ],
     [
-     669397,
+     694728,
+     9
+    ]
+   ],
+   "home_lineup": [
+    [
+     695578,
+     1
+    ],
+    [
+     671277,
+     2
+    ],
+    [
+     678554,
+     3
+    ],
+    [
+     682928,
+     4
+    ],
+    [
+     686611,
+     5
+    ],
+    [
+     695734,
+     6
+    ],
+    [
+     696285,
+     7
+    ],
+    [
+     686452,
+     8
+    ],
+    [
+     683083,
      9
     ]
    ],
    "names": {
-    "656876": "Drew Rasmussen",
-    "686613": "Hunter Brown",
-    "666018": "Jonathan Aranda",
-    "691406": "Junior Caminero",
-    "656775": "Cedric Mullins",
-    "668723": "Ryan Vilade",
-    "683748": "Victor Mesa Jr.",
-    "676356": "Jonny DeLuca",
-    "680700": "Richie Palacios",
-    "670764": "Taylor Walls",
-    "676439": "Hunter Feduccia",
+    "681347": "Mike Burrows",
+    "571945": "Miles Mikolas",
     "514888": "Jose Altuve",
     "670541": "Yordan Alvarez",
     "670623": "Isaac Paredes",
@@ -216,134 +207,181 @@
     "664774": "LaMonte Wade Jr.",
     "701358": "Cam Smith",
     "673237": "Yainer Diaz",
-    "666211": "Taylor Trammell",
-    "669397": "Nick Allen"
+    "669699": "Braden Shewmake",
+    "694728": "Brice Matthews",
+    "695578": "James Wood",
+    "671277": "Luis Garc\u00eda Jr.",
+    "678554": "Curtis Mead",
+    "682928": "CJ Abrams",
+    "686611": "Dylan Crews",
+    "695734": "Daylen Lile",
+    "696285": "Jacob Young",
+    "686452": "Drew Millas",
+    "683083": "Nasim Nu\u00f1ez"
    },
-   "temp": 72.0,
-   "wind_speed": 0.0,
-   "wind_dir": "Calm",
-   "condition": "Dome"
+   "temp": 85.0,
+   "wind_speed": 9.0,
+   "wind_dir": "In From Rf",
+   "condition": "Rain"
   },
   {
-   "date": "2026-07-04",
-   "away_team": "CWS",
-   "home_team": "CLE",
-   "venue": "Progressive Field",
+   "date": "2026-07-06",
+   "away_team": "NYM",
+   "home_team": "ATL",
+   "venue": "Truist Park",
    "day_night": "night",
-   "away_starter": 680732,
-   "home_starter": 800048,
+   "away_starter": 642547,
+   "home_starter": 625643,
    "away_lineup": [
     [
-     678246,
+     805999,
      1
     ],
     [
-     545341,
+     665742,
      2
     ],
     [
-     805367,
+     666182,
      3
     ],
     [
-     695657,
+     596019,
      4
     ],
     [
-     678577,
+     701807,
      5
     ],
     [
-     695731,
+     676724,
      6
     ],
     [
-     682668,
+     682626,
      7
     ],
     [
-     671976,
+     683146,
      8
     ],
     [
-     691011,
+     677595,
      9
     ]
    ],
    "home_lineup": [
     [
-     683953,
+     671739,
      1
     ],
     [
-     800050,
+     645277,
      2
     ],
     [
-     700932,
+     621566,
      3
     ],
     [
-     696135,
+     686948,
      4
     ],
     [
-     677587,
+     643289,
      5
     ],
     [
-     694876,
+     642086,
      6
     ],
     [
-     682177,
+     663586,
      7
     ],
     [
-     595978,
+     573262,
      8
     ],
     [
-     680757,
+     805347,
      9
     ]
    ],
    "names": {
-    "680732": "Sean Burke",
-    "800048": "Parker Messick",
-    "678246": "Miguel Vargas",
-    "545341": "Randal Grichuk",
-    "805367": "Chase Meidroth",
-    "695657": "Colson Montgomery",
-    "678577": "Junior Perez",
-    "695731": "Braden Montgomery",
-    "682668": "Luisangel Acu\u00f1a",
-    "671976": "Tristan Peters",
-    "691011": "Drew Romo",
-    "683953": "Travis Bazzana",
-    "800050": "Chase DeLauter",
-    "700932": "Kyle Manzardo",
-    "696135": "Kahlil Watson",
-    "677587": "Brayan Rocchio",
-    "694876": "Cooper Ingle",
-    "682177": "Daniel Schneemann",
-    "595978": "Austin Hedges",
-    "680757": "Steven Kwan"
+    "642547": "Freddy Peralta",
+    "625643": "Reynaldo L\u00f3pez",
+    "805999": "A.J. Ewing",
+    "665742": "Juan Soto",
+    "666182": "Bo Bichette",
+    "596019": "Francisco Lindor",
+    "701807": "Carson Benge",
+    "676724": "Jared Young",
+    "682626": "Francisco Alvarez",
+    "683146": "Brett Baty",
+    "677595": "Ronny Mauricio",
+    "671739": "Michael Harris II",
+    "645277": "Ozzie Albies",
+    "621566": "Matt Olson",
+    "686948": "Drake Baldwin",
+    "643289": "Mauricio Dub\u00f3n",
+    "642086": "Dominic Smith",
+    "663586": "Austin Riley",
+    "573262": "Mike Yastrzemski",
+    "805347": "Jim Jarvis"
    },
-   "temp": 81.0,
-   "wind_speed": 6.0,
-   "wind_dir": "In From Cf",
+   "temp": 85.0,
+   "wind_speed": 9.0,
+   "wind_dir": "R To L",
    "condition": "Partly Cloudy"
   },
   {
-   "date": "2026-07-04",
-   "away_team": "STL",
-   "home_team": "CHC",
-   "venue": "Wrigley Field",
+   "date": "2026-07-06",
+   "away_team": "MIL",
+   "home_team": "STL",
+   "venue": "Busch Stadium",
    "day_night": "night",
-   "away_starter": 681517,
-   "home_starter": 684007,
+   "away_starter": 675660,
+   "home_starter": 669160,
    "away_lineup": [
+    [
+     592885,
+     1
+    ],
+    [
+     694192,
+     2
+    ],
+    [
+     668930,
+     3
+    ],
+    [
+     661388,
+     4
+    ],
+    [
+     641343,
+     5
+    ],
+    [
+     669003,
+     6
+    ],
+    [
+     686217,
+     7
+    ],
+    [
+     806198,
+     8
+    ],
+    [
+     666152,
+     9
+    ]
+   ],
+   "home_lineup": [
     [
      802139,
      1
@@ -357,215 +395,215 @@
      3
     ],
     [
-     676475,
+     676369,
      4
-    ],
-    [
-     691026,
-     5
     ],
     [
      665877,
+     5
+    ],
+    [
+     691026,
      6
-    ],
-    [
-     663457,
-     7
-    ],
-    [
-     686780,
-     8
     ],
     [
      701675,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     691718,
-     1
-    ],
-    [
-     608324,
-     2
-    ],
-    [
-     683737,
-     3
-    ],
-    [
-     673548,
-     4
-    ],
-    [
-     664023,
-     5
-    ],
-    [
-     663538,
-     6
-    ],
-    [
-     624424,
      7
     ],
     [
-     665804,
+     691458,
      8
     ],
     [
-     621020,
+     686780,
      9
     ]
    ],
    "names": {
-    "681517": "Kyle Leahy",
-    "684007": "Shota Imanaga",
+    "675660": "Shane Drohan",
+    "669160": "Dustin May",
+    "592885": "Christian Yelich",
+    "694192": "Jackson Chourio",
+    "668930": "Brice Turang",
+    "661388": "William Contreras",
+    "641343": "Jake Bauers",
+    "669003": "Garrett Mitchell",
+    "686217": "Sal Frelick",
+    "806198": "Cooper Pratt",
+    "666152": "David Hamilton",
     "802139": "JJ Wetherholt",
     "671056": "Iv\u00e1n Herrera",
     "691023": "Jordan Walker",
-    "676475": "Alec Burleson",
-    "691026": "Masyn Winn",
+    "676369": "Nelson Vel\u00e1zquez",
     "665877": "Jos\u00e9 Ferm\u00edn",
-    "663457": "Lars Nootbaar",
-    "686780": "Pedro Pag\u00e9s",
+    "691026": "Masyn Winn",
     "701675": "Nathan Church",
-    "691718": "Pete Crow-Armstrong",
-    "608324": "Alex Bregman",
-    "683737": "Michael Busch",
-    "673548": "Seiya Suzuki",
-    "664023": "Ian Happ",
-    "663538": "Nico Hoerner",
-    "624424": "Michael Conforto",
-    "665804": "Miguel Amaya",
-    "621020": "Dansby Swanson"
+    "691458": "Blaze Jordan",
+    "686780": "Pedro Pag\u00e9s"
    },
-   "temp": 71.0,
-   "wind_speed": 6.0,
-   "wind_dir": "In From Cf",
-   "condition": "Rain"
+   "temp": 86.0,
+   "wind_speed": 13.0,
+   "wind_dir": "In From Lf",
+   "condition": "Partly Cloudy"
   },
   {
-   "date": "2026-07-04",
-   "away_team": "NYM",
-   "home_team": "ATL",
-   "venue": "Truist Park",
+   "date": "2026-07-06",
+   "away_team": "AZ",
+   "home_team": "SD",
+   "venue": "Petco Park",
    "day_night": "night",
-   "away_starter": 640455,
-   "home_starter": 519242,
+   "away_starter": 694297,
+   "home_starter": 621111,
    "away_lineup": [
     [
-     596019,
+     606466,
      1
     ],
     [
-     665742,
+     672695,
      2
     ],
     [
-     666182,
+     682998,
      3
     ],
     [
-     668901,
+     672515,
      4
     ],
     [
-     676572,
+     666971,
      5
     ],
     [
-     682626,
+     596146,
      6
     ],
     [
-     701807,
+     571448,
      7
     ],
     [
-     621438,
+     545121,
      8
     ],
     [
-     683146,
+     694371,
      9
     ]
    ],
    "home_lineup": [
     [
-     643289,
+     665487,
      1
     ],
     [
-     686948,
+     630105,
      2
     ],
     [
-     645277,
+     592518,
      3
     ],
     [
-     621566,
+     657757,
      4
     ],
     [
-     663586,
+     664034,
      5
     ],
     [
-     671739,
+     701538,
      6
     ],
     [
-     642201,
+     669392,
      7
     ],
     [
-     663698,
+     823550,
      8
     ],
     [
-     622761,
+     660710,
      9
     ]
    ],
    "names": {
-    "640455": "Sean Manaea",
-    "519242": "Chris Sale",
-    "596019": "Francisco Lindor",
-    "665742": "Juan Soto",
-    "666182": "Bo Bichette",
-    "668901": "Mark Vientos",
-    "676572": "Eric Wagaman",
-    "682626": "Francisco Alvarez",
-    "701807": "Carson Benge",
-    "621438": "Tyrone Taylor",
-    "683146": "Brett Baty",
-    "643289": "Mauricio Dub\u00f3n",
-    "686948": "Drake Baldwin",
-    "645277": "Ozzie Albies",
-    "621566": "Matt Olson",
-    "663586": "Austin Riley",
-    "671739": "Michael Harris II",
-    "642201": "Eli White",
-    "663698": "Joey Bart",
-    "622761": "Jorge Mateo"
+    "694297": "Brandon Pfaadt",
+    "621111": "Walker Buehler",
+    "606466": "Ketel Marte",
+    "672695": "Geraldo Perdomo",
+    "682998": "Corbin Carroll",
+    "672515": "Gabriel Moreno",
+    "666971": "Lourdes Gurriel Jr.",
+    "596146": "Max Kepler",
+    "571448": "Nolan Arenado",
+    "545121": "Ildemaro Vargas",
+    "694371": "Tommy Troy",
+    "665487": "Fernando Tatis Jr.",
+    "630105": "Jake Cronenworth",
+    "592518": "Manny Machado",
+    "657757": "Gavin Sheets",
+    "664034": "Ty France",
+    "701538": "Jackson Merrill",
+    "669392": "Samad Taylor",
+    "823550": "Sung-Mun Song",
+    "660710": "Rodolfo Dur\u00e1n"
    },
-   "temp": 87.0,
-   "wind_speed": 5.0,
-   "wind_dir": "In From Rf",
-   "condition": "Partly Cloudy"
+   "temp": 73.0,
+   "wind_speed": 14.0,
+   "wind_dir": "L To R",
+   "condition": "Clear"
   },
   {
-   "date": "2026-07-04",
-   "away_team": "SF",
-   "home_team": "COL",
-   "venue": "Coors Field",
+   "date": "2026-07-06",
+   "away_team": "TOR",
+   "home_team": "SF",
+   "venue": "Oracle Park",
    "day_night": "night",
-   "away_starter": 592662,
-   "home_starter": 807743,
+   "away_starter": 592332,
+   "home_starter": 694738,
    "away_lineup": [
+    [
+     664770,
+     1
+    ],
+    [
+     665489,
+     2
+    ],
+    [
+     672960,
+     3
+    ],
+    [
+     672386,
+     4
+    ],
+    [
+     662139,
+     5
+    ],
+    [
+     676391,
+     6
+    ],
+    [
+     682818,
+     7
+    ],
+    [
+     815873,
+     8
+    ],
+    [
+     665926,
+     9
+    ]
+   ],
+   "home_lineup": [
     [
      671218,
      1
@@ -603,7 +641,33 @@
      9
     ]
    ],
-   "home_lineup": [
+   "names": {
+    "592332": "Kevin Gausman",
+    "694738": "Landen Roupp",
+    "671218": "Heliot Ramos",
+    "650333": "Luis Arraez",
+    "669477": "Casey Schmitt",
+    "646240": "Rafael Devers",
+    "808982": "Jung Hoo Lee",
+    "642715": "Willy Adames",
+    "805811": "Bryce Eldridge",
+    "682674": "Victor Bericoto",
+    "606992": "Eric Haase"
+   },
+   "temp": 60.0,
+   "wind_speed": 22.0,
+   "wind_dir": "Out To Cf",
+   "condition": "Partly Cloudy"
+  },
+  {
+   "date": "2026-07-06",
+   "away_team": "COL",
+   "home_team": "LAD",
+   "venue": "Dodger Stadium",
+   "day_night": "night",
+   "away_starter": 607536,
+   "home_starter": 641778,
+   "away_lineup": [
     [
      650489,
      1
@@ -617,7 +681,7 @@
      3
     ],
     [
-     671289,
+     681198,
      4
     ],
     [
@@ -625,542 +689,25 @@
      5
     ],
     [
-     664983,
+     671289,
      6
     ],
     [
-     690924,
+     664983,
      7
-    ],
-    [
-     678662,
-     8
     ],
     [
      687859,
-     9
-    ]
-   ],
-   "names": {
-    "592662": "Robbie Ray",
-    "807743": "Sean Sullivan",
-    "671218": "Heliot Ramos",
-    "650333": "Luis Arraez",
-    "669477": "Casey Schmitt",
-    "646240": "Rafael Devers",
-    "808982": "Jung Hoo Lee",
-    "642715": "Willy Adames",
-    "805811": "Bryce Eldridge",
-    "682674": "Victor Bericoto",
-    "606992": "Eric Haase",
-    "650489": "Willi Castro",
-    "691720": "Kyle Karros",
-    "696100": "Hunter Goodman",
-    "671289": "Tyler Freeman",
-    "694249": "Cole Carrigg",
-    "664983": "Jake McCarthy",
-    "690924": "Braxton Fulford",
-    "678662": "Ezequiel Tovar",
-    "687859": "Troy Johnston"
-   },
-   "temp": 86.0,
-   "wind_speed": 12.0,
-   "wind_dir": "R To L",
-   "condition": "Partly Cloudy"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "PHI",
-   "home_team": "KC",
-   "venue": "Kauffman Stadium",
-   "day_night": "night",
-   "away_starter": 666200,
-   "home_starter": 608379,
-   "away_lineup": [
-    [
-     607208,
-     1
-    ],
-    [
-     656941,
-     2
-    ],
-    [
-     547180,
-     3
-    ],
-    [
-     669016,
-     4
-    ],
-    [
-     664761,
-     5
-    ],
-    [
-     681082,
-     6
-    ],
-    [
-     592663,
-     7
-    ],
-    [
-     687282,
      8
     ],
     [
-     702222,
+     678662,
      9
     ]
    ],
    "home_lineup": [
     [
-     695600,
-     1
-    ],
-    [
-     677951,
-     2
-    ],
-    [
-     657041,
-     3
-    ],
-    [
-     695506,
-     4
-    ],
-    [
-     679845,
-     5
-    ],
-    [
-     516782,
-     6
-    ],
-    [
-     686555,
-     7
-    ],
-    [
-     686681,
-     8
-    ],
-    [
-     686475,
-     9
-    ]
-   ],
-   "names": {
-    "666200": "Jes\u00fas Luzardo",
-    "608379": "Michael Wacha",
-    "607208": "Trea Turner",
-    "656941": "Kyle Schwarber",
-    "547180": "Bryce Harper",
-    "669016": "Brandon Marsh",
-    "664761": "Alec Bohm",
-    "681082": "Bryson Stott",
-    "592663": "J.T. Realmuto",
-    "687282": "Gabriel Rincones Jr.",
-    "702222": "Justin Crawford",
-    "695600": "Carter Jensen",
-    "677951": "Bobby Witt Jr.",
-    "657041": "Lane Thomas",
-    "695506": "Jac Caglianone",
-    "679845": "Nick Loftin",
-    "516782": "Starling Marte",
-    "686555": "Isaac Collins",
-    "686681": "Michael Massey",
-    "686475": "Tyler Tolbert"
-   },
-   "temp": 75.0,
-   "wind_speed": 7.0,
-   "wind_dir": "In From Lf",
-   "condition": "Partly Cloudy"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "BOS",
-   "home_team": "LAA",
-   "venue": "Angel Stadium",
-   "day_night": "night",
-   "away_starter": 543243,
-   "home_starter": 691951,
-   "away_lineup": [
-    [
-     678011,
-     1
-    ],
-    [
-     678882,
-     2
-    ],
-    [
-     677800,
-     3
-    ],
-    [
-     575929,
-     4
-    ],
-    [
-     702332,
-     5
-    ],
-    [
-     663853,
-     6
-    ],
-    [
-     680776,
-     7
-    ],
-    [
-     655316,
-     8
-    ],
-    [
-     657136,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     687263,
-     1
-    ],
-    [
-     694203,
-     2
-    ],
-    [
-     694384,
-     3
-    ],
-    [
-     624585,
-     4
-    ],
-    [
-     666139,
-     5
-    ],
-    [
-     666176,
-     6
-    ],
-    [
-     685133,
-     7
-    ],
-    [
-     622268,
-     8
-    ],
-    [
-     623168,
-     9
-    ]
-   ],
-   "names": {
-    "543243": "Sonny Gray",
-    "691951": "Sam Aldegheri",
-    "678011": "Anthony Seigler",
-    "678882": "Ceddanne Rafaela",
-    "677800": "Wilyer Abreu",
-    "575929": "Willson Contreras",
-    "702332": "Caleb Durbin",
-    "663853": "Romy Gonzalez",
-    "680776": "Jarren Duran",
-    "655316": "Andruw Monasterio",
-    "657136": "Connor Wong",
-    "687263": "Zach Neto",
-    "694203": "Denzer Guzman",
-    "694384": "Nolan Schanuel",
-    "624585": "Jorge Soler",
-    "666139": "Josh Lowe",
-    "666176": "Jo Adell",
-    "685133": "Wade Meckler",
-    "622268": "Donovan Walton",
-    "623168": "Tyler Heineman"
-   },
-   "temp": 78.0,
-   "wind_speed": 12.0,
-   "wind_dir": "Out To Cf",
-   "condition": "Partly Cloudy"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "MIA",
-   "home_team": "ATH",
-   "venue": "Sutter Health Park",
-   "day_night": "night",
-   "away_starter": 645261,
-   "home_starter": 650644,
-   "away_lineup": [
-    [
-     689414,
-     1
-    ],
-    [
-     669065,
-     2
-    ],
-    [
-     672640,
-     3
-    ],
-    [
-     669364,
-     4
-    ],
-    [
-     665052,
-     5
-    ],
-    [
-     683357,
-     6
-    ],
-    [
-     805300,
-     7
-    ],
-    [
-     691788,
-     8
-    ],
-    [
-     691594,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     701762,
-     1
-    ],
-    [
-     680869,
-     2
-    ],
-    [
-     671732,
-     3
-    ],
-    [
-     641680,
-     4
-    ],
-    [
-     666126,
-     5
-    ],
-    [
-     703607,
-     6
-    ],
-    [
-     811965,
-     7
-    ],
-    [
-     643446,
-     8
-    ],
-    [
-     675961,
-     9
-    ]
-   ],
-   "names": {
-    "645261": "Sandy Alcantara",
-    "650644": "Aaron Civale",
-    "689414": "Liam Hicks",
-    "669065": "Kyle Stowers",
-    "672640": "Otto Lopez",
-    "669364": "Xavier Edwards",
-    "665052": "Griffin Conine",
-    "683357": "Owen Caissie",
-    "805300": "Jakob Marsee",
-    "691788": "Joe Mack",
-    "691594": "Javier Sanoja",
-    "701762": "Nick Kurtz",
-    "680869": "Zack Gelof",
-    "671732": "Lawrence Butler",
-    "641680": "Jonah Heim",
-    "666126": "Carlos Cortes",
-    "703607": "Henry Bolte",
-    "811965": "Joshua Kuroda-Grauer",
-    "643446": "Jeff McNeil",
-    "675961": "Alika Williams"
-   },
-   "temp": 91.0,
-   "wind_speed": 17.0,
-   "wind_dir": "Out To Cf",
-   "condition": "Partly Cloudy"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "MIL",
-   "home_team": "AZ",
-   "venue": "Chase Field",
-   "day_night": "night",
-   "away_starter": 605540,
-   "home_starter": 518876,
-   "away_lineup": [
-    [
-     668930,
-     1
-    ],
-    [
-     592885,
-     2
-    ],
-    [
-     641343,
-     3
-    ],
-    [
-     661388,
-     4
-    ],
-    [
-     669003,
-     5
-    ],
-    [
-     683734,
-     6
-    ],
-    [
-     686217,
-     7
-    ],
-    [
-     806198,
-     8
-    ],
-    [
-     687401,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     606466,
-     1
-    ],
-    [
-     672695,
-     2
-    ],
-    [
-     682998,
-     3
-    ],
-    [
-     672515,
-     4
-    ],
-    [
-     680728,
-     5
-    ],
-    [
-     571448,
-     6
-    ],
-    [
-     596146,
-     7
-    ],
-    [
-     545121,
-     8
-    ],
-    [
-     694371,
-     9
-    ]
-   ],
-   "names": {
-    "605540": "Brandon Woodruff",
-    "518876": "Merrill Kelly",
-    "668930": "Brice Turang",
-    "592885": "Christian Yelich",
-    "641343": "Jake Bauers",
-    "661388": "William Contreras",
-    "669003": "Garrett Mitchell",
-    "683734": "Andrew Vaughn",
-    "686217": "Sal Frelick",
-    "806198": "Cooper Pratt",
-    "687401": "Joey Ortiz",
-    "606466": "Ketel Marte",
-    "672695": "Geraldo Perdomo",
-    "682998": "Corbin Carroll",
-    "672515": "Gabriel Moreno",
-    "680728": "Adrian Del Castillo",
-    "571448": "Nolan Arenado",
-    "596146": "Max Kepler",
-    "545121": "Ildemaro Vargas",
-    "694371": "Tommy Troy"
-   },
-   "temp": 72.0,
-   "wind_speed": 0.0,
-   "wind_dir": "Calm",
-   "condition": "Dome"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "SD",
-   "home_team": "LAD",
-   "venue": "Dodger Stadium",
-   "day_night": "night",
-   "away_starter": 593974,
-   "home_starter": 808967,
-   "away_lineup": [
-    [
-     665487,
-     1
-    ],
-    [
-     630105,
-     2
-    ],
-    [
-     592518,
-     3
-    ],
-    [
-     657757,
-     4
-    ],
-    [
-     664034,
-     5
-    ],
-    [
-     593428,
-     6
-    ],
-    [
-     701538,
-     7
-    ],
-    [
-     609280,
-     8
-    ],
-    [
-     669134,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     669242,
+     660271,
      1
     ],
     [
@@ -1188,484 +735,151 @@
      7
     ],
     [
-     687221,
+     500743,
      8
     ],
     [
-     690976,
+     687221,
      9
     ]
    ],
    "names": {
-    "593974": "Wandy Peralta",
-    "808967": "Yoshinobu Yamamoto",
-    "665487": "Fernando Tatis Jr.",
-    "630105": "Jake Cronenworth",
-    "592518": "Manny Machado",
-    "657757": "Gavin Sheets",
-    "664034": "Ty France",
-    "593428": "Xander Bogaerts",
-    "701538": "Jackson Merrill",
-    "609280": "Miguel Andujar",
-    "669134": "Luis Campusano",
-    "669242": "Tommy Edman",
+    "607536": "Kyle Freeland",
+    "641778": "Eric Lauer",
+    "650489": "Willi Castro",
+    "691720": "Kyle Karros",
+    "696100": "Hunter Goodman",
+    "681198": "TJ Rumfield",
+    "694249": "Cole Carrigg",
+    "671289": "Tyler Freeman",
+    "664983": "Jake McCarthy",
+    "687859": "Troy Johnston",
+    "678662": "Ezequiel Tovar",
+    "660271": "Shohei Ohtani",
     "681624": "Andy Pages",
     "518692": "Freddie Freeman",
     "605141": "Mookie Betts",
     "663656": "Kyle Tucker",
     "606192": "Teoscar Hern\u00e1ndez",
     "571970": "Max Muncy",
-    "687221": "Dalton Rushing",
-    "690976": "Alex Freeland"
+    "500743": "Miguel Rojas",
+    "687221": "Dalton Rushing"
    },
-   "temp": 73.0,
-   "wind_speed": 11.0,
+   "temp": 74.0,
+   "wind_speed": 10.0,
    "wind_dir": "Out To Rf",
+   "condition": "Clear"
+  },
+  {
+   "date": "2026-07-06",
+   "away_team": "PHI",
+   "home_team": "KC",
+   "venue": "Kauffman Stadium",
+   "day_night": "day",
+   "away_starter": 650911,
+   "home_starter": 702070,
+   "away_lineup": [
+    [
+     607208,
+     1
+    ],
+    [
+     656941,
+     2
+    ],
+    [
+     547180,
+     3
+    ],
+    [
+     664761,
+     4
+    ],
+    [
+     669016,
+     5
+    ],
+    [
+     624641,
+     6
+    ],
+    [
+     681082,
+     7
+    ],
+    [
+     592663,
+     8
+    ],
+    [
+     656537,
+     9
+    ]
+   ],
+   "home_lineup": [
+    [
+     657041,
+     1
+    ],
+    [
+     677951,
+     2
+    ],
+    [
+     521692,
+     3
+    ],
+    [
+     695506,
+     4
+    ],
+    [
+     679845,
+     5
+    ],
+    [
+     516782,
+     6
+    ],
+    [
+     686475,
+     7
+    ],
+    [
+     571912,
+     8
+    ],
+    [
+     668942,
+     9
+    ]
+   ],
+   "names": {
+    "650911": "Cristopher S\u00e1nchez",
+    "702070": "Noah Cameron",
+    "607208": "Trea Turner",
+    "656941": "Kyle Schwarber",
+    "547180": "Bryce Harper",
+    "664761": "Alec Bohm",
+    "669016": "Brandon Marsh",
+    "624641": "Edmundo Sosa",
+    "681082": "Bryson Stott",
+    "592663": "J.T. Realmuto",
+    "656537": "Derek Hill",
+    "657041": "Lane Thomas",
+    "677951": "Bobby Witt Jr.",
+    "521692": "Salvador Perez",
+    "695506": "Jac Caglianone",
+    "679845": "Nick Loftin",
+    "516782": "Starling Marte",
+    "686475": "Tyler Tolbert",
+    "571912": "Luke Maile",
+    "668942": "Josh Rojas"
+   },
+   "temp": 86.0,
+   "wind_speed": 8.0,
+   "wind_dir": "In From Rf",
    "condition": "Partly Cloudy"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "PIT",
-   "home_team": "WSH",
-   "venue": "Nationals Park",
-   "day_night": "day",
-   "away_starter": 677952,
-   "home_starter": 687223,
-   "away_lineup": [
-    [
-     804606,
-     1
-    ],
-    [
-     664040,
-     2
-    ],
-    [
-     668804,
-     3
-    ],
-    [
-     699013,
-     4
-    ],
-    [
-     656811,
-     5
-    ],
-    [
-     693304,
-     6
-    ],
-    [
-     663968,
-     7
-    ],
-    [
-     682997,
-     8
-    ],
-    [
-     680779,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     695578,
-     1
-    ],
-    [
-     671277,
-     2
-    ],
-    [
-     678554,
-     3
-    ],
-    [
-     682928,
-     4
-    ],
-    [
-     695734,
-     5
-    ],
-    [
-     686611,
-     6
-    ],
-    [
-     677588,
-     7
-    ],
-    [
-     686452,
-     8
-    ],
-    [
-     683083,
-     9
-    ]
-   ],
-   "names": {
-    "677952": "Braxton Ashcraft",
-    "687223": "Carson Palmquist",
-    "804606": "Konnor Griffin",
-    "664040": "Brandon Lowe",
-    "668804": "Bryan Reynolds",
-    "699013": "Esmerlyn Valdez",
-    "656811": "Ryan O'Hearn",
-    "693304": "Nick Gonzales",
-    "663968": "Jake Mangum",
-    "682997": "Tyler Callihan",
-    "680779": "Henry Davis",
-    "695578": "James Wood",
-    "671277": "Luis Garc\u00eda Jr.",
-    "678554": "Curtis Mead",
-    "682928": "CJ Abrams",
-    "695734": "Daylen Lile",
-    "686611": "Dylan Crews",
-    "677588": "Jos\u00e9 Tena",
-    "686452": "Drew Millas",
-    "683083": "Nasim Nu\u00f1ez"
-   },
-   "temp": 95.0,
-   "wind_speed": 9.0,
-   "wind_dir": "L To R",
-   "condition": "Partly Cloudy"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "MIN",
-   "home_team": "NYY",
-   "venue": "Yankee Stadium",
-   "day_night": "day",
-   "away_starter": 805673,
-   "home_starter": 694341,
-   "away_lineup": [
-    [
-     663616,
-     1
-    ],
-    [
-     621439,
-     2
-    ],
-    [
-     665019,
-     3
-    ],
-    [
-     605137,
-     4
-    ],
-    [
-     668904,
-     5
-    ],
-    [
-     686797,
-     6
-    ],
-    [
-     668952,
-     7
-    ],
-    [
-     807712,
-     8
-    ],
-    [
-     656577,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     663757,
-     1
-    ],
-    [
-     700250,
-     2
-    ],
-    [
-     641355,
-     3
-    ],
-    [
-     691176,
-     4
-    ],
-    [
-     683011,
-     5
-    ],
-    [
-     665862,
-     6
-    ],
-    [
-     641857,
-     7
-    ],
-    [
-     680474,
-     8
-    ],
-    [
-     645305,
-     9
-    ]
-   ],
-   "names": {
-    "805673": "Zebby Matthews",
-    "694341": "Brendan Beck",
-    "663616": "Trevor Larnach",
-    "621439": "Byron Buxton",
-    "665019": "Kody Clemens",
-    "605137": "Josh Bell",
-    "668904": "Royce Lewis",
-    "686797": "Brooks Lee",
-    "668952": "Ryan Kreidler",
-    "807712": "Luke Keaschall",
-    "656577": "Alex Jackson",
-    "663757": "Trent Grisham",
-    "700250": "Ben Rice",
-    "641355": "Cody Bellinger",
-    "691176": "Jasson Dom\u00ednguez",
-    "683011": "Anthony Volpe",
-    "665862": "Jazz Chisholm Jr.",
-    "641857": "Ryan McMahon",
-    "680474": "Max Schuemann",
-    "645305": "Ali S\u00e1nchez"
-   },
-   "temp": 92.0,
-   "wind_speed": 16.0,
-   "wind_dir": "Out To Rf",
-   "condition": "Partly Cloudy"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "DET",
-   "home_team": "TEX",
-   "venue": "Globe Life Field",
-   "day_night": "day",
-   "away_starter": 656427,
-   "home_starter": 615698,
-   "away_lineup": [
-    [
-     805808,
-     1
-    ],
-    [
-     693307,
-     2
-    ],
-    [
-     681481,
-     3
-    ],
-    [
-     682985,
-     4
-    ],
-    [
-     679529,
-     5
-    ],
-    [
-     690993,
-     6
-    ],
-    [
-     656716,
-     7
-    ],
-    [
-     701162,
-     8
-    ],
-    [
-     681546,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     592626,
-     1
-    ],
-    [
-     669701,
-     2
-    ],
-    [
-     673962,
-     3
-    ],
-    [
-     607043,
-     4
-    ],
-    [
-     696030,
-     5
-    ],
-    [
-     677649,
-     6
-    ],
-    [
-     694497,
-     7
-    ],
-    [
-     553869,
-     8
-    ],
-    [
-     670032,
-     9
-    ]
-   ],
-   "names": {
-    "656427": "Jack Flaherty",
-    "615698": "Cal Quantrill",
-    "805808": "Kevin McGonigle",
-    "693307": "Dillon Dingler",
-    "681481": "Kerry Carpenter",
-    "682985": "Riley Greene",
-    "679529": "Spencer Torkelson",
-    "690993": "Colt Keith",
-    "656716": "Zach McKinstry",
-    "701162": "Ben Malgeri",
-    "681546": "James Outman",
-    "592626": "Joc Pederson",
-    "669701": "Josh Smith",
-    "673962": "Josh Jung",
-    "607043": "Brandon Nimmo",
-    "696030": "Alejandro Osuna",
-    "677649": "Ezequiel Duran",
-    "694497": "Evan Carter",
-    "553869": "Elias D\u00edaz",
-    "670032": "Nicky Lopez"
-   },
-   "temp": 72.0,
-   "wind_speed": 0.0,
-   "wind_dir": "Calm",
-   "condition": "Dome"
-  },
-  {
-   "date": "2026-07-04",
-   "away_team": "TOR",
-   "home_team": "SEA",
-   "venue": "T-Mobile Park",
-   "day_night": "day",
-   "away_starter": 669456,
-   "home_starter": 669302,
-   "away_lineup": [
-    [
-     664770,
-     1
-    ],
-    [
-     665489,
-     2
-    ],
-    [
-     672960,
-     3
-    ],
-    [
-     662139,
-     4
-    ],
-    [
-     676391,
-     5
-    ],
-    [
-     682818,
-     6
-    ],
-    [
-     815873,
-     7
-    ],
-    [
-     678218,
-     8
-    ],
-    [
-     665926,
-     9
-    ]
-   ],
-   "home_lineup": [
-    [
-     641487,
-     1
-    ],
-    [
-     668227,
-     2
-    ],
-    [
-     686527,
-     3
-    ],
-    [
-     663728,
-     4
-    ],
-    [
-     647304,
-     5
-    ],
-    [
-     670042,
-     6
-    ],
-    [
-     702284,
-     7
-    ],
-    [
-     645302,
-     8
-    ],
-    [
-     806068,
-     9
-    ]
-   ],
-   "names": {
-    "669456": "Shane Bieber",
-    "669302": "Logan Gilbert",
-    "664770": "Nathan Lukes",
-    "665489": "Vladimir Guerrero Jr.",
-    "672960": "Kazuma Okamoto",
-    "662139": "Daulton Varsho",
-    "676391": "Ernie Clement",
-    "682818": "Yohendrick Pi\u00f1ango",
-    "815873": "Sean Keys",
-    "678218": "Brandon Valenzuela",
-    "665926": "Andr\u00e9s Gim\u00e9nez",
-    "641487": "J.P. Crawford",
-    "668227": "Randy Arozarena",
-    "686527": "Dominic Canzone",
-    "663728": "Cal Raleigh",
-    "647304": "Josh Naylor",
-    "670042": "Luke Raley",
-    "702284": "Cole Young",
-    "645302": "Victor Robles",
-    "806068": "Colt Emerson"
-   },
-   "temp": 72.0,
-   "wind_speed": 0.0,
-   "wind_dir": "Calm",
-   "condition": "Dome"
   }
  ]
 }

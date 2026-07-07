@@ -188,14 +188,12 @@ class App(tk.Tk):
             spec["away_lineup"] = [tuple(x) for x in spec.get("away_lineup", [])]
             spec["home_lineup"] = [tuple(x) for x in spec.get("home_lineup", [])]
             self.slate.append(spec)
-            n = len(spec["away_lineup"]) + len(spec["home_lineup"])
-            self.lb_slate.insert(
-                "end", f'{spec["date"]}  {spec["away_team"]} @ '
-                       f'{spec["home_team"]}  ({n} batters)')
+            self.lb_slate.insert("end", self._slate_row_text(spec))
         scraped = str(payload.get("scraped_at", ""))[:16].replace("T", " ")
         self.status.set(f"Auto-loaded {len(specs)} games from "
                         f"todays_games.json (scraped {scraped}). "
-                        f"Predict runs the whole slate.")
+                        f"Click a game to load/edit it; Predict runs the "
+                        f"whole slate.")
 
     # ----------------------------------------------------------- layout
 
@@ -346,14 +344,19 @@ class App(tk.Tk):
             b.grid(row=10, column=1, sticky="e", pady=4)
             self.side_widgets[side] = w
 
-        slate_f = ttk.LabelFrame(body, text="Slate (optional — add several "
-                                            "games, then Predict runs them all)")
+        slate_f = ttk.LabelFrame(body, text="Slate (click a game to load it "
+                                            "into the form and edit; Predict "
+                                            "runs them all)")
         slate_f.pack(fill="x", padx=8, pady=4)
         self.slate = []
+        self._loaded_idx = None   # slate index currently loaded into the form
+        # exportselection=False: keep the row selected while the user edits
+        # form fields (otherwise clicking a combobox clears the selection)
         self.lb_slate = tk.Listbox(slate_f, height=8, bg=WHITE, fg=NAVY,
-                                   selectbackground=RED,
+                                   selectbackground=RED, exportselection=False,
                                    font=("Segoe UI", 10))
         self.lb_slate.pack(side="left", fill="x", expand=True, padx=(6, 0), pady=4)
+        self.lb_slate.bind("<<ListboxSelect>>", self._slate_selected)
         lb_vsb = ttk.Scrollbar(slate_f, orient="vertical",
                                command=self.lb_slate.yview)
         self.lb_slate.configure(yscrollcommand=lb_vsb.set)
@@ -362,6 +365,8 @@ class App(tk.Tk):
         sb.pack(side="left", padx=6)
         ttk.Button(sb, text="Add game to slate",
                    command=self._add_to_slate).pack(fill="x", pady=1)
+        ttk.Button(sb, text="Update selected game",
+                   command=self._update_selected).pack(fill="x", pady=1)
         ttk.Button(sb, text="Remove selected",
                    command=self._remove_from_slate).pack(fill="x", pady=1)
         ttk.Button(sb, text="Clear slate",
@@ -440,6 +445,52 @@ class App(tk.Tk):
             return int(label.rsplit("[", 1)[1][:-1])
         raise ValueError(f"unknown player: {label!r}")
 
+    def _label_for(self, team, pid, kind, names=None):
+        """PlayerId -> combobox label, the inverse of _resolve. Players not in
+        the team's pool get a 'Name [id]' fallback label (which _resolve
+        parses back), using the spec's scraped names when available."""
+        pid = int(pid)
+        for label, p in self.pools.get(team, {}).get(kind, {}).items():
+            if int(p) == pid:
+                return label
+        name = (names or {}).get(str(pid))
+        if not name and self.pred is not None:
+            name = self.pred._name(pid)
+        return f'{name or pid} [{pid}]'
+
+    def _apply_spec(self, spec):
+        """Fill every form field from a game spec — the inverse of
+        _collect_spec, so a slate game can be loaded, edited, and saved back
+        with 'Update selected game'."""
+        self.cb_away.set(spec.get("away_team") or "")
+        self._team_changed("away")
+        self.cb_home.set(spec.get("home_team") or "")
+        self._team_changed("home")            # sets the home park default...
+        self.e_date.delete(0, "end")
+        self.e_date.insert(0, spec.get("date") or dt.date.today().isoformat())
+        self.cb_venue.set(spec.get("venue") or "")   # ...the spec venue wins
+        self.cb_dn.set(spec.get("day_night") or "")
+        for widget, v in ((self.sp_temp, spec.get("temp")),
+                          (self.sp_wind, spec.get("wind_speed"))):
+            widget.set("" if v is None else v)
+        self.cb_wdir.set(spec.get("wind_dir") or "")
+        self.cb_cond.set(spec.get("condition") or "")
+
+        names = spec.get("names") or {}
+        for side in ("away", "home"):
+            team = spec.get(f"{side}_team")
+            w = self.side_widgets[side]
+            st = spec.get(f"{side}_starter")
+            w["starter"].set(
+                self._label_for(team, st, "pitchers", names) if st else "")
+            for cb in w["lineup"]:
+                cb.set("")
+            for pid, slot in spec.get(f"{side}_lineup", []):
+                if 1 <= int(slot) <= 9:
+                    w["lineup"][int(slot) - 1].set(
+                        self._label_for(team, pid, "batters", names))
+            self._refresh_lineup_options(side)
+
     def _collect_spec(self):
         """Teams, date and at least one lineup player are required; anything
         else may be left blank — missing inputs become NaN features."""
@@ -481,6 +532,12 @@ class App(tk.Tk):
             raise ValueError("fill in at least one lineup player")
         return spec
 
+    @staticmethod
+    def _slate_row_text(spec):
+        n = len(spec.get("away_lineup", [])) + len(spec.get("home_lineup", []))
+        return (f'{spec["date"]}  {spec["away_team"]} @ '
+                f'{spec["home_team"]}  ({n} batters)')
+
     def _add_to_slate(self):
         try:
             spec = self._collect_spec()
@@ -488,10 +545,7 @@ class App(tk.Tk):
             messagebox.showerror("Input error", str(e))
             return
         self.slate.append(spec)
-        n = len(spec["away_lineup"]) + len(spec["home_lineup"])
-        self.lb_slate.insert(
-            "end", f'{spec["date"]}  {spec["away_team"]} @ '
-                   f'{spec["home_team"]}  ({n} batters)')
+        self.lb_slate.insert("end", self._slate_row_text(spec))
         for side in ("away", "home"):
             w = self.side_widgets[side]
             w["starter"].set("")
@@ -502,15 +556,58 @@ class App(tk.Tk):
         self._refresh_team_options()
         self.status.set(f"Slate: {len(self.slate)} game(s). Add more or Predict.")
 
+    def _slate_selected(self, _event=None):
+        """Clicking a slate game loads it into the form for editing."""
+        sel = self.lb_slate.curselection()
+        if not sel or not (0 <= sel[0] < len(self.slate)):
+            return
+        self._loaded_idx = sel[0]
+        spec = self.slate[sel[0]]
+        self._apply_spec(spec)
+        self.status.set(
+            f'Loaded {spec["away_team"]} @ {spec["home_team"]} into the form '
+            f'— edit, then "Update selected game" to save it back. '
+            f'Predict still runs the whole slate.')
+
+    def _update_selected(self):
+        """Write the form back over the selected (or last-loaded) slate game."""
+        sel = self.lb_slate.curselection()
+        idx = sel[0] if sel else self._loaded_idx
+        if idx is None or not (0 <= idx < len(self.slate)):
+            messagebox.showinfo(
+                "No game selected",
+                "Click a slate game first — it loads into the form. Edit it, "
+                "then Update selected game saves your changes back.")
+            return
+        try:
+            spec = self._collect_spec()
+        except Exception as e:
+            messagebox.showerror("Input error", str(e))
+            return
+        old = self.slate[idx]
+        if old.get("names"):     # keep scraped display names for re-loading
+            spec["names"] = old["names"]
+        self.slate[idx] = spec
+        self.lb_slate.delete(idx)
+        self.lb_slate.insert(idx, self._slate_row_text(spec))
+        self.lb_slate.selection_clear(0, "end")
+        self.lb_slate.selection_set(idx)
+        self.lb_slate.see(idx)
+        self._loaded_idx = idx
+        self.status.set(f'Updated game {idx + 1} of {len(self.slate)}: '
+                        f'{spec["away_team"]} @ {spec["home_team"]}.')
+
     def _remove_from_slate(self):
         sel = self.lb_slate.curselection()
         if sel:
             self.slate.pop(sel[0])
             self.lb_slate.delete(sel[0])
+            self._loaded_idx = None
 
     def _clear_slate(self):
         self.slate.clear()
         self.lb_slate.delete(0, "end")
+        self._loaded_idx = None
 
     def _predict_clicked(self):
         if self.slate:
@@ -655,11 +752,11 @@ class App(tk.Tk):
         ttk.Label(win, text="GAME PREDICTIONS",
                   font=("Segoe UI", 11, "bold")).pack(side="top", anchor="w",
                                                       padx=12, pady=(4, 0))
-        gcols = ["Game", "Venue", "Winner", "Win %", "Expected score",
+        gcols = ["Game", "Venue", "Winner", "Expected score",
                  "xHR", "xRuns", "P>8.5", "P>9.5"]
         gframe, gv = self._tree_with_scroll(
             win, columns=gcols, show="headings", height=COMMON_H)
-        for c, wpx in zip(gcols, [100, 195, 70, 60, 135, 60, 60, 60, 60]):
+        for c, wpx in zip(gcols, [100, 195, 95, 135, 60, 60, 60, 60]):
             gv.heading(c, text=c)
             gv.column(c, width=wpx, anchor="center")
         gv.tag_configure("stripe", background=STRIPE)
@@ -667,7 +764,7 @@ class App(tk.Tk):
             away, home = g["Game"].split("@")
             gv.insert("", "end", tags=("stripe" if i % 2 else "",), values=(
                 g["Game"], g["Venue"] or "—",
-                g["Winner"], f'{g["WinProb"]:.0%}',
+                f'{g["Winner"]} {g["WinProb"]:.0%}',
                 f'{away} {g["exp_away_runs"]:.1f} — '
                 f'{home} {g["exp_home_runs"]:.1f}',
                 g["exp_lineup_HR"], g["exp_total_runs"],
@@ -676,8 +773,7 @@ class App(tk.Tk):
         self._make_sortable(gv, gcols)
 
         # --- batter prop board ---
-        ttk.Label(win, text="BATTER PROP BOARD (ranked by HR probability — "
-                            "* = under 50 career games, low confidence)",
+        ttk.Label(win, text="BATTER PROP BOARD",
                   font=("Segoe UI", 11, "bold")).pack(side="top", anchor="w",
                                                       padx=12)
         cols = (["Game"] if multi else []) + \

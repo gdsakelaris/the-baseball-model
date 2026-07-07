@@ -1348,8 +1348,8 @@
 2020,1347,1347,COL,641658,Garrett Hampson,5,0,2,0,22,105.6,407,4-Seam Fastball,Logan Webb,SF,Coors Field,2020-09-02
 2020,1348,1348,NYM,624424,Michael Conforto,6,1,1,1,34,102.3,375,4-Seam Fastball,John Means,BAL,Oriole Park at Camden Yards,2020-09-02
 2020,1349,1349,COL,656541,Sam Hilliard,5,1,7,1,29,96.0,371,4-Seam Fastball,Tyler Rogers,SF,Coors Field,2020-09-02
-2020,1350,1350,STL,543543,Brad Miller,5,0,2,0,26,103.5,423,4-Seam Fastball,Tyler Mahle,CIN,Great American Ball Park,2020-09-02
-2020,1351,1350,TB,668227,Randy Arozarena,1,1,1,0,22,103.2,389,Sinker,Jordan Montgomery,NYY,Yankee Stadium,2020-09-02
+2020,1350,1350,TB,668227,Randy Arozarena,1,1,1,0,22,103.2,389,Sinker,Jordan Montgomery,NYY,Yankee Stadium,2020-09-02
+2020,1351,1350,STL,543543,Brad Miller,5,0,2,0,26,103.5,423,4-Seam Fastball,Tyler Mahle,CIN,Great American Ball Park,2020-09-02
 2020,1352,1351,NYM,624413,Pete Alonso,7,0,6,1,40,113.8,409,Changeup,John Means,BAL,Oriole Park at Camden Yards,2020-09-02
 2020,1353,1352,TB,670712,Mike Brosseau,4,1,1,0,30,104.6,420,Curveball,Jordan Montgomery,NYY,Yankee Stadium,2020-09-02
 2020,1354,1353,TOR,666971,Lourdes Gurriel Jr.,5,1,5,0,27,103.3,408,Slider,Sixto Sanchez,MIA,loanDepot Park,2020-09-02
@@ -1474,8 +1474,8 @@
 2020,1473,1472,MIN,593934,Miguel Sano,9,0,7,2,24,107.3,414,Slider,Joe Jimenez,DET,Target Field,2020-09-05
 2020,1474,1473,STL,657557,Paul DeJong,3,0,2,0,29,95.9,373,Curveball,Colin Rea,CHC,Wrigley Field,2020-09-05
 2020,1475,1474,STL,641933,Tyler O'Neill,4,1,2,0,32,106.0,383,4-Seam Fastball,Colin Rea,CHC,Wrigley Field,2020-09-05
-2020,1476,1475,BAL,621466,DJ Stewart,2,0,7,0,32,107.5,404,4-Seam Fastball,Miguel Yajure,NYY,Oriole Park at Camden Yards,2020-09-05
-2020,1477,1475,SF,446334,Evan Longoria,5,0,2,0,42,107.2,390,Cutter,Madison Bumgarner,ARI,Oracle Park,2020-09-05
+2020,1476,1475,SF,446334,Evan Longoria,5,0,2,0,42,107.2,390,Cutter,Madison Bumgarner,ARI,Oracle Park,2020-09-05
+2020,1477,1475,BAL,621466,DJ Stewart,2,0,7,0,32,107.5,404,4-Seam Fastball,Miguel Yajure,NYY,Oriole Park at Camden Yards,2020-09-05
 2020,1478,1476,SF,573131,Darin Ruf,2,0,2,0,28,109.5,453,Cutter,Madison Bumgarner,ARI,Oracle Park,2020-09-05
 2020,1479,1477,MIL,606115,Orlando Arcia,3,0,8,0,23,99.1,387,4-Seam Fastball,Nick Wittgren,CLE,Progressive Field,2020-09-05
 2020,1480,1478,NYY,640449,Clint Frazier,5,0,8,1,33,100.3,347,4-Seam Fastball,Paul Fry,BAL,Oriole Park at Camden Yards,2020-09-05
@@ -33513,3 +33513,70 @@
 2026,33512,3042,SEA,668227,Randy Arozarena,9,3,2,2,24,105.2,412,Slider,Shane Bieber,TOR,T-Mobile Park,2026-07-04
 2026,33513,3043,SEA,686527,Dominic Canzone,14,1,5,0,27,104.4,401,Cutter,Shane Bieber,TOR,T-Mobile Park,2026-07-04
 2026,33514,3044,SEA,663728,Cal Raleigh,9,2,6,2,41,109.7,384,Slider,Tommy Nance,TOR,T-Mobile Park,2026-07-04
+2026,33515,3045,TB,691406,Junior Caminero,26,0,1,1,26,107.5,437,Slider,Hunter Brown,HOU,Daikin Park,2026-07-04
+2026,33516,3046,BAL,694212,Samuel Basallo,14,2,1,2,27,105.7,406,4-Seam Fastball,Hunter Greene,CIN,Great American Ball Park,2026-07-04
+2026,33517,3047,HOU,670541,Yordan Alvarez,28,1,1,0,27,104.7,403,Sinker,Drew Rasmussen,TB,Daikin Park,2026-07-04
+2026,33518,3048,TB,680700,Richie Palacios,2,2,2,1,31,101.7,409,Changeup,Hunter Brown,HOU,Daikin Park,2026-07-04
+2026,33519,3049,HOU,673237,Yainer Diaz,4,1,4,2,28,103.5,394,4-Seam Fastball,Drew Rasmussen,TB,Daikin Park,2026-07-04
+2026,33520,3050,CLE,595978,Austin Hedges,3,0,5,1,24,101.2,388,Sinker,Sean Burke,CWS,Progressive Field,2026-07-04
+2026,33521,3051,ATL,642201,Eli White,4,0,2,2,29,93.5,358,Sweeper,Sean Manaea,NYM,Truist Park,2026-07-04
+2026,33522,3052,PHI,592663,J.T. Realmuto,6,1,4,1,21,108.8,399,Sinker,Michael Wacha,KC,Kauffman Stadium,2026-07-04
+2026,33523,3053,PHI,687282,Gabriel Rincones Jr.,2,0,4,1,29,100.6,404,Cutter,Michael Wacha,KC,Kauffman Stadium,2026-07-04
+2026,33524,3054,STL,802139,JJ Wetherholt,13,0,1,0,24,101.1,364,4-Seam Fastball,Shota Imanaga,CHC,Wrigley Field,2026-07-04
+2026,33525,3055,TB,676356,Jonny DeLuca,5,0,7,1,20,102.9,355,Sweeper,Cristian Javier,HOU,Daikin Park,2026-07-04
+2026,33526,3056,CWS,695657,Colson Montgomery,22,0,8,0,29,104.1,402,Sinker,Tim Herrin,CLE,Progressive Field,2026-07-04
+2026,33527,3057,ATL,643289,Mauricio Dubón,9,0,4,1,27,95.0,365,Changeup,Sean Manaea,NYM,Truist Park,2026-07-04
+2026,33528,3058,COL,694249,Cole Carrigg,4,2,1,2,26,103.5,393,Changeup,Robbie Ray,SF,Coors Field,2026-07-04
+2026,33529,3059,NYM,621438,Tyrone Taylor,4,0,5,2,28,104.1,404,4-Seam Fastball,Chris Sale,ATL,Truist Park,2026-07-04
+2026,33530,3060,PHI,664761,Alec Bohm,11,0,6,0,27,105.8,444,Sinker,Michael Wacha,KC,Kauffman Stadium,2026-07-04
+2026,33531,3061,SF,805811,Bryce Eldridge,7,0,3,2,30,106.8,458,Changeup,Sean Sullivan,COL,Coors Field,2026-07-04
+2026,33532,3062,BOS,575929,Willson Contreras,19,2,1,1,28,108.9,421,Changeup,Sam Aldegheri,LAA,Angel Stadium,2026-07-04
+2026,33533,3063,NYM,668901,Mark Vientos,11,1,6,0,30,104.1,396,4-Seam Fastball,Chris Sale,ATL,Truist Park,2026-07-04
+2026,33534,3064,AZ,680728,Adrian Del Castillo,5,2,1,2,33,107.8,414,Cutter,Brandon Woodruff,MIL,Chase Field,2026-07-04
+2026,33535,3065,HOU,670541,Yordan Alvarez,29,1,9,0,23,108.3,424,4-Seam Fastball,Casey Legumina,TB,Daikin Park,2026-07-04
+2026,33536,3066,LAA,666139,Josh Lowe,7,0,2,1,32,109.6,437,Cutter,Sonny Gray,BOS,Angel Stadium,2026-07-04
+2026,33537,3067,MIA,691788,Joe Mack,7,0,3,0,39,102.8,449,4-Seam Fastball,Aaron Civale,ATH,Sutter Health Park,2026-07-04
+2026,33538,3068,MIA,672640,Otto Lopez,8,1,3,2,22,102.5,375,4-Seam Fastball,Aaron Civale,ATH,Sutter Health Park,2026-07-04
+2026,33539,3069,ATL,573262,Mike Yastrzemski,5,1,7,2,31,105.7,420,Sinker,Austin Warren,NYM,Truist Park,2026-07-04
+2026,33540,3070,ATL,663586,Austin Riley,9,2,8,2,26,98.2,362,Cutter,Joey Gerber,NYM,Truist Park,2026-07-04
+2026,33541,3071,MIL,592885,Christian Yelich,6,1,5,0,26,108.6,418,4-Seam Fastball,Merrill Kelly,AZ,Chase Field,2026-07-04
+2026,33542,3072,ATL,671739,Michael Harris II,16,0,8,2,35,98.4,386,Eephus,Luis Torrens,NYM,Truist Park,2026-07-04
+2026,33543,3073,BOS,663853,Romy Gonzalez,1,1,5,2,38,103.2,368,Slider,Samy Natera Jr.,LAA,Angel Stadium,2026-07-04
+2026,33544,3074,MIA,669065,Kyle Stowers,11,1,7,1,43,100.5,377,Sinker,Kade Morris,ATH,Sutter Health Park,2026-07-04
+2026,33545,3075,LAD,518692,Freddie Freeman,15,0,6,0,36,100.6,388,Sweeper,Kyle Hart,SD,Dodger Stadium,2026-07-04
+2026,33546,3076,MIL,694192,Jackson Chourio,13,0,9,2,32,105.7,410,Sweeper,Paul Sewald,AZ,Chase Field,2026-07-04
+2026,33547,3077,PIT,668804,Bryan Reynolds,13,0,3,0,30,100.9,399,Changeup,Cade Cavalli,WSH,Nationals Park,2026-07-05
+2026,33548,3078,WSH,671277,Luis García Jr.,19,1,3,1,26,99.1,370,Curveball,Bubba Chandler,PIT,Nationals Park,2026-07-05
+2026,33549,3079,CIN,668715,Spencer Steer,14,1,5,0,27,100.7,374,Slider,Kyle Bradish,BAL,Great American Ball Park,2026-07-05
+2026,33550,3080,NYM,805999,A.J. Ewing,5,0,2,0,36,103.4,408,Sinker,Martín Pérez,ATL,Truist Park,2026-07-05
+2026,33551,3081,CWS,691019,Kyle Teel,2,1,1,1,27,104.6,378,Cutter,Tanner Bibee,CLE,Progressive Field,2026-07-05
+2026,33552,3082,CLE,800050,Chase DeLauter,8,1,1,1,31,107.5,425,4-Seam Fastball,Chris Murphy,CWS,Progressive Field,2026-07-05
+2026,33553,3083,PIT,664040,Brandon Lowe,21,2,8,1,24,107.6,396,4-Seam Fastball,Brad Lord,WSH,Nationals Park,2026-07-05
+2026,33554,3084,CWS,671976,Tristan Peters,5,0,2,1,35,103.3,376,Cutter,Tanner Bibee,CLE,Progressive Field,2026-07-05
+2026,33555,3085,WSH,686611,Dylan Crews,6,0,8,1,27,106.7,400,Sinker,Gregory Soto,PIT,Nationals Park,2026-07-05
+2026,33556,3086,STL,691023,Jordan Walker,20,2,6,1,26,109.2,409,Sweeper,Tyler Ferguson,CHC,Wrigley Field,2026-07-05
+2026,33557,3087,TEX,669394,Jake Burger,15,0,3,1,29,106.6,447,Slider,Casey Mize,DET,Globe Life Field,2026-07-05
+2026,33558,3088,CWS,695657,Colson Montgomery,23,1,3,1,20,109.7,390,4-Seam Fastball,Tanner Bibee,CLE,Progressive Field,2026-07-05
+2026,33559,3089,DET,682985,Riley Greene,13,1,4,1,36,111.2,431,4-Seam Fastball,Kumar Rocker,TEX,Globe Life Field,2026-07-05
+2026,33560,3090,SF,687551,Drew Gilbert,4,1,2,2,28,96.3,410,Curveball,Tanner Gordon,COL,Coors Field,2026-07-05
+2026,33561,3091,HOU,572233,Christian Walker,20,0,4,0,28,99.1,351,4-Seam Fastball,Mason Englert,TB,Daikin Park,2026-07-05
+2026,33562,3092,NYM,621438,Tyrone Taylor,5,0,9,0,28,103.3,417,Slider,Carlos Carrasco,ATL,Truist Park,2026-07-05
+2026,33563,3093,MIA,681715,Heriberto Hernández,10,0,1,1,29,101.7,437,4-Seam Fastball,Gage Jump,ATH,Sutter Health Park,2026-07-05
+2026,33564,3094,CLE,672356,Gabriel Arias,4,2,5,0,23,108.6,446,Sweeper,Erick Fedde,CWS,Progressive Field,2026-07-05
+2026,33565,3095,ATL,686948,Drake Baldwin,15,3,9,1,30,101.3,383,Sinker,Huascar Brazobán,NYM,Truist Park,2026-07-05
+2026,33566,3096,SF,646240,Rafael Devers,17,0,4,0,33,108.0,420,4-Seam Fastball,Tanner Gordon,COL,Coors Field,2026-07-05
+2026,33567,3097,HOU,670623,Isaac Paredes,12,0,6,0,34,101.9,401,Changeup,Mason Englert,TB,Daikin Park,2026-07-05
+2026,33568,3098,SF,669477,Casey Schmitt,17,0,5,1,29,96.6,395,Slider,Tanner Gordon,COL,Coors Field,2026-07-05
+2026,33569,3099,MIA,677870,Leo Jiménez,1,2,3,1,35,102.2,405,Changeup,Gage Jump,ATH,Sutter Health Park,2026-07-05
+2026,33570,3100,SF,646240,Rafael Devers,18,0,5,2,35,110.3,463,4-Seam Fastball,Tanner Gordon,COL,Coors Field,2026-07-05
+2026,33571,3101,TEX,677649,Ezequiel Duran,7,0,8,2,31,104.2,423,Slider,Drew Anderson,DET,Globe Life Field,2026-07-05
+2026,33572,3102,MIL,641343,Jake Bauers,16,1,7,0,25,102.2,400,Curveball,Eduardo Rodriguez,AZ,Chase Field,2026-07-05
+2026,33573,3103,SEA,641598,Mitch Garver,4,1,4,1,24,102.0,377,4-Seam Fastball,Trey Yesavage,TOR,T-Mobile Park,2026-07-05
+2026,33574,3104,MIA,672640,Otto Lopez,9,0,6,0,30,105.7,420,4-Seam Fastball,Mason Barnett,ATH,Sutter Health Park,2026-07-05
+2026,33575,3105,MIA,681715,Heriberto Hernández,11,0,6,0,34,104.5,422,Sweeper,Mason Barnett,ATH,Sutter Health Park,2026-07-05
+2026,33576,3106,COL,691720,Kyle Karros,7,2,8,1,35,105.8,457,4-Seam Fastball,Dylan Smith,SF,Coors Field,2026-07-05
+2026,33577,3107,ATH,641680,Jonah Heim,9,3,8,0,25,104.3,371,Splitter,Lake Bachar,MIA,Sutter Health Park,2026-07-05
+2026,33578,3108,SD,592518,Manny Machado,18,2,7,1,25,102.0,407,4-Seam Fastball,Kyle Hurt,LAD,Dodger Stadium,2026-07-05
+2026,33579,3109,BOS,680776,Jarren Duran,13,1,2,2,29,103.6,422,Sinker,Ryan Johnson,LAA,Angel Stadium,2026-07-05
+2026,33580,3110,BOS,575929,Willson Contreras,20,2,3,2,29,112.2,446,Sinker,Ryan Johnson,LAA,Angel Stadium,2026-07-05
+2026,33581,3111,LAA,687263,Zach Neto,19,0,9,2,31,103.9,396,4-Seam Fastball,Aroldis Chapman,BOS,Angel Stadium,2026-07-05

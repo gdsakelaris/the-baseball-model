@@ -6,7 +6,9 @@ set "ROOT=%~dp0.."
 set "PY=C:\Users\gdsak\AppData\Local\Programs\Python\Python313\python.exe"
 if not exist "%ROOT%\Logs" mkdir "%ROOT%\Logs"
 
-for /f "tokens=1-3 delims=/- " %%a in ("%date%") do set "TODAY=%%c-%%a-%%b"
+REM locale-independent date (%date% includes the weekday on some locales,
+REM which produced misnamed logs like update_06-Mon-07.log)
+for /f %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set "TODAY=%%d"
 set "LOG=%ROOT%\Logs\update_%TODAY%.log"
 
 echo ==================================================================>> "%LOG%"
