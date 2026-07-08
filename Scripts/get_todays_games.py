@@ -350,6 +350,62 @@ def resolve_lineup(slugs, team, idx):
     return out
 
 
+def classify_side(before, after):
+    """Classify one lineup side by diffing the pids mlb.com supplied (`before`)
+    against the pids after fallbacks were applied (`after`). Reliance is judged
+    by an actual player change, NOT by reaching a full 9 — a fallback that
+    fills only a partial lineup still counts. Returns
+    (display_tag, contributed, fully, topped, completed) where the four flags
+    are 0/1 counters:
+      contributed - a fallback added/changed at least one player
+      fully       - the whole side came from a fallback (mlb.com had none)
+      topped      - a fallback added to a partial mlb.com lineup
+      completed   - a fallback brought the side from <9 up to a full 9
+    """
+    before, after = set(before), set(after)
+    contributed = bool(after) and after != before
+    fully = contributed and not before
+    topped = contributed and bool(before)
+    completed = contributed and len(after) == 9
+    if not after:
+        tag = "none"
+    elif not contributed:
+        tag = "mlb"
+    else:
+        tag = "full" if fully else "top"
+    return tag, int(contributed), int(fully), int(topped), int(completed)
+
+
+def lineup_report(games, sources, lineup_src):
+    """Human-readable fallback-accounting lines. Split out from main() so the
+    reconciliation can be tested without a live scrape.
+
+    'fully sourced' (mlb.com posted none for that side) and 'completed to 9'
+    are DIFFERENT axes, so they can differ: a side can be fully fallback-sourced
+    yet still under 9 when even the fallback posted fewer than 9 resolvable
+    names. This spells that out and lists every side that ended under 9, tagged
+    with where it came from (mlb / full / top)."""
+    sides = 2 * len(games)
+    under9 = lineup_src["contributed"] - lineup_src["completed"]
+    lines = [
+        f"  fallback: contributed to {lineup_src['contributed']}/{sides} "
+        f"side(s) ({lineup_src['fully']} fully sourced, "
+        f"{lineup_src['topped']} topped up); of those, "
+        f"{lineup_src['completed']} reached a full 9, {under9} still under 9"
+    ]
+    incomplete = [(g, side, src[side]) for g, src in zip(games, sources)
+                  for side in ("away", "home")
+                  if len(g[f"{side}_lineup"]) < 9]
+    if incomplete:
+        lines.append(f"  incomplete lineups — {len(incomplete)} side(s) under "
+                     f"9 batters (tag = source):")
+        for g, side, tag in incomplete:
+            lines.append(f"      {g['away_team']:>3} @ {g['home_team']:<3}  "
+                         f"{side:<4} {g[f'{side}_team']:>3}  "
+                         f"{len(g[f'{side}_lineup'])}/9  ({tag})")
+    return lines
+
+
 def main():
     print("scraping mlb.com/starting-lineups ...")
     games = scrape_mlb()
@@ -370,7 +426,18 @@ def main():
         roto = {}
 
     idx = build_name_index()
-    filled = {"temp": 0, "wind": 0, "cond": 0, "lineup": 0, "dome": 0}
+    filled = {"temp": 0, "wind": 0, "cond": 0, "dome": 0}
+    # Lineup-source accounting, per TEAM-SIDE (there are 2 per game), decided
+    # by comparing the pids mlb.com gave against the pids after fallbacks —
+    # NOT by whether a side reached a full 9 (a fallback that fills in only a
+    # partial lineup still "relied on the fallback", and the old count missed
+    # exactly that):
+    #   contributed - a fallback added/changed at least one player
+    #   fully       - the whole side came from a fallback (mlb.com had none)
+    #   topped      - a fallback added to a partial mlb.com lineup
+    #   completed   - a fallback brought the side from <9 up to a full 9
+    lineup_src = {"contributed": 0, "fully": 0, "topped": 0, "completed": 0}
+    sources = []   # per-game {"away": tag, "home": tag}, aligned to `games`
 
     for g in games:
         key = (g["away_team"], g["home_team"])
@@ -396,17 +463,27 @@ def main():
         if g["condition"]:
             filled["cond"] += 1
 
-        # lineup fallback: fantasypros first, then rotowire
+        # lineup fallback: fantasypros first, then rotowire. Record what the
+        # fallback actually did per side by diffing pids before vs. after,
+        # so partial fills (never reaching 9) are still counted as reliance.
+        src_tags = {}
         for side, team in (("away", g["away_team"]), ("home", g["home_team"])):
-            if len(g[f"{side}_lineup"]) == 9:
-                continue
-            for src in (f, r):
-                cand = resolve_lineup(src.get(f"{side}_lineup", []), team, idx)
-                if len(cand) > len(g[f"{side}_lineup"]):
-                    g[f"{side}_lineup"] = cand
-                if len(g[f"{side}_lineup"]) == 9:
-                    filled["lineup"] += 1
-                    break
+            before = [pid for pid, _ in g[f"{side}_lineup"]]
+            if len(before) < 9:
+                for src in (f, r):
+                    cand = resolve_lineup(src.get(f"{side}_lineup", []), team, idx)
+                    if len(cand) > len(g[f"{side}_lineup"]):
+                        g[f"{side}_lineup"] = cand
+                    if len(g[f"{side}_lineup"]) == 9:
+                        break
+            after = [pid for pid, _ in g[f"{side}_lineup"]]
+            tag, contributed, fully, topped, completed = classify_side(before, after)
+            src_tags[side] = tag
+            lineup_src["contributed"] += contributed
+            lineup_src["fully"] += fully
+            lineup_src["topped"] += topped
+            lineup_src["completed"] += completed
+        sources.append(src_tags)
 
     payload = {"scraped_at": dt.datetime.now().isoformat(timespec="seconds"),
                "date": games[0]["date"] if games else None,
@@ -417,18 +494,20 @@ def main():
     posted = sum(1 for g in games if len(g["away_lineup"]) == 9
                  and len(g["home_lineup"]) == 9)
     print(f"\nwrote {len(games)} games to {OUT_FILE}")
-    print(f"  both lineups set: {posted}/{len(games)}  "
-          f"(fallback filled {filled['lineup']} team lineups)")
+    print(f"  both lineups set: {posted}/{len(games)} games")
+    for line in lineup_report(games, sources, lineup_src):
+        print(line)
     print(f"  weather: temp {filled['temp']}/{len(games)}, "
           f"wind {filled['wind']}/{len(games)}, "
           f"condition {filled['cond']}/{len(games)}, "
           f"dome defaults {filled['dome']}")
-    for g in games:
+    for g, src in zip(games, sources):
         print(f'  {g["away_team"]:>3} @ {g["home_team"]:<3} {g["venue"]:<28} '
               f'{g["day_night"] or "?":<5} temp {str(g["temp"]) or "?":>5}  '
               f'wind {str(g["wind_speed"]) or "?":>4} {g["wind_dir"] or "-":<10} '
               f'{g["condition"] or "-":<14} '
-              f'lineups {len(g["away_lineup"])}+{len(g["home_lineup"])}')
+              f'lineups {len(g["away_lineup"])}({src["away"]})+'
+              f'{len(g["home_lineup"])}({src["home"]})')
 
 
 if __name__ == "__main__":

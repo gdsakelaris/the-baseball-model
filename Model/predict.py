@@ -16,6 +16,7 @@ import argparse
 import math
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import joblib
@@ -24,6 +25,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import features as F  # noqa: E402
+import odds as O  # noqa: E402
 import recalibrate as R  # noqa: E402
 
 ART = Path(__file__).resolve().parent / "artifacts"
@@ -730,6 +732,25 @@ GLOSSARY = [
      "model shows no statistically significant edge over always taking the "
      "home team."),
     ("Slot", "Batting-order position (1 = leadoff)."),
+    ("Bets sheet", "The model's betting signals for this slate: every side "
+     "where the model's probability beats the best posted sportsbook price by "
+     "an expected 5%+ per $1 staked, after removing the book's margin (vig). "
+     "Sorted by EV — the top row is the strongest edge. If it's empty or shows "
+     "a note, nothing cleared the bar (or no odds were captured — run "
+     "Scripts/scrape_odds.py near game time)."),
+    ("Bets columns", "Model % is the model's chance for the side shown; Mkt % "
+     "is the de-vigged market chance; Edge is their difference; Best Odds / "
+     "Book are the most generous posted American price and the book offering "
+     "it; EV% is the expected profit per $1 at that price. Note flags a rookie "
+     "(<50 career games) or a thin one-book price."),
+    ("Green cells", "A green cell on the Batter/Pitching/Games sheets is a "
+     "flagged bet — the same pick that appears on the Bets sheet, shown where "
+     "its number lives so you can see it in context."),
+    ("EV is not a guarantee", "The edge is computed from the model's OWN "
+     "probability. Beating a naive base rate is not the same as beating a "
+     "sharp book, and until many days of closing lines accrue these edges are "
+     "unproven — treat small ones as noise and size same-game picks as one "
+     "bet. Bet responsibly."),
     ("A caution", "These are model estimates from historical data. They do "
      "not account for injuries, breaking news, or the sportsbook's own "
      "information. Bet responsibly."),
@@ -812,18 +833,320 @@ HI_COLS = {"xK", "xOuts", "xBB", "xHits", "xER", "xSO", "xHRR", "xTB",
            "Winner", "Win Prob", "Total Runs", "Lineup HRs"}
 
 
-def _polish(path):
+# ------------------------------------------------------- betting signals
+#
+# The prediction Excel now compares the model's live probabilities to the real
+# sportsbook lines in the odds store (Data/mlb_odds.csv) and flags the +EV
+# picks. This reuses the EXACT de-vig/EV math that evaluate_deep Section 9
+# grades the model with (Model/odds.py) — the only difference is it runs on
+# today's UNSETTLED slate instead of finished games. Nothing here feeds the
+# model; odds are consulted at output time only.
+
+# A side is flagged as a "bet" (highlighted green) when the model prices its
+# expected profit per 1u staked at >= this, graded at the best posted book
+# price. 5% keeps the README's vig/noise caveat from turning razor-thin,
+# unproven edges into "bets".
+BET_EV_THRESHOLD = 0.05
+
+# model P(over line) column prefix for each pitcher count market key
+STARTER_PREFIX = {"pk": "P_over_", "pouts": "P_outs_over_",
+                  "phits": "P_hits_over_", "pbb": "P_bb_over_",
+                  "per": "P_er_over_"}
+
+BET_HEADERS = ["Game", "Player", "Team", "Prop", "Side", "Line",
+               "Model %", "Mkt %", "Edge", "Best Odds", "Book", "EV%",
+               "Books", "Note"]
+BET_PCT_COLS = {"Model %", "Mkt %", "Edge", "EV%"}      # shown as percents
+BET_TEXT_COLS = {"Player", "Prop", "Side", "Book", "Note", "Bets"}
+
+
+def _as_int(x):
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _over_display(col):
+    """Display header for a raw P(over) column, matching _display's renames
+    ('P_over_6.5' -> 'K > 6.5', 'P_er_over_2.5' -> 'ER > 2.5'); None if the
+    column is not an over column."""
+    for pat, fmt in _OVER_PATTERNS:
+        m = pat.match(col)
+        if m:
+            return fmt.format(m.group(1))
+    return None
+
+
+def _consensus(store, api, line, key):
+    """Per join `key` ('PlayerId' for player props, 'Team' = home club for game
+    markets): de-vig every book's two-sided price for one market/line to a fair
+    P(over), then keep the median fair prob, the median hold, and the best (most
+    generous) over/under price with the book offering it. Mirrors evaluate_deep
+    Section 9's _market_consensus/_game_consensus so live signals use the same
+    math the backtest grades. Returns {key_value: {...}}; empty if nothing
+    prices."""
+    m = store[store["Market"] == api]
+    if line is not None:
+        m = m[(m["Line"] - line).abs() < 1e-6]
+    recs = []
+    for _, r in m.iterrows():
+        fo, hold = O.devig_two_way(r["OverPrice"], r["UnderPrice"])
+        if np.isnan(fo):
+            continue
+        recs.append((r[key], fo, hold, r["OverPrice"], r["UnderPrice"],
+                     r["Book"]))
+    if not recs:
+        return {}
+    md = pd.DataFrame(recs, columns=[key, "fair", "hold", "over", "under",
+                                     "book"])
+    out = {}
+    for kval, g in md.groupby(key, dropna=False):
+        if pd.isna(kval):
+            continue
+        over, under = g["over"].dropna(), g["under"].dropna()
+        out[_as_int(kval) if key == "PlayerId" else kval] = {
+            "fair": float(g["fair"].median()),
+            "hold": (float(g["hold"].median()) if g["hold"].notna().any()
+                     else float("nan")),
+            "best_over": float(over.max()) if len(over) else float("nan"),
+            "best_under": float(under.max()) if len(under) else float("nan"),
+            "over_book": str(g.loc[over.idxmax(), "book"]) if len(over) else "",
+            "under_book": (str(g.loc[under.idxmax(), "book"]) if len(under)
+                           else ""),
+            "n_books": int(g["book"].nunique()),
+        }
+    return out
+
+
+def _bet_rec(game, player, team, prop, side, line, p, c, ev, note,
+             side_label=None):
+    """One Bets-sheet row. `side` is 'over'/'under' as O.pick_side returns it;
+    `side_label` overrides the displayed side (e.g. a team for the moneyline).
+    p is the model's P(over line); c is the _consensus record."""
+    p_side = p if side == "over" else 1.0 - p
+    mkt_side = c["fair"] if side == "over" else 1.0 - c["fair"]
+    price = c["best_over"] if side == "over" else c["best_under"]
+    book = c["over_book"] if side == "over" else c["under_book"]
+    return {
+        "Game": game, "Player": player, "Team": team or "", "Prop": prop,
+        "Side": side_label or ("Over" if side == "over" else "Under"),
+        "Line": "" if line is None else line,
+        "Model %": round(p_side, 4), "Mkt %": round(mkt_side, 4),
+        "Edge": round(p_side - mkt_side, 4),
+        "Best Odds": int(round(price)) if pd.notna(price) else "",
+        "Book": book, "EV%": round(ev, 4),
+        "Books": c["n_books"], "Note": note,
+    }
+
+
+def _game_records(out, specs):
+    """Normalize the game-level predictions (totals + moneyline) to a common
+    shape for both the slate ('games' frame) and single-game ('totals' dict)
+    paths. Home/away come from the specs so it works even when 'totals' omits
+    the team names."""
+    if "games" in out:
+        g = out["games"]
+        tcols = [c for c in g.columns if c.startswith("P_runs_over_")]
+        recs = []
+        for _, r in g.iterrows():
+            away, home = str(r["Game"]).split("@")
+            recs.append({"tag": r["Game"], "home": home, "away": away,
+                         "home_win_prob": float(r["HomeWinProb"]),
+                         "totals": {c[len("P_runs_over_"):]: r[c]
+                                    for c in tcols}})
+        return recs
+    s, t = specs[0], out["totals"]
+    home, away = s["home_team"], s["away_team"]
+    return [{"tag": f"{away}@{home}", "home": home, "away": away,
+             "home_win_prob": float(t.get("home_win_prob", 0.5)),
+             "totals": dict(t.get("P_over_runs", {}))}]
+
+
+def compute_bets(out, specs, store_path=None, ev_threshold=BET_EV_THRESHOLD):
+    """Compare the model's live probabilities to the odds store and return the
+    +EV betting board plus the cells to highlight green in the prop sheets.
+
+    For every model probability (batter props, pitcher count-prop lines, game
+    totals, moneyline) we look up the market via Model/odds.py's PROP_MARKET /
+    STARTER_MARKET, de-vig the posted prices to a fair number, and let
+    O.pick_side pick the +EV side at the best book price. A row is a "bet" when
+    its expected profit per 1u >= ev_threshold.
+
+    Returns (bets_df, highlights, note):
+      bets_df    - one row per flagged bet, sorted by EV (BET_HEADERS columns)
+      highlights - {sheet_title: [(row_match, display_column), ...]} for _polish
+      note       - a human message when there is nothing to show, else None
+    """
+    store = O.load_odds(store_path or O.DEFAULT_STORE)
+    dates = {str(s["date"]) for s in specs}
+    if not store.empty:
+        store = store[store["Date"].astype(str).isin(dates)]
+    if store.empty:
+        return (pd.DataFrame(columns=BET_HEADERS), {},
+                f"No sportsbook odds in the store for "
+                f"{', '.join(sorted(dates))}. Run  python "
+                f"Scripts/scrape_odds.py  near game time to capture lines, "
+                f"then re-run this prediction.")
+
+    cache = {}
+
+    def cons(api, line, key):
+        ck = (api, line, key)
+        if ck not in cache:
+            cache[ck] = _consensus(store, api, line, key)
+        return cache[ck]
+
+    bets = []
+    highlights = defaultdict(list)
+
+    def add(rec, sheet, match, disp_col):
+        bets.append(rec)
+        if disp_col:
+            highlights[sheet].append((match, disp_col))
+
+    single_tag = _game_records(out, specs)[0]["tag"] if specs else ""
+
+    # ---- batter binary props (join on PlayerId) ----
+    batters = out["batters"]
+    b_game = "Game" in batters.columns
+    for prop, pcol in PROP_COLS.items():
+        meta = O.PROP_MARKET.get(prop)
+        if meta is None or pcol not in batters.columns:
+            continue
+        c_by_pid = cons(meta["api"], meta["line"], "PlayerId")
+        if not c_by_pid:
+            continue
+        disp = BAT_HEADERS.get(pcol, pcol)
+        for _, r in batters.iterrows():
+            pid = _as_int(r.get("PlayerId"))
+            c = c_by_pid.get(pid)
+            if c is None:
+                continue
+            p = float(r[pcol])
+            side, ev = O.pick_side(p, c["best_over"], c["best_under"])
+            if side is None or ev < ev_threshold:
+                continue
+            cg = _as_int(r.get("CareerG"))
+            note = ("rookie <50 G" if cg is not None and cg < 50
+                    else ("1 book" if c["n_books"] == 1 else ""))
+            match = {"ID": pid}
+            if b_game:
+                match["Game"] = r["Game"]
+            add(_bet_rec(r["Game"] if b_game else single_tag, r["Name"],
+                         r.get("Team", ""), meta["label"], side, meta["line"],
+                         p, c, ev, note),
+                "Batter Props", match, disp)
+
+    # ---- pitcher count-prop lines (join on PlayerId, multi-line) ----
+    starters = out["starters"]
+    s_game = "Game" in starters.columns
+    for skey, prefix in STARTER_PREFIX.items():
+        meta = O.STARTER_MARKET.get(skey)
+        if meta is None:
+            continue
+        for col in [c for c in starters.columns if c.startswith(prefix)]:
+            try:
+                line = float(col[len(prefix):])
+            except ValueError:
+                continue
+            c_by_pid = cons(meta["api"], line, "PlayerId")
+            if not c_by_pid:
+                continue
+            disp = _over_display(col)
+            label = f'{meta["label"]} o{line:g}'
+            for _, r in starters.iterrows():
+                pid = _as_int(r.get("PlayerId"))
+                c = c_by_pid.get(pid)
+                if c is None:
+                    continue
+                p = float(r[col])
+                side, ev = O.pick_side(p, c["best_over"], c["best_under"])
+                if side is None or ev < ev_threshold:
+                    continue
+                match = {"ID": pid}
+                if s_game:
+                    match["Game"] = r["Game"]
+                add(_bet_rec(r["Game"] if s_game else single_tag, r["Name"],
+                             r.get("Team", ""), label, side, line, p, c, ev,
+                             "1 book" if c["n_books"] == 1 else ""),
+                    "Pitching Props", match, disp)
+
+    # ---- game markets: totals + moneyline (join on home Team) ----
+    games_sheet = "games" in out
+    for g in _game_records(out, specs):
+        for lstr, pv in g["totals"].items():
+            line = float(lstr)
+            c = cons("totals", line, "Team").get(g["home"])
+            if c is None:
+                continue
+            p = float(pv)
+            side, ev = O.pick_side(p, c["best_over"], c["best_under"])
+            if side is None or ev < ev_threshold:
+                continue
+            add(_bet_rec(g["tag"], "Game total", g["home"], "total runs", side,
+                         line, p, c, ev,
+                         "1 book" if c["n_books"] == 1 else ""),
+                "Games", {"Game": g["tag"]},
+                (f"Runs > {lstr}" if games_sheet else None))
+        c = cons("h2h", None, "Team").get(g["home"])
+        if c is not None:
+            p = g["home_win_prob"]
+            side, ev = O.pick_side(p, c["best_over"], c["best_under"])
+            if side is not None and ev >= ev_threshold:
+                team = g["home"] if side == "over" else g["away"]
+                add(_bet_rec(g["tag"], "Moneyline", "", "moneyline", side, None,
+                             p, c, ev, "winner: no proven edge vs. always-home",
+                             side_label=team),
+                    "Games", {"Game": g["tag"]},
+                    ("Win Prob" if games_sheet else None))
+
+    highlights = dict(highlights)
+    if not bets:
+        return (pd.DataFrame(columns=BET_HEADERS), highlights,
+                f"Odds present for {', '.join(sorted(dates))}, but no side "
+                f"cleared the EV >= {ev_threshold:.0%} bar. The model sees "
+                f"no bet worth taking at these prices.")
+    df = (pd.DataFrame(bets, columns=BET_HEADERS)
+          .sort_values("EV%", ascending=False).reset_index(drop=True))
+    return df, highlights, None
+
+
+def _bets_sheet(bets_df, note):
+    """The frame written to the 'Bets' sheet: the bet board, or a one-cell
+    note when there are no bets / no odds."""
+    if len(bets_df):
+        return bets_df
+    return pd.DataFrame({"Bets": [note or "No bets to show."]})
+
+
+def _cell_eq(cv, mv):
+    """Match a written cell value against a highlight key (str Game tag or
+    numeric PlayerId)."""
+    if isinstance(mv, str):
+        return str(cv) == mv
+    ci = _as_int(cv)
+    return ci is not None and ci == _as_int(mv)
+
+
+def _polish(path, highlights=None):
     """Make the workbook readable, in MLB colors (navy #041E42, red
     #BF0D3E): frozen bold headers, percent formats, autofit column widths
     (padded for the filter dropdown arrows), thin borders, a light zebra
     stripe, a red tint + red header on the headline columns, a red flag on
-    sub-50-game batters, and filter/sort dropdowns on the data sheets."""
+    sub-50-game batters, and filter/sort dropdowns on the data sheets. The
+    'Bets' board gets a green header + green rows, and `highlights` (from
+    compute_bets) paints each flagged pick green on its prop sheet."""
     import openpyxl
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     wb = openpyxl.load_workbook(path)
     head_font = Font(bold=True, color="FFFFFF")
     head_fill = PatternFill("solid", fgColor="041E42")     # MLB navy
     hi_head_fill = PatternFill("solid", fgColor="BF0D3E")  # MLB red
+    bet_head_fill = PatternFill("solid", fgColor="1E7B34")  # Bets: green
+    bet_row_fill = PatternFill("solid", fgColor="E7F3E2")   # light green board
+    green_fill = PatternFill("solid", fgColor="C6EFCE")     # flagged bet cell
+    green_font = Font(bold=True, color="006100")
     stripe_fill = PatternFill("solid", fgColor="EAF0F8")
     hi_fill = PatternFill("solid", fgColor="F5DBE2")       # light MLB red
     hi_font = Font(bold=True, color="041E42")
@@ -841,7 +1164,9 @@ def _polish(path):
     for ws in wb.worksheets:
         ws.freeze_panes = "A2"
         ws.sheet_view.showGridLines = False
-        filtered = ws.title in ("Batter Props", "Pitching Props", "Games")
+        is_bets = ws.title == "Bets"
+        filtered = ws.title in ("Batter Props", "Pitching Props", "Games") or \
+            (is_bets and "EV%" in [str(c.value) for c in ws[1]])
         if filtered:
             ws.auto_filter.ref = ws.dimensions  # sort/filter dropdowns
         max_row, max_col = ws.max_row, ws.max_column
@@ -849,23 +1174,31 @@ def _polish(path):
         headers = [str(c.value) for c in ws[1]]
         for j, cell in enumerate(ws[1], start=1):
             cell.font = head_font
-            cell.fill = hi_head_fill if headers[j - 1] in HI_COLS else head_fill
+            if is_bets:
+                cell.fill = bet_head_fill
+            else:
+                cell.fill = (hi_head_fill if headers[j - 1] in HI_COLS
+                             else head_fill)
             cell.alignment = center if headers[j - 1] not in text_cols else left
             cell.border = border
 
         for j, h in enumerate(headers, start=1):
-            is_text = h in text_cols
-            is_pct = " > " in h or h in PCT_COLS
-            hi = h in HI_COLS
+            is_text = h in text_cols or (is_bets and h in BET_TEXT_COLS)
+            is_pct = " > " in h or h in PCT_COLS or (is_bets and h in BET_PCT_COLS)
+            hi = (not is_bets) and h in HI_COLS
             for i in range(2, max_row + 1):
                 c = ws.cell(row=i, column=j)
                 c.border = border
                 c.alignment = left if is_text else center
                 if is_pct:
                     c.number_format = "0.0%"
+                if is_bets and h == "Best Odds":
+                    c.number_format = "+0;-0"   # +475 / -150
                 if h == "ID":
                     c.font = dim_font
-                if hi:
+                if is_bets:
+                    c.fill = bet_row_fill        # the whole board reads "green"
+                elif hi:
                     c.fill = hi_fill
                     c.font = hi_font
                 elif i % 2 == 1:
@@ -875,11 +1208,29 @@ def _polish(path):
                         and c.value < 50):
                     c.font = warn_font
 
+        # paint each flagged pick green on its prop sheet: find the row whose
+        # key columns match, then fill the target column's cell (compute_bets
+        # supplies {header: value} row matches + the display column).
+        for match, colname in (highlights or {}).get(ws.title, []):
+            hidx = {h: k + 1 for k, h in enumerate(headers)}
+            if colname not in hidx or any(m not in hidx for m in match):
+                continue
+            for i in range(2, max_row + 1):
+                if all(_cell_eq(ws.cell(row=i, column=hidx[m]).value, v)
+                       for m, v in match.items()):
+                    cc = ws.cell(row=i, column=hidx[colname])
+                    cc.fill = green_fill
+                    cc.font = green_font
+                    break
+
         # autofit: widest of header / any cell, clamped; percents count as
         # ~6 chars. The filter dropdown arrow is ~3 chars wide on the RIGHT
         # of the header cell, and headers are centered — so the header needs
         # arrow-width padding on BOTH sides to stay clear of it.
         pad = 6 if filtered else 0
+        # the data boards stay compact (cap 90); the text reference sheets are
+        # widened to fit their full content, up to Excel's 255-char column max
+        cap = 255 if ws.title in ("Summary", "Glossary") else 90
         for j, h in enumerate(headers, start=1):
             longest = len(h) + pad
             for i in range(2, max_row + 1):
@@ -888,7 +1239,7 @@ def _polish(path):
                     continue
                 longest = max(longest, 6 if isinstance(v, float) else len(str(v)))
             ws.column_dimensions[ws.cell(row=1, column=j).column_letter].width = \
-                min(max(longest + 2, 6), 90)
+                min(max(longest + 2, 6), cap)
     wb.save(path)
 
 
@@ -928,14 +1279,16 @@ def save_excel(spec, out, path=None):
                        BAT_HEADERS, BAT_ORDER, drop=("xHR", "HR_fair_odds"))
     starters = _display(out["starters"].sort_values("xK", ascending=False),
                         ST_HEADERS, ST_ORDER)
+    bets_df, highlights, note = compute_bets(out, [spec])
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         batters.to_excel(xw, sheet_name="Batter Props", index=False)
         starters.to_excel(xw, sheet_name="Pitching Props", index=False)
         info.to_excel(xw, sheet_name="Game", index=False)
+        _bets_sheet(bets_df, note).to_excel(xw, sheet_name="Bets", index=False)
         summary.to_excel(xw, sheet_name="Summary", index=False)
         pd.DataFrame(GLOSSARY, columns=["Term", "Meaning"]).to_excel(
             xw, sheet_name="Glossary", index=False)
-    _polish(path)
+    _polish(path, highlights)
     return path
 
 
@@ -965,14 +1318,16 @@ def save_excel_slate(specs, out, path=None):
                         ST_HEADERS, ST_ORDER)
     games = _display(out["games"].sort_values("WinProb", ascending=False),
                      GAME_HEADERS, GAME_ORDER, drop=("HomeWinProb",))
+    bets_df, highlights, note = compute_bets(out, specs)
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         batters.to_excel(xw, sheet_name="Batter Props", index=False)
         starters.to_excel(xw, sheet_name="Pitching Props", index=False)
         games.to_excel(xw, sheet_name="Games", index=False)
+        _bets_sheet(bets_df, note).to_excel(xw, sheet_name="Bets", index=False)
         summary_frame(specs, out).to_excel(xw, sheet_name="Summary", index=False)
         pd.DataFrame(GLOSSARY, columns=["Term", "Meaning"]).to_excel(
             xw, sheet_name="Glossary", index=False)
-    _polish(path)
+    _polish(path, highlights)
     return Path(path)
 
 
