@@ -96,9 +96,10 @@ class App(tk.Tk):
             messagebox.showerror("Load failed", err)
 
     def _build_pools(self):
-        bs = pd.read_csv(DATA_DIR / "mlb_batting_stats_2020_2026.csv",
+        season = int(self.pred.stores.raw["games"]["Season"].max())
+        bs = pd.read_csv(DATA_DIR / "mlb_batting_stats.csv",
                          encoding="utf-8-sig", usecols=["Year", "Team", "TeamName"])
-        pairs = bs[bs["Year"] == 2026].drop_duplicates()
+        pairs = bs[bs["Year"] == bs["Year"].max()].drop_duplicates()
         self.abbrev_full = dict(zip(pairs["Team"], pairs["TeamName"]))
         full_abbrev = {v: k for k, v in self.abbrev_full.items()}
 
@@ -117,7 +118,6 @@ class App(tk.Tk):
         # Depth-chart rosters lag trades and call-ups (e.g. a player dealt
         # mid-season). Anyone who actually appeared in current-season game
         # logs is added to the pool of the team they last played for.
-        season = int(self.pred.stores.raw["games"]["Season"].max())
         gb = self.pred.stores.raw["gb"]
         cur = gb[gb["Season"] == season].sort_values("Date")
         for pid, r in cur.groupby("PlayerId").last().iterrows():
@@ -147,7 +147,7 @@ class App(tk.Tk):
         games = self.pred.stores.raw["games"]
         parks = self.pred.stores.raw["parks"]
         self.venues = sorted(set(parks["Ballpark"]) |
-                             set(games.loc[games["Season"] == 2026, "Venue"]))
+                             set(games.loc[games["Season"] == season, "Venue"]))
         self.wind_dirs = sorted(games["WindDir"].dropna().unique())
         self.conditions = sorted(games["Condition"].dropna().unique())
         # home team -> default venue
@@ -162,6 +162,41 @@ class App(tk.Tk):
         self.btn_predict["state"] = "normal"
         self.status.set("Ready. Pick teams, fill lineups (or auto-fill), Predict.")
         self._load_todays_file(silent=True)
+        self._health_check()
+
+    def _health_check(self):
+        """Warn when predictions would be built on bad inputs: the morning
+        data job failed (Scripts/update_all.py writes its outcome to
+        Logs/last_run_status.json) or the game logs have gone stale
+        mid-season. Without this, the only failure signal is a log line."""
+        import json
+        problems = []
+        status_file = DATA_DIR.parent / "Logs" / "last_run_status.json"
+        try:
+            status = json.loads(status_file.read_text())
+            if not status.get("ok"):
+                jobs = ", ".join(status.get("failed_jobs", [])) or "unknown"
+                problems.append(
+                    f"The last data update FAILED (finished "
+                    f"{status.get('finished', '?')}; failed: {jobs}).\n"
+                    f"Data was restored from backups and the retrain was "
+                    f"skipped — see the newest Logs/update_*.log.")
+        except (OSError, ValueError):
+            pass                    # no status yet: job hasn't run since setup
+        try:
+            games = self.pred.stores.raw["games"]
+            newest = pd.to_datetime(games["Date"]).max()
+            age = (pd.Timestamp.today().normalize() - newest.normalize()).days
+            if 5 <= dt.date.today().month <= 9 and age > 6:
+                problems.append(
+                    f"Newest game in the data is {newest.date()} "
+                    f"({age} days ago) — mid-season that means the daily "
+                    f"update is not ingesting new games. Predictions will "
+                    f"use stale form/rosters.")
+        except Exception:           # noqa: BLE001 — health check never blocks
+            pass
+        if problems:
+            messagebox.showwarning("Data health", "\n\n".join(problems))
 
     def _load_todays_file(self, silent=False):
         """Populate the slate from Data/todays_games.json (written by
@@ -711,19 +746,8 @@ class App(tk.Tk):
         # starter table, then (top) the games table and batter board.
 
         # --- export buttons (pinned to the very bottom) ---
-        def export_combined():
-            if multi:
-                initial = f'{specs[0]["date"]}_slate_{len(specs)}games.xlsx'
-            else:
-                initial = (f'{specs[0]["date"]}_{specs[0]["away_team"]}_at_'
-                           f'{specs[0]["home_team"]}.xlsx')
-            path = filedialog.asksaveasfilename(
-                defaultextension=".xlsx", initialfile=initial,
-                filetypes=[("Excel", "*.xlsx")])
-            if path:
-                from predict import save_excel_slate
-                save_excel_slate(specs, out, path)
-
+        # (no combined-copy button: Predict already writes the combined
+        # workbook automatically — its path shows in the footer label)
         def export_per_game():
             folder = filedialog.askdirectory(
                 title="Folder for the per-game Excel files")
@@ -735,8 +759,6 @@ class App(tk.Tk):
 
         foot = tk.Frame(win, bg=NAVY)
         foot.pack(side="bottom", fill="x", padx=12, pady=6)
-        ttk.Button(foot, text="Export combined copy...",
-                   command=export_combined).pack(side="right")
         if multi:
             ttk.Button(foot, text="Export one file per game...",
                        command=export_per_game).pack(side="right", padx=6)

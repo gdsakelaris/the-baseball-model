@@ -1,7 +1,8 @@
 """Scrape MLB player pitching stats (standard + expanded) from MLB.com.
 
-Pulls season-level pitching stats for 2020-2026 from the same data service
-that powers https://www.mlb.com/stats/pitching (bdfed.stitch.mlbinfra.com) and
+Pulls season-level pitching stats for every covered season (Scripts/
+seasons.py) from the same data service that powers
+https://www.mlb.com/stats/pitching (bdfed.stitch.mlbinfra.com) and
 writes one combined CSV. Regular season, all teams, all positions, all
 players, no splits. Players who changed teams mid-season get a single
 aggregated row for the year, attributed to their most recent team.
@@ -11,8 +12,12 @@ Relational keys shared with the other CSVs:
   - TeamName: full team name matching the roster file's Team column
     (Team holds MLB's abbreviation, e.g. PHI)
 
+Completed seasons are served from the existing output CSV (they never
+change); only the current season hits the network, with the previous run's
+rows as the stale fallback if that fetch fails. --backfill refetches all.
+
 Usage:
-    python scrape_pitching_stats.py [-o output.csv]
+    python scrape_pitching_stats.py [-o output.csv] [--backfill]
 """
 
 import argparse
@@ -23,10 +28,11 @@ from pathlib import Path
 
 import requests
 
+from seasons import CURRENT_SEASON, YEARS, stored_rows_by_season
+
 DATA_DIR = Path(__file__).resolve().parents[1] / "Data"
 
 API_URL = "https://bdfed.stitch.mlbinfra.com/bdfed/stats/player"
-YEARS = range(2020, 2027)
 PAGE_SIZE = 1000
 
 HEADERS = {
@@ -119,18 +125,37 @@ def fetch_season(session, year):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-o", "--output",
-                    default=str(DATA_DIR / "mlb_pitching_stats_2020_2026.csv"))
+                    default=str(DATA_DIR / "mlb_pitching_stats.csv"))
+    ap.add_argument("--backfill", action="store_true",
+                    help="refetch every season, ignoring stored rows")
     args = ap.parse_args()
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
+    stored = {} if args.backfill else stored_rows_by_season(args.output, "Year")
+
     all_rows = []
     for year in YEARS:
+        if year != CURRENT_SEASON and year in stored:
+            all_rows.extend(stored[year])
+            print(f"{year}: {len(stored[year])} players (stored)")
+            continue
         try:
             season_rows = fetch_season(session, year)
         except Exception as e:
-            print(f"{year}: FAILED ({e})", file=sys.stderr)
+            if year in stored:
+                all_rows.extend(stored[year])
+                print(f"WARNING: {year} fetch failed ({e}); keeping the "
+                      f"previous run's {len(stored[year])} rows")
+                continue
+            if year == CURRENT_SEASON:
+                print(f"WARNING: {year} fetch failed and no stored rows yet "
+                      f"({e}); season not started?")
+                continue
+            print(f"{year}: FAILED ({e}) and no stored rows to fall back "
+                  f"on — run --backfill once the source recovers",
+                  file=sys.stderr)
             sys.exit(1)
         for r in season_rows:
             all_rows.append({col: r.get(field, "") for col, field in COLUMNS.items()})

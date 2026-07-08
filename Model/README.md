@@ -4,13 +4,16 @@ Gradient-boosted (LightGBM) models trained on the CSVs in `Data/`, predicting
 per game (or per slate of games — the GUI's "Add game to slate" runs many at
 once with one combined, cross-game-ranked board):
 
-- **Per lineup batter:** calibrated probabilities for eight props — home
+- **Per lineup batter:** calibrated probabilities for 14 props — home
   run (with fair American odds), 1+ hit, 2+ hits, 2+ total bases, run
-  scored, 1+ RBI, 1+ walk, stolen base — plus expected HR count and a
+  scored, 1+ RBI, 1+ walk, stolen base, single, double, 1+/2+ strikeouts,
+  2+/3+ hits+runs+RBIs — plus expected HR / K / H+R+RBI counts and a
   career-games flag (players under ~50 MLB games are the least reliable
   segment; they're marked `*` in the GUI).
 - **Per starter:** expected strikeouts and P(over) for K lines 3.5–8.5,
-  negative-binomial-shaded by the calibration-year K dispersion.
+  negative-binomial-shaded by the calibration-year K dispersion; plus
+  outs recorded, walks allowed, and hits allowed with per-line P(over)
+  from cal-year logistic line calibrators.
 - **Per game:** expected lineup home runs; expected total runs with
   P(over) from a negative binomial whose dispersion is measured on the
   calibration year (real totals run ~2x Poisson variance); and a home-win
@@ -26,7 +29,7 @@ once with one combined, cross-game-ranked board):
 | File | Role |
 |---|---|
 | `features.py` | Feature engineering. Everything is **as-of date**: a game on date D only uses data from before D (no leakage). Same definitions serve training (vectorized) and prediction (per-entity); `predict.py --selftest` proves the two paths agree. |
-| `train.py` | Builds frames, trains everything: the model-SELECTION suite (train ≤2023, cal 2024, test 2025 → `models_bt.joblib`) and then the shipping models (train ≤2024, cal 2025 → `models.joblib`). `--rebuild` refreshes cached frames after re-scraping data; `--select` stops after the selection suite (the fast iteration loop). |
+| `train.py` | Builds frames, trains everything: the model-SELECTION suite (→ `models_bt.joblib`) and then the shipping models (→ `models.joblib`). The train/cal/holdout years are DERIVED from the seasons in the data (`suite_years`), so the annual rollover needs no code edit — currently ≤2023/2024/2025 and ≤2024/2025/2026. `--rebuild` refreshes cached frames after re-scraping data; `--select` stops after the selection suite (the fast iteration loop). |
 | `predict.py` | `Predictor.predict_game(spec)`; CLI: `--game <GamePk>` replays a historical game, `--selftest` checks train/serve parity. Every run saves a workbook to `Predictions/`. |
 | `gui.py` | Tkinter app: dropdowns for teams, date, stadium, starters, two ordered 9-man lineups, day/night, weather. Auto-fill pulls each team's most recent real lineup. Results are shown and auto-saved to `Predictions/<date>_<away>_at_<home>_<time>.xlsx`. |
 | `odds.py` | Sportsbook-odds utilities: American↔probability, de-vig, EV/ROI, and the canonical odds-store schema. Bridges the model's fair probabilities to the prices books actually post; shared by `Scripts/scrape_odds.py` and evaluate_deep Section 9. |
@@ -39,7 +42,26 @@ once with one combined, cross-game-ranked board):
 - **Batter form:** career / season-to-date / rolling 7-15-30-game HR rate,
   ISO, contact, K/BB rates, XBH rate, full OBP (incl. HBP); days rest;
   lineup slot; home/away; career home/road splits (venue-context rates);
-  position wear (career share of games caught / DH'd).
+  position wear (career share of games caught / DH'd); **90-day
+  decay-weighted rates** (every past game weighted by recency — skill drift
+  without a rolling window's cliff) and **trend deltas** (rolling-15 vs
+  season, season vs career; last-5 vs season for the opposing starter).
+- **Contact quality** (Statcast, every tracked ball in play — not just
+  homers): shrunk career + 90-day-decayed exit velo, hard-hit%, barrel
+  rate, launch angle, xBA / xwOBA on contact, ground-ball share, and
+  spray-based pull% / pulled-air% (which interact with the park's fence
+  distances) — for the batter AND allowed by the opposing starter. Process
+  stats stabilize in ~40 batted balls vs hundreds of AB for outcomes, so
+  these see skill (and in-season change) far earlier than box-score rates.
+- **Plate discipline** (Statcast, every pitch, stored as daily aggregates):
+  the batter's whiff-per-swing and chase rates (career + decayed; chase
+  feeds the walk prop, whiff the contact props) and the opposing starter's
+  decayed swinging-strike rate.
+- **Raw speed** (Statcast sprint leaderboard, prior-season): sprint speed
+  and home-to-first time for the SB and run-scored props.
+- **Team defense** (Statcast outs above average, prior-season, per-162):
+  the opponent's range quality, for the BABIP-driven hit props and the
+  runs model — the unearned-run proxy only ever saw errors.
 - **Prop-specific history:** stolen-base rate + success rate (career,
   season, rolling) and the starter's SB-allowed / stop rate for the SB
   prop; the batter's own runs-scored and RBI rates for the run/RBI props;
@@ -69,9 +91,11 @@ once with one combined, cross-game-ranked board):
   pitch count), own team offense (overall + home/road split), platoon
   (handedness matchup), age/height/weight, season, month.
 - **Strikeout model only:** the starter's usage-weighted arsenal whiff /
-  K% / put-away (two-year blend), his strike rate, and the ACTUAL opposing
-  lineup's aggregate K%, BB%, whiff-vs-his-arsenal and K%-vs-his-hand
-  (not just team-season rates).
+  K% / put-away (two-year blend), his strike rate, his as-of decayed
+  swinging-strike / CSW / chase-induced / zone rates and fastball-velocity
+  trend (pitch-level dailies — these move DURING the season), and the
+  ACTUAL opposing lineup's aggregate K%, BB%, whiff-vs-his-arsenal,
+  K%-vs-his-hand, and decayed whiff/chase (not just team-season rates).
 - **Runs/totals model only:** venue-split offense, opponent high-leverage
   bullpen + fatigue, opponent defense proxy (unearned-run rate), starter
   hits-allowed rate.
@@ -127,11 +151,22 @@ closing lines before staking anything, and treat small edges as noise.
 ## Workflow
 
 ```
-# refresh all data AND retrain, one command (scrapers default to Data/)
+# one-time: backfill the Statcast histories (batted balls ~10 min, pitch
+# dailies ~30 min; the daily job keeps both current incrementally)
+python Scripts/scrape_statcast.py --backfill
+python Scripts/scrape_pitches.py --backfill
+
+# refresh all data AND retrain, one command (scrapers default to Data/).
+# Every scraped file is schema-validated (Scripts/validate_data.py) against
+# the previous copy in Data/backups/; a failing file is restored from backup
+# and blocks the retrain, so a broken scrape can't poison the models.
 python Scripts/update_all.py --retrain
 
 # or just the data
 python Scripts/update_all.py
+
+# check the data files by hand (same validation the pipeline runs)
+python Scripts/validate_data.py
 
 # retrain manually — selection suite + shipping models (~2 min total)
 python Model/train.py --rebuild
@@ -170,6 +205,27 @@ A scheduled task named **"MLB Daily Update"** runs
 `update_all.py --retrain` (rescrape all data, then retrain the models) and
 logs each run to `Logs/update_<date>.log`. `-StartWhenAvailable` means a
 missed run (laptop asleep at 6 AM) fires as soon as the machine is next on.
+
+Failure guards, in the order they act:
+
+- **Completed-season caching** — per-year scrapers (season stats, homeruns,
+  arsenals, sprint speed, OAA) serve finished seasons from their own output
+  CSV and only fetch the current season, so an upstream hiccup on
+  historical data (e.g. Savant throttling a 2021 page) can no longer kill a
+  job. A failed current-season fetch falls back to the previous run's rows
+  with a WARNING (harmless for prior-season-consumed leaderboards).
+  `--backfill` on any of them forces a full refetch.
+- **Schema validation + backup restore** (`validate_data.py`) — a file that
+  fails shape checks is restored from `Data/backups/` and the retrain is
+  blocked.
+- **Freshness tripwire** — May–September, the game logs / HR log / Statcast
+  files must contain games newer than 6 days, otherwise validation FAILS.
+  This catches the "scraper succeeds but ingests nothing new" failure mode
+  (which every shape check passes) — the exact way a frozen season list
+  would fail silently.
+- **Status surfacing** — `update_all.py` writes
+  `Logs/last_run_status.json`; the GUI reads it at startup and pops a
+  warning when the morning job failed or the data is stale mid-season.
 
 Manage it:
 

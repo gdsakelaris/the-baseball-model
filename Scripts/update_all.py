@@ -10,6 +10,14 @@ morning data job — run it alongside get_todays_games.py near first pitch.
 Each scraper is fault-isolated: one failing doesn't stop the rest, and the
 exit code is non-zero if anything failed.
 
+Safety net (validate_data.py): before each scraper runs, its current
+known-good CSVs are copied to Data/backups/; after it runs, the fresh files
+are schema-validated (required columns, keys, row counts vs the backup, date
+sanity). A file that fails validation is REPLACED by its backup, the job is
+marked FAILED, and the retrain is skipped — a silent upstream format change
+can no longer poison the daily retrain. The last log line is always
+"RESULT: OK" or "RESULT: FAILED" for easy scanning of Logs/update_*.log.
+
 Usage:
     python Scripts/update_all.py [--retrain]
 
@@ -18,13 +26,24 @@ Usage:
 """
 
 import argparse
+import datetime as dt
+import json
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import validate_data as V
+
 SCRIPTS_DIR = Path(__file__).resolve().parent
 MODEL_TRAIN = SCRIPTS_DIR.parent / "Model" / "train.py"
+DATA_DIR = V.DATA_DIR
+BACKUP_DIR = V.BACKUP_DIR
+# machine-readable outcome of the last run; the GUI reads this at startup
+# and warns when the morning job failed (otherwise the only signal is a
+# log line nobody looks at until predictions have quietly gone stale)
+STATUS_FILE = SCRIPTS_DIR.parent / "Logs" / "last_run_status.json"
 
 
 # matches the scrape_*.py glob but must NOT run in the 6 AM data job: betting
@@ -32,6 +51,27 @@ MODEL_TRAIN = SCRIPTS_DIR.parent / "Model" / "train.py"
 # grab opening/empty markets and burn the odds-API quota. Run it near first
 # pitch with get_todays_games.py instead.
 EXCLUDE = {"scrape_odds.py"}
+
+# which Data/ files each job owns (backed up before the run, validated after)
+JOB_FILES = {
+    "scrape_batting_stats.py": ["mlb_batting_stats.csv"],
+    "scrape_gamelogs_3F.py": ["mlb_games.csv",
+                              "mlb_game_batting.csv",
+                              "mlb_game_pitching.csv"],
+    "scrape_handedness.py": ["mlb_handedness.csv"],
+    "scrape_homeruns.py": ["mlb_homeruns.csv"],
+    "scrape_pitch_arsenals_2F.py (pitchers)":
+        ["mlb_pitch_arsenals.csv"],
+    "scrape_pitch_arsenals_2F.py (batters)":
+        ["mlb_pitch_arsenals_batters.csv"],
+    "scrape_pitching_stats.py": ["mlb_pitching_stats.csv"],
+    "scrape_rosters.py": ["mlb_rosters.csv"],
+    "scrape_statcast.py": ["mlb_statcast_bip.csv"],
+    "scrape_pitches.py": ["mlb_pitch_daily_pitchers.csv",
+                          "mlb_pitch_daily_batters.csv"],
+    "scrape_sprint_speed.py": ["mlb_sprint_speed.csv"],
+    "scrape_oaa.py": ["mlb_oaa.csv"],
+}
 
 
 def discover_jobs():
@@ -58,6 +98,45 @@ def run(label, args):
     return ok, took
 
 
+def backup_known_good(files):
+    """Copy each currently-valid file to Data/backups/ before its scraper
+    rewrites it. A file that is ALREADY invalid is not backed up — that would
+    clobber the last good backup with a bad copy."""
+    BACKUP_DIR.mkdir(exist_ok=True)
+    for name in files:
+        src = DATA_DIR / name
+        if not src.exists():
+            continue
+        if V.validate_file(src):        # current copy itself fails validation
+            print(f"    (not backing up {name}: current copy already fails "
+                  f"validation; keeping the existing backup)", flush=True)
+            continue
+        shutil.copy2(src, BACKUP_DIR / name)
+
+
+def validate_and_restore(files):
+    """Validate a job's fresh output against the backups. On failure, restore
+    the backup so downstream consumers keep working. Returns True if every
+    file passed."""
+    all_ok = True
+    for name in files:
+        prev = BACKUP_DIR / name
+        problems = V.validate_file(DATA_DIR / name,
+                                   prev if prev.exists() else None)
+        if not problems:
+            continue
+        all_ok = False
+        for p in problems:
+            print(f"    VALIDATION FAIL: {p}", flush=True)
+        if prev.exists():
+            shutil.copy2(prev, DATA_DIR / name)
+            print(f"    restored {name} from backup", flush=True)
+        else:
+            print(f"    no backup available for {name}; the bad file was "
+                  f"left in place for inspection", flush=True)
+    return all_ok
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--retrain", action="store_true",
@@ -66,7 +145,14 @@ def main():
 
     results = []
     for label, cmd in discover_jobs():
+        files = JOB_FILES.get(label, [])
+        if files:
+            backup_known_good(files)
         ok, took = run(label, cmd)
+        if ok and files:
+            ok = validate_and_restore(files)
+            if not ok:
+                print(f">>> {label}: data FAILED validation", flush=True)
         results.append((label, ok, took))
 
     all_ok = all(ok for _, ok, _ in results)
@@ -77,16 +163,24 @@ def main():
             results.append(("retrain models", ok, took))
             all_ok = all_ok and ok
         else:
-            print("\nskipping retrain: at least one scraper failed",
-                  file=sys.stderr)
+            print("\nskipping retrain: at least one scraper failed or "
+                  "produced invalid data", file=sys.stderr)
 
     print(f"\n{'=' * 70}\nSummary\n{'=' * 70}")
     for label, ok, took in results:
         print(f"  {'OK    ' if ok else 'FAILED'}  {took:6.0f}s  {label}")
+
+    STATUS_FILE.parent.mkdir(exist_ok=True)
+    STATUS_FILE.write_text(json.dumps({
+        "finished": dt.datetime.now().isoformat(timespec="seconds"),
+        "ok": all_ok,
+        "failed_jobs": [label for label, ok, _ in results if not ok],
+    }, indent=1))
+
     if not all_ok:
-        print("\nsome steps FAILED", file=sys.stderr)
+        print("\nRESULT: FAILED", flush=True)
         sys.exit(1)
-    print("\nall data up to date")
+    print("\nRESULT: OK")
 
 
 if __name__ == "__main__":

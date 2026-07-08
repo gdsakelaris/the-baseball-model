@@ -1,26 +1,38 @@
 # MLB Data Glossary
 
-Ten CSV files, all UTF-8 (Excel-safe), scraped by the scripts in `Scripts/`.
-Sources: MLB.com rosters & stats, OnlyHomers.com (home run log), Baseball
-Savant (pitch-level Statcast), MLB Stats API (per-game boxscores),
-USGS/OpenTopoData (elevations).
+Fifteen CSV files, all UTF-8 (Excel-safe), scraped by the scripts in
+`Scripts/`. Sources: MLB.com rosters & stats, OnlyHomers.com (home run log),
+Baseball Savant (pitch-level Statcast, batted balls, sprint speed, OAA),
+MLB Stats API (per-game boxscores), USGS/OpenTopoData (elevations).
+
+Filenames are stable across seasons; every multi-season file covers 2020
+through the current season (`Scripts/seasons.py` decides what "current"
+means, so the files simply grow at each annual rollover).
 
 | File | Built by |
 |---|---|
-| mlb_rosters_2026.csv | scrape_rosters.py |
-| mlb_batting_stats_2020_2026.csv | scrape_batting_stats.py |
-| mlb_pitching_stats_2020_2026.csv | scrape_pitching_stats.py |
+| mlb_rosters.csv | scrape_rosters.py |
+| mlb_batting_stats.csv | scrape_batting_stats.py |
+| mlb_pitching_stats.csv | scrape_pitching_stats.py |
 | mlb_ballparks.csv | build_ballparks.py |
-| mlb_homeruns_2020_2026.csv | scrape_homeruns.py |
-| mlb_pitch_arsenals_2020_2026.csv | scrape_pitch_arsenals_2F.py |
-| mlb_pitch_arsenals_batters_2020_2026.csv | scrape_pitch_arsenals_2F.py --type batter |
-| mlb_games_2020_2026.csv | scrape_gamelogs_3F.py (writes all three game files in one run) |
-| mlb_game_batting_2020_2026.csv | scrape_gamelogs_3F.py |
-| mlb_game_pitching_2020_2026.csv | scrape_gamelogs_3F.py |
+| mlb_homeruns.csv | scrape_homeruns.py |
+| mlb_pitch_arsenals.csv | scrape_pitch_arsenals_2F.py |
+| mlb_pitch_arsenals_batters.csv | scrape_pitch_arsenals_2F.py --type batter |
+| mlb_games.csv | scrape_gamelogs_3F.py (writes all three game files in one run) |
+| mlb_game_batting.csv | scrape_gamelogs_3F.py |
+| mlb_game_pitching.csv | scrape_gamelogs_3F.py |
+| mlb_statcast_bip.csv | scrape_statcast.py (`--backfill` once; daily runs are incremental) |
+| mlb_pitch_daily_pitchers.csv | scrape_pitches.py (writes both pitch-daily files; `--backfill` once) |
+| mlb_pitch_daily_batters.csv | scrape_pitches.py |
+| mlb_sprint_speed.csv | scrape_sprint_speed.py |
+| mlb_oaa.csv | scrape_oaa.py |
 
 All scrapers write into `Data/` by default. `Scripts/update_all.py` runs every
 scraper (everything except build_ballparks.py) for a one-command daily
-refresh; add `--retrain` to also retrain the models afterward.
+refresh; add `--retrain` to also retrain the models afterward. Each scraped
+file is schema-validated (`Scripts/validate_data.py`) against the previous
+copy in `Data/backups/` before the pipeline accepts it; a file that fails
+validation is restored from backup and the retrain is skipped.
 
 ## How the files connect
 
@@ -59,7 +71,7 @@ postseason HRs. Homeruns 2024 includes 2 Futures Game rows (teams NLF/ALF).
 
 ---
 
-## mlb_rosters_2026.csv — current 2026 depth-chart rosters
+## mlb_rosters.csv — current depth-chart rosters
 One row per player per team (first depth-chart listing kept).
 
 | Column | Meaning |
@@ -74,7 +86,7 @@ One row per player per team (first depth-chart listing kept).
 | Wt | Weight (lb) |
 | DOB | Date of birth, MM/DD/YYYY |
 
-## mlb_batting_stats_2020_2026.csv — season batting lines
+## mlb_batting_stats.csv — season batting lines
 One row per player per season (traded players aggregated; `Team` = most recent).
 
 | Column | Meaning |
@@ -108,7 +120,7 @@ One row per player per season (traded players aggregated; `Team` = most recent).
 | BB/K | Walk-to-strikeout ratio |
 | BB% / K% | Walks / strikeouts per plate appearance |
 
-## mlb_pitching_stats_2020_2026.csv — season pitching lines
+## mlb_pitching_stats.csv — season pitching lines
 One row per pitcher per season (traded players aggregated).
 
 | Column | Meaning |
@@ -156,7 +168,7 @@ intentionally have no row here.
 | LF / CF / RF | Fence distance (ft) down left field / center / right field lines |
 | Elevation_ft | Ground elevation above sea level (ft), from USGS/OpenTopoData |
 
-## mlb_homeruns_2020_2026.csv — every home run, 2020–2026
+## mlb_homeruns.csv — every home run since 2020
 One row per home run. Source: OnlyHomers database. Rows run chronologically
 from 2020's first homer to 2026's latest (the site's per-season sequence; a
 couple dozen rows sit slightly out of date order where the site inserted
@@ -182,7 +194,7 @@ late corrections).
 | Ballpark | Stadium where hit |
 | Date | Game date, YYYY-MM-DD |
 
-## mlb_pitch_arsenals_2020_2026.csv — pitcher arsenal results (Statcast)
+## mlb_pitch_arsenals.csv — pitcher arsenal results (Statcast)
 One row per pitcher, per pitch type, per season. Results are what opposing
 batters did against that pitch.
 
@@ -203,13 +215,13 @@ batters did against that pitch.
 | xBA / xSLG / xwOBA | Expected stats from exit velo + launch angle (quality of contact) |
 | Hard Hit % | Batted balls ≥ 95 mph |
 
-## mlb_pitch_arsenals_batters_2020_2026.csv — batter vs pitch type (Statcast)
+## mlb_pitch_arsenals_batters.csv — batter vs pitch type (Statcast)
 Same columns as above, but one row per **batter**, per pitch type faced, per
 season. `%` = share of pitches the batter saw of that type; positive run
 values favor the **batter**. Join to the pitcher file on `PitchType` + `Year`
 to build batter-vs-arsenal matchups.
 
-## mlb_games_2020_2026.csv — every regular-season game
+## mlb_games.csv — every regular-season game
 One row per final regular-season game (MLB Stats API). Doubleheaders are two
 rows (distinct `GamePk`), suspended games appear once on their official date.
 
@@ -227,7 +239,7 @@ rows (distinct `GamePk`), suspended games appear once on their official date.
 | WindSpeed | Wind speed, mph |
 | WindDir | Wind direction text (Out To CF, In From LF, L To R, Calm, …) |
 
-## mlb_game_batting_2020_2026.csv — per-game batting lines
+## mlb_game_batting.csv — per-game batting lines
 One row per batter per game appearance (includes pinch-hitters/runners).
 This is the per-game label source for modeling: `HR > 0` means the player
 homered that game.
@@ -249,7 +261,7 @@ homered that game.
 | TB | Total bases |
 | LOB | Runners left on base |
 
-## mlb_game_pitching_2020_2026.csv — per-game pitching lines
+## mlb_game_pitching.csv — per-game pitching lines
 One row per pitcher per game appearance.
 
 | Column | Meaning |
@@ -264,3 +276,61 @@ One row per pitcher per game appearance.
 | BB / IBB / SO / HBP | Walks / intentional / strikeouts / hit batsmen |
 | WP / BK | Wild pitches / balks |
 | W / L / SV / HLD | Decision flags for that game (1/0) |
+
+## mlb_statcast_bip.csv — every tracked ball in play (Statcast)
+One row per batted ball (regular season). The HR log covers only homers — a
+sample censored to each batter's best contact; this covers ALL contact, so
+the model can see contact quality ("process" stats that stabilize far faster
+than outcomes) for both batters and pitchers.
+
+| Column | Meaning |
+|---|---|
+| GamePk, Season, Date | Game keys (GamePk matches the game files) |
+| BatterId / PitcherId | MLB player IDs (match PlayerId everywhere) |
+| Stand / PThrows | Batter side / pitcher hand for this matchup |
+| Events | Outcome (single, home_run, field_out, …) |
+| BBType | fly_ball / ground_ball / line_drive / popup |
+| ExitVelo | Exit velocity, mph (blank when untracked) |
+| LaunchAngle | Launch angle, degrees |
+| LSA | Savant launch-speed-angle code 1–6; 6 = barrel |
+| xBA / xwOBA | Expected BA / wOBA of this batted ball from EV+angle |
+| HitDistance | Projected distance, ft |
+| AtBat / PitchNum | At-bat number in game / pitch number in at-bat; (GamePk, AtBat, PitchNum) is unique |
+
+## mlb_pitch_daily_pitchers.csv / mlb_pitch_daily_batters.csv — pitch-level daily aggregates
+One row per player per day, aggregated at scrape time from EVERY pitch
+(~700k/season — too much to keep raw). Swing-and-miss and plate discipline
+are the fastest-stabilizing skills in baseball; none of this is in box
+scores or the batted-ball file.
+
+| Column | Meaning |
+|---|---|
+| PlayerId, Date | MLB player ID / game day |
+| n | Pitches thrown (pitcher file) or seen (batter file) |
+| sw_n | Swings |
+| wh_n | Whiffs (swinging strikes, incl. blocked) |
+| cs_n | Called strikes |
+| z_n / oz_n | Pitches in / out of the strike zone |
+| oz_sw | Out-of-zone swings (chases) |
+| fb_n / fb_v | Fastballs (FF+SI) with tracked velo / their velo sum (pitcher file only) |
+
+## mlb_sprint_speed.csv — Statcast sprint speed
+One row per (Year, PlayerId), min 5 competitive runs. Consumed as
+PRIOR-season values (leakage-free): a 2026 game sees the 2025 measurement.
+
+| Column | Meaning |
+|---|---|
+| Year, PlayerId, Name, Team | Keys |
+| CompetitiveRuns | Sample size (qualifying runs) |
+| SprintSpeed | ft/s over the fastest one-second window |
+| HPto1B | Home-to-first time, seconds |
+
+## mlb_oaa.csv — team Outs Above Average (defense)
+One row per (Year, Team). The only direct defense-range measurement in the
+data; consumed as PRIOR-season values.
+
+| Column | Meaning |
+|---|---|
+| Year, Team, TeamId, TeamName | Keys (Team = that season's abbreviation, rename-aware) |
+| OAA | Raw season outs above average |
+| OAA_per162 | Scaled to 162 games (2020 was a 60-game season) |

@@ -1,17 +1,18 @@
-"""Scrape per-game boxscore logs for every MLB regular-season game 2020-2026.
+"""Scrape per-game boxscore logs for every MLB regular-season game since 2020.
 
 Uses MLB's public Stats API (statsapi.mlb.com): one schedule call per season
-to enumerate final games, then one boxscore call per game (~14,000 games,
-fetched concurrently). Writes three relational CSVs:
+(Scripts/seasons.py decides the covered years) to enumerate final games,
+then one boxscore call per game (~14,000 games, fetched concurrently).
+Writes three relational CSVs:
 
-  mlb_games_2020_2026.csv          one row per game: teams, score, venue,
-                                   day/night, temperature, wind, conditions
-  mlb_game_batting_2020_2026.csv   one row per batter-game: lineup slot,
-                                   position, PA/AB/H/HR/BB/SO/... (the
-                                   per-game labels for modeling)
-  mlb_game_pitching_2020_2026.csv  one row per pitcher-game: started or
-                                   relieved, IP, batters faced, pitches,
-                                   H/R/ER/HR/BB/SO, decisions
+  mlb_games.csv          one row per game: teams, score, venue,
+                         day/night, temperature, wind, conditions
+  mlb_game_batting.csv   one row per batter-game: lineup slot,
+                         position, PA/AB/H/HR/BB/SO/... (the
+                         per-game labels for modeling)
+  mlb_game_pitching.csv  one row per pitcher-game: started or
+                         relieved, IP, batters faced, pitches,
+                         H/R/ER/HR/BB/SO, decisions
 
 Relational keys: PlayerId matches every other CSV; Team/Opponent are MLB
 abbreviations (per-season correct, e.g. OAK through 2024, ATH from 2025);
@@ -42,8 +43,9 @@ from pathlib import Path
 
 import requests
 
+from seasons import YEARS
+
 API = "https://statsapi.mlb.com/api/v1"
-YEARS = range(2020, 2027)
 
 HEADERS = {
     "User-Agent": (
@@ -273,9 +275,9 @@ def main():
             all_data[key].extend(data[key])
 
     outputs = [
-        ("mlb_games_2020_2026.csv", GAME_COLS, all_data["games"]),
-        ("mlb_game_batting_2020_2026.csv", BAT_COLS, all_data["batting"]),
-        ("mlb_game_pitching_2020_2026.csv", PIT_COLS, all_data["pitching"]),
+        ("mlb_games.csv", GAME_COLS, all_data["games"]),
+        ("mlb_game_batting.csv", BAT_COLS, all_data["batting"]),
+        ("mlb_game_pitching.csv", PIT_COLS, all_data["pitching"]),
     ]
     for name, cols, rows in outputs:
         path = os.path.join(args.outdir, name)

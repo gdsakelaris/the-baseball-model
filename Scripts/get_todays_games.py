@@ -104,7 +104,7 @@ def norm_name(name):
 
 def full_name_to_abbrev():
     m = {}
-    with open(DATA_DIR / "mlb_batting_stats_2020_2026.csv",
+    with open(DATA_DIR / "mlb_batting_stats.csv",
               encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             m[row["TeamName"]] = row["Team"]
@@ -123,13 +123,15 @@ def build_name_index():
         by_team[(team, n)] = pid
         by_name.setdefault(n, set()).add(pid)
 
-    with open(DATA_DIR / "mlb_rosters_2026.csv", encoding="utf-8-sig") as f:
+    with open(DATA_DIR / "mlb_rosters.csv", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             add(full2ab.get(r["Team"]), r["Name"], int(r["PlayerId"]))
-    # recent game-log batters (current season), attributed to last team seen
-    path = DATA_DIR / "mlb_game_batting_2020_2026.csv"
-    rows = [r for r in csv.DictReader(open(path, encoding="utf-8-sig"))
-            if r["Season"] == "2026"]
+    # recent game-log batters (newest season in the file = current),
+    # attributed to last team seen
+    path = DATA_DIR / "mlb_game_batting.csv"
+    rows = list(csv.DictReader(open(path, encoding="utf-8-sig")))
+    latest = max(r["Season"] for r in rows)
+    rows = [r for r in rows if r["Season"] == latest]
     rows.sort(key=lambda r: r["Date"])
     for r in rows:
         add(r["Team"], r["Name"], int(r["PlayerId"]))

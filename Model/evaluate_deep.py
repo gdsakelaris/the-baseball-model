@@ -22,21 +22,23 @@ questions a single accuracy table can't:
                                diff so a retrain's effect is visible at a glance
 
 Usage:
-    python Model/evaluate_deep.py [--prop hr] [--boot 400]   # SELECTION suite on 2025
-    python Model/evaluate_deep.py --confirm [--year 2026]    # shipping suite on 2026
+    python Model/evaluate_deep.py [--prop hr] [--boot 400]   # SELECTION suite
+    python Model/evaluate_deep.py --confirm                  # shipping suite
 
-The DEFAULT run scores the selection suite (train<=2023, cal 2024) on 2025 —
-safe to run as often as you like. 2026 is CONFIRM-ONLY: iterating
-features/params against its numbers quietly overfits the holdout, so looking
-at it takes an explicit --confirm. The iteration loop is:
+The years come from the trained artifacts (train.py derives them from the
+data, e.g. selection on 2025 / holdout 2026 while 2026 is the newest
+season). The DEFAULT run scores the selection suite on its test year — safe
+to run as often as you like. The newest season is CONFIRM-ONLY: iterating
+features/params against its numbers quietly overfits the holdout, so
+looking at it takes an explicit --confirm. The iteration loop is:
 
     python Model/evaluate_deep.py --set-baseline   # snapshot before changing
     ...make a change...
     python Model/train.py --rebuild --select       # retrain the selection suite
-    python Model/evaluate_deep.py                  # Section 11 diff on 2025
+    python Model/evaluate_deep.py                  # Section 11 diff, selection year
     ...iterate; only when satisfied:
     python Model/train.py                          # both suites
-    python Model/evaluate_deep.py --confirm        # ONE confirming look at 2026
+    python Model/evaluate_deep.py --confirm        # ONE confirming holdout look
 """
 
 import argparse
@@ -56,8 +58,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import features as F  # noqa: E402
 import odds as O  # noqa: E402
 import recalibrate as R  # noqa: E402
-from predict import (american_odds, nb_over, poisson_over,  # noqa: E402
-                     poisson_win, predict_prop, predict_win)
+from predict import (american_odds, count_over, nb_over,  # noqa: E402
+                     poisson_over, poisson_win, predict_prop, predict_win)
 from train import PROPS  # noqa: E402
 
 ART = Path(__file__).resolve().parent / "artifacts"
@@ -77,9 +79,15 @@ TARGET_ONE = ("_dispersion",)                 # ideal is 1.0; closer = better
 NOISE_BAND = {"_auc": 0.004, "_edge": 0.001, "_ece": 0.003, "_top10": 0.02,
               "_mae": 0.008, "_dispersion": 0.02, "_acc": 0.008,
               "_logloss": 0.002}
+# exact-key overrides where the metric's scale differs from its suffix class
+# (outs run ~16.5 a start, hits allowed ~5 — their MAE jitter is larger than
+# the K model's; provisional sizes, tune after a few retrains)
+NOISE_BAND_EXACT = {"outs_mae": 0.03, "pha_mae": 0.015, "xhrr_mae": 0.01}
 
 
 def noise_band(metric):
+    if metric in NOISE_BAND_EXACT:
+        return NOISE_BAND_EXACT[metric]
     for suf, band in NOISE_BAND.items():
         if metric.endswith(suf):
             return band
@@ -344,6 +352,53 @@ def section_strikeouts(sf_y, art):
 
     return {"k_mae": round(float(mean_absolute_error(y, mu)), 4),
             "k_dispersion": round(float(disp), 4)}
+
+
+def section_count_heads(bf_y, sf_y, art):
+    """Count-prop heads (batter Ks, H+R+RBI, starter outs/walks/hits):
+    mean quality, dispersion, and NB line calibration — the starter-K deep
+    dive generalized. Batter HALF-POINT lines are priced in serving by the
+    calibrated binary heads (Section 1 grades those); these tables check the
+    count means (xSO/xHRR/xOuts/...) and their P(over) distributions."""
+    cm = art.get("count_models")
+    if not cm:
+        return {}
+    print("\n=== 7b. Count props — means, dispersion, line calibration ===")
+    out = {}
+    for name, head in cm.items():
+        d = bf_y if head["frame"] == "bat" else sf_y
+        X = prep(d, head["cols"], art["cat_levels"])
+        mu = head["model"].predict(X)
+        y = d[head["target"]].to_numpy().astype(float)
+        disp_obs = float(np.mean((y - mu) ** 2) / np.mean(mu))
+        print(f"\n--- {name} ({head['desc']}; {len(y):,} rows) ---")
+        print(f"  MAE {mean_absolute_error(y, mu):.3f} | bias (pred-actual) "
+              f"{mu.mean() - y.mean():+.3f} | observed dispersion "
+              f"{disp_obs:.2f} | model disp {head['disp']:.2f} (cal year)")
+        rows = []
+        for line in head["lines"]:
+            p_over = count_over(head, mu, line)
+            actual = (y > line).astype(int)
+            if actual.min() == actual.max():
+                continue
+            rows.append({
+                "line": line,
+                "cal": "logit" if line in head.get("line_cals", {}) else "nb",
+                "mean P(over)": f"{p_over.mean():.3f}",
+                "actual over rate": f"{actual.mean():.3f}",
+                "logloss": f"{log_loss(actual, np.clip(p_over, 1e-4, 1 - 1e-4)):.4f}",
+                "base logloss": f"{log_loss(actual, np.full_like(p_over, actual.mean())):.4f}"})
+        if rows:
+            print(pd.DataFrame(rows).to_string(index=False))
+        out[f"{name}_mae"] = round(float(mean_absolute_error(y, mu)), 4)
+        out[f"{name}_dispersion"] = round(disp_obs, 4)
+    print("\n  P(over) per line comes from a cal-year logistic on mu "
+          "('logit' — handles the\n  under-Poisson variance of bounded "
+          "counts like outs and batter Ks), falling\n  back to nb_over "
+          "('nb') where a line had no calibration data. For batter\n  "
+          "half-point lines the binary heads (Section 1) stay the sellable "
+          "numbers.")
+    return out
 
 
 def section_games(gf_y, art):
@@ -634,8 +689,9 @@ def verdict(metric, was, now):
 def handle_baseline(summary, year, set_baseline, select=False):
     """Save this run's headline metrics as the baseline, or (default) diff the
     current run against a saved one and report what improved / regressed.
-    Selection mode keeps its own baseline file, so iterating on 2025 never
-    collides with the confirm-only 2026 snapshot."""
+    Selection mode keeps its own baseline file (and both names carry the
+    scored year), so iterating on the selection year never collides with
+    the confirm-only holdout snapshot."""
     tag = "select_" if select else ""
     base_path = ART / f"eval_baseline_{tag}{year}.json"
     if set_baseline:
@@ -685,7 +741,9 @@ def handle_baseline(summary, year, set_baseline, select=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--year", type=int, default=2026)
+    ap.add_argument("--year", type=int, default=None,
+                    help="season to score (default: the scored suite's own "
+                         "test year, stored in its artifact)")
     ap.add_argument("--prop", default="hr",
                     help="prop for the threshold/segment sections")
     ap.add_argument("--boot", type=int, default=400,
@@ -695,12 +753,12 @@ def main():
                          "to diff future runs against")
     ap.add_argument("--select", action="store_true",
                     help="(default) score the SELECTION suite "
-                         "(models_bt.joblib: train<=2023, cal 2024) on its "
-                         "2025 test year. Iterate here.")
+                         "(models_bt.joblib) on its own test year. "
+                         "Iterate here.")
     ap.add_argument("--confirm", action="store_true",
                     help="score the SHIPPING suite (models.joblib) on the "
-                         "2026 confirm-only holdout. Use once per finished "
-                         "change, not to iterate.")
+                         "confirm-only holdout (the newest season). Use once "
+                         "per finished change, not to iterate.")
     ap.add_argument("--odds", default=str(O.DEFAULT_STORE),
                     help="odds store CSV for the vs-market section "
                          "(Scripts/scrape_odds.py writes it)")
@@ -716,29 +774,38 @@ def main():
                      "`python Model/train.py --select` (or a plain train.py "
                      "run) first")
         art = joblib.load(art_path)
-        if args.year != 2026 and args.year != 2025:
-            print(f"(the default run scores the selection suite on its 2025 "
-                  f"test year; ignoring --year {args.year}. For the shipping "
-                  f"suite use --confirm.)")
-        args.year = 2025
-        print("*** SELECTION mode (default): train<=2023, cal 2024, scored "
-              "on 2025. Iterate\n*** freely — 2026 stays untouched until you "
-              "confirm a finished change there\n*** once, with --confirm. ***")
+        # years stored by train.py; fall back for pre-rollover artifacts
+        yrs = art.get("years") or {"train": [2020, 2021, 2022, 2023],
+                                   "cal": 2024, "test": 2025}
+        if args.year is not None and args.year != yrs["test"]:
+            print(f"(the default run scores the selection suite on its own "
+                  f"{yrs['test']} test year; ignoring --year {args.year}. "
+                  f"For the shipping suite use --confirm.)")
+        args.year = yrs["test"]
+        print(f"*** SELECTION mode (default): train<={max(yrs['train'])}, "
+              f"cal {yrs['cal']}, scored on {yrs['test']}. Iterate\n*** "
+              f"freely — the confirm-only holdout stays untouched until you "
+              f"confirm a finished\n*** change there once, with --confirm. "
+              f"***")
     else:
         art = joblib.load(ART / "models.joblib")
-        if args.year <= 2024:
+        yrs = art.get("years") or {"train": [2020, 2021, 2022, 2023, 2024],
+                                   "cal": 2025, "test": 2026}
+        if args.year is None:
+            args.year = yrs["test"]
+        if args.year <= max(yrs["train"]):
             print("*** WARNING: training year -> in-sample, inflated numbers ***")
-        elif args.year == 2025:
-            print("*** NOTE: calibration year -> mildly optimistic numbers "
-                  "(early stop, blend\n*** weights and isotonic all fit on "
-                  "2025). For honest 2025 numbers use the\n*** default "
-                  "(selection) run. ***")
+        elif args.year == yrs["cal"]:
+            print(f"*** NOTE: calibration year -> mildly optimistic numbers "
+                  f"(early stop, blend\n*** weights and isotonic all fit on "
+                  f"{yrs['cal']}). For honest {yrs['cal']} numbers use the\n"
+                  f"*** default (selection) run. ***")
         else:
-            print("*** CONFIRM mode: 2026 is the confirm-only holdout. Use "
-                  "this to confirm a\n*** finished change once — iterating "
-                  "against these numbers quietly overfits\n*** the holdout. "
-                  "Day-to-day, run without --confirm (selection suite, "
-                  "2025). ***")
+            print(f"*** CONFIRM mode: {args.year} is the confirm-only "
+                  f"holdout. Use this to confirm a\n*** finished change once "
+                  f"— iterating against these numbers quietly overfits\n*** "
+                  f"the holdout. Day-to-day, run without --confirm "
+                  f"(selection suite, {yrs['cal']}). ***")
     frames = joblib.load(ART / "frames.joblib")
     bf, sf, gf = frames["bf"], frames["sf"], frames["gf"]
 
@@ -748,6 +815,8 @@ def main():
 
     results = {}
     for name, (target, _desc) in PROPS.items():
+        if name not in art["props"]:  # artifact predates this prop
+            continue
         p = predict_prop(art["props"][name], X)
         y = bf_y[target].to_numpy()
         base = np.full_like(p, y.mean())
@@ -770,14 +839,15 @@ def main():
 
     sf_y = sf[(sf["Season"] == args.year) & ~sf["ShortGame"].fillna(False)]
     summary.update(section_strikeouts(sf_y, art))
+    summary.update(section_count_heads(bf_y, sf_y, art))
 
     gf_y = gf[gf["Season"] == args.year].dropna(subset=["total_runs"])
     summary.update(section_games(gf_y, art))
 
     if select:
-        print("\n=== 9. Model vs. the market === (skipped in selection mode: "
-              "no odds store\n  exists for 2025, and market grading belongs "
-              "to the --confirm run anyway)")
+        print(f"\n=== 9. Model vs. the market === (skipped in selection "
+              f"mode: no odds store\n  exists for {args.year}, and market "
+              f"grading belongs to the --confirm run anyway)")
     else:
         section_market(results, args.year, args.odds, args.boot)
     section_inseason(results)
@@ -804,8 +874,9 @@ How to read this:
     inside each metric's noise band (retrain jitter) are "within noise" —
     only movement beyond the band says a change did anything. Dispersion
     counts as "better" when it moves toward 1.0.
-  - The default run scores the selection suite on 2025 — iterate here.
-    Look at 2026 (--confirm) only to confirm a finished change.""")
+  - The default run scores the selection suite on its own test year —
+    iterate here. Look at the newest season (--confirm) only to confirm a
+    finished change.""")
 
 
 if __name__ == "__main__":

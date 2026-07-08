@@ -116,7 +116,7 @@ def parse_depth_chart(html, team_name, keep_all_positions=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("-o", "--output", default=str(DATA_DIR / "mlb_rosters_2026.csv"))
+    ap.add_argument("-o", "--output", default=str(DATA_DIR / "mlb_rosters.csv"))
     ap.add_argument(
         "--all-positions",
         action="store_true",

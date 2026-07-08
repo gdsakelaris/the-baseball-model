@@ -24,9 +24,9 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 def collect_ids():
     ids = set()
-    for name, col in [("mlb_game_batting_2020_2026.csv", "PlayerId"),
-                      ("mlb_game_pitching_2020_2026.csv", "PlayerId"),
-                      ("mlb_rosters_2026.csv", "PlayerId")]:
+    for name, col in [("mlb_game_batting.csv", "PlayerId"),
+                      ("mlb_game_pitching.csv", "PlayerId"),
+                      ("mlb_rosters.csv", "PlayerId")]:
         with open(DATA_DIR / name, encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 try:

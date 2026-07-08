@@ -1,7 +1,8 @@
 """Scrape Statcast pitch arsenal stats from Baseball Savant.
 
 Pulls https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats for
-2020-2026 via the leaderboard's CSV export and writes one combined CSV.
+every covered season (Scripts/seasons.py) via the leaderboard's CSV export
+and writes one combined CSV.
 One row per player per pitch type per season. Minimum PA is set to 1 so
 every row the leaderboard tracks is included (the site defaults to 10).
 
@@ -17,8 +18,15 @@ Relational keys shared with the other CSVs:
   - PlayerId: MLB's stable player ID (PlayerId in the roster/stats files)
   - Team: MLB team abbreviation (Team in the stats files)
 
+Completed seasons are served from the existing output CSV (they never
+change); only the current season hits the network, and a failed
+current-season fetch falls back to the previous run's rows (the model
+consumes arsenals as prior-season values). --backfill forces a full
+refetch of every season.
+
 Usage:
     python scrape_pitch_arsenals.py [--type pitcher|batter] [-o output.csv]
+                                    [--backfill]
 """
 
 import argparse
@@ -30,10 +38,11 @@ from pathlib import Path
 
 import requests
 
+from seasons import CURRENT_SEASON, YEARS, stored_rows_by_season
+
 DATA_DIR = Path(__file__).resolve().parents[1] / "Data"
 
 API_URL = "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-YEARS = range(2020, 2027)
 
 HEADERS = {
     "User-Agent": (
@@ -90,22 +99,43 @@ def main():
     ap.add_argument("--type", choices=["pitcher", "batter"], default="pitcher",
                     dest="player_type")
     ap.add_argument("-o", "--output", default=None)
+    ap.add_argument("--backfill", action="store_true",
+                    help="refetch every season, ignoring stored rows")
     args = ap.parse_args()
     if args.output is None:
         suffix = "" if args.player_type == "pitcher" else "_batters"
-        args.output = str(DATA_DIR / f"mlb_pitch_arsenals{suffix}_2020_2026.csv")
+        args.output = str(DATA_DIR / f"mlb_pitch_arsenals{suffix}.csv")
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
+    stored = {} if args.backfill else stored_rows_by_season(args.output, "Year")
+
     all_rows = []
     for year in YEARS:
+        if year != CURRENT_SEASON and year in stored:
+            all_rows.extend(stored[year])
+            print(f"{year}: {len(stored[year])} {args.player_type}-pitch "
+                  f"rows (stored)")
+            continue
         try:
             year_rows = fetch_year(session, year, args.player_type)
             if not year_rows:
                 raise ValueError("empty response")
         except Exception as e:
-            print(f"{year}: FAILED ({e})", file=sys.stderr)
+            if year in stored:
+                all_rows.extend(stored[year])
+                print(f"WARNING: {year} fetch failed ({e}); keeping the "
+                      f"previous run's {len(stored[year])} rows (model uses "
+                      f"prior-season arsenals, so this costs nothing)")
+                continue
+            if year == CURRENT_SEASON:
+                print(f"WARNING: {year} fetch failed and no stored rows yet "
+                      f"({e}); season not started?")
+                continue
+            print(f"{year}: FAILED ({e}) and no stored rows to fall back "
+                  f"on — run --backfill once the source recovers",
+                  file=sys.stderr)
             sys.exit(1)
         for r in year_rows:
             row = {col: r.get(field, "") for col, field in COLUMNS.items() if field}

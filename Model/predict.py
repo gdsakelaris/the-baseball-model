@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -32,7 +33,16 @@ K_LINES = [3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
 # prop key -> output column, in display order
 PROP_COLS = {"hr": "P_HR", "hit": "P_Hit", "hits2": "P_2Hits",
              "tb2": "P_TB2", "run": "P_Run", "rbi": "P_RBI",
-             "bb": "P_BB", "sb": "P_SB"}
+             "bb": "P_BB", "sb": "P_SB",
+             "single": "P_1B", "double": "P_2B",
+             "bk": "P_K", "bk2": "P_2K",
+             "hrr2": "P_HRR2", "hrr3": "P_HRR3"}
+
+# batter count heads -> mean column; starter count heads -> (mean, P prefix)
+BAT_COUNT_COLS = {"xbk": "xSO", "xhrr": "xHRR"}
+ST_COUNT_COLS = {"outs": ("xOuts", "P_outs_over"),
+                 "pbb": ("xBB", "P_bb_over"),
+                 "pha": ("xHits", "P_hits_over")}
 
 
 def american_odds(p):
@@ -67,6 +77,18 @@ def nb_over(lam, line, disp=1.0):
     cdf = sum(math.exp(math.lgamma(i + r) - lg_r - math.lgamma(i + 1)
                        + r * log_p + i * log_q) for i in range(k + 1))
     return 1 - cdf
+
+
+def count_over(head, mu, line):
+    """P(count > line) for a count head: the calibration-year per-line
+    logistic when the artifact carries one (under-dispersed counts like
+    starter outs misprice under NB, which can only widen variance), else
+    nb_over with the head's dispersion. Returns an array over mu."""
+    mu = np.atleast_1d(np.asarray(mu, dtype=float))
+    lc = head.get("line_cals", {}).get(line)
+    if lc is not None:
+        return lc.predict_proba(mu.reshape(-1, 1))[:, 1]
+    return np.array([nb_over(m, line, head["disp"]) for m in mu])
 
 
 def predict_prop(prop, X):
@@ -183,7 +205,11 @@ class Predictor:
             pen = s.bullpen(opp, season, date)
             pen_hl = s.bullpen_hl(opp, season, date)
             pen_fat = {"pen_np_l3": s.pen_fatigue(opp, date)}
+            tsb = s.team_sb_allowed(opp, season, date)
             phrq = s.pitcher_hr_quality(opp_starter, date)
+            pbip = s.bip_pitcher(opp_starter, date)
+            pdo = s.pd_pitcher_feats(opp_starter, date)
+            oaa_opp = s.team_oaa(opp, season)
             pprior = s.pitcher_prior(opp_starter, season)
             p_bio = s.bio(opp_starter)
             opp_hand = p_bio["pit_throws"]
@@ -194,7 +220,10 @@ class Predictor:
                 bio = s.bio(pid)
                 row = {"slot": slot, "Home": home, "Season": season,
                        "month": date.month, **b, **st_feats, **toff,
-                       **toff_loc, **pen, **pen_hl, **pen_fat, **phrq,
+                       **toff_loc, **pen, **pen_hl, **pen_fat, **tsb, **phrq,
+                       **pbip, **s.bip_batter(pid, date),
+                       **s.pd_batter_feats(pid, date),
+                       "p_swstr_d": pdo["pd_swstr_d"], "opp_oaa": oaa_opp,
                        **pprior, **park, **wx, **env,
                        "hrpt_score": s.hrpt(pid, opp_starter, season, date),
                        "bat_hand": bio["bat_hand"], "pit_throws": p_bio["pit_throws"],
@@ -220,6 +249,12 @@ class Predictor:
                 else:
                     row["pull_fence"] = np.nan
                 row["porch_margin"] = row["hrq_dist_avg"] - row["pull_fence"]
+                # hand-split contact quality (needs opp_hand / eff hand)
+                row.update(s.bip_batter_vs_hand(pid, date, opp_hand))
+                row.update(s.bip_pitcher_vs_hand(opp_starter, date, eff))
+                # form/trend deltas (same helpers as the training frames)
+                F.add_bat_trends(row)
+                F.add_pit_trends(row)
                 side_rows.append(row)
                 meta.append({"Team": team, "PlayerId": pid, "slot": slot,
                              "Name": self._name(pid, spec),
@@ -254,7 +289,8 @@ class Predictor:
         return df, mdf
 
     _LU_COLS = {"lu_k_sh": "s_k_pct_sh", "lu_bb_sh": "s_bb_pct_sh",
-                "lu_whiff": "m_whiff", "lu_vsh_k": "vsh_k_pct_sh"}
+                "lu_whiff": "m_whiff", "lu_vsh_k": "vsh_k_pct_sh",
+                "lu_wsw": "bd_wsw_d", "lu_chase": "bd_chase_d"}
 
     def _starter_rows(self, spec, bdf=None, bmeta=None):
         """K-model rows. bdf/bmeta (the batter rows) supply the
@@ -275,7 +311,9 @@ class Predictor:
             f = s.starter_feats(pid, date, season)
             vs = s.team_offense(opp, season, date, prefix="vs")
             row = {"Season": season, "month": date.month, "Home": home,
-                   **f, **vs, **park, **wx, **env}
+                   **f, **vs, **park, **wx, **env,
+                   **s.pd_pitcher_feats(pid, date)}
+            F.add_pit_trends(row)
             # the starter's own arsenal, K-model view (same helper as training)
             pa = F.pitcher_arsenal_feats(
                 pd.DataFrame({"PitcherId": [pid], "Season": [season]}),
@@ -327,18 +365,27 @@ class Predictor:
             pen = s.bullpen(opp, season, date, prefix="opp_pen")
             pen_hl = s.bullpen_hl(opp, season, date, prefix="opp_pen_hl")
             stf = s.starter_feats(opp_starter, date, season)
+            pb = s.bip_pitcher(opp_starter, date)
             rows.append({
                 "Season": season, "month": date.month, "Home": home,
                 "off_hr_pa": toff["off_hr_pa"], "off_r_pg": toff["off_r_pg"],
                 "off_k_pct": toff["off_k_pct"],
                 "off_loc_hr_pa": toff_loc["off_loc_hr_pa"],
                 "off_loc_r_pg": toff_loc["off_loc_r_pg"],
+                **s.team_bip_offense(team, season, date),
                 "opp_pen_era": pen["opp_pen_era"],
                 "opp_pen_hl_era": pen_hl["opp_pen_hl_era"],
                 "opp_pen_np_l3": s.pen_fatigue(opp, date),
                 "opp_def_uer": s.team_defense(opp, season, date),
+                "opp_def_oaa": s.team_oaa(opp, season),
+                "opp_pen_xwcon": s.team_bip_pen(opp, season,
+                                                date)["pen_xwcon"],
                 "opp_ps_era": stf["ps_era"], "opp_ps_k_bf": stf["ps_k_bf"],
                 "opp_ps_hr_bf": stf["ps_hr_bf"], "opp_ps_h_bf": stf["ps_h_bf"],
+                "opp_ps_xwcon": pb["pbip_xwoba"],
+                "opp_ps_xwcon_d": pb["pbipd_xwoba"],
+                "opp_ps_brl_d": pb["pbipd_brl"],
+                "opp_ps_gb_d": pb["pbipd_gb"],
                 "opp_pc_era": stf["pc_era"],
                 "opp_pc_hr_bf": stf["pc_hr_bf"], **park, **wx, **env,
             })
@@ -371,8 +418,10 @@ class Predictor:
             stf = s.starter_feats(starter if starter else -1, date, season)
             for k in self._WIN_ST:
                 row[f"{side}_{k}"] = stf[k]
+            row[f"{side}_ps_xwcon_d"] = s.bip_pitcher(
+                starter if starter else -1, date)["pbipd_xwoba"]
         for f in ["win_pct", "rd_pg", "pyth", "ra_pg", "r_pg", "w20", "rd20",
-                  "ps_era", "pc_era", "pen_era", "ps_k_bf"]:
+                  "ps_era", "pc_era", "pen_era", "ps_k_bf", "ps_xwcon_d"]:
             row[f"d_{f}"] = row[f"home_{f}"] - row[f"away_{f}"]
         row["d_rest"] = row["home_p_days_rest"] - row["away_p_days_rest"]
         row["d_ps_kbb"] = ((row["home_ps_k_bf"] - row["home_ps_bb_bf"])
@@ -410,12 +459,20 @@ class Predictor:
             bdf["g_career"], errors="coerce").fillna(0).astype(int).to_numpy()
         offs = self.offsets if self.recal else {}
         for prop, col in PROP_COLS.items():
+            if prop not in a["props"]:  # artifact predates this prop
+                continue
             p = predict_prop(a["props"][prop], X)
             if offs.get(prop):
                 p = R.apply_offset(p, offs[prop])
             batters[col] = np.round(p, 4)
         batters["xHR"] = np.round(batters["P_HR"] * a["multi_hr"], 4)
         batters["HR_fair_odds"] = [american_odds(p) for p in batters["P_HR"]]
+        # count-head means (xSO = batter strikeouts, xHRR = hits+runs+RBIs)
+        for cname, col in BAT_COUNT_COLS.items():
+            head = a.get("count_models", {}).get(cname)
+            if head is not None:
+                batters[col] = np.round(
+                    head["model"].predict(self._prep(bdf, head["cols"])), 2)
         batters = batters.sort_values("P_HR", ascending=False).reset_index(drop=True)
 
         sdf, smeta = self._starter_rows(spec, bdf, bmeta)
@@ -434,6 +491,18 @@ class Predictor:
         for line in K_LINES:
             starters[f"P_over_{line}"] = [round(nb_over(l, line, k_disp), 3)
                                           for l in k_pred]
+        # starter count props: outs recorded, walks/hits allowed (mean +
+        # NB P(over) with each head's calibration-year dispersion)
+        if len(sdf):
+            for cname, (mcol, pre) in ST_COUNT_COLS.items():
+                head = a.get("count_models", {}).get(cname)
+                if head is None:
+                    continue
+                mu = head["model"].predict(self._prep(sdf, head["cols"]))
+                starters[mcol] = np.round(mu, 2)
+                for line in head["lines"]:
+                    starters[f"{pre}_{line}"] = np.round(
+                        count_over(head, mu, line), 3)
 
         gdf = self._team_rows(spec)
         Xg = self._prep(gdf, a["tg_cols"])
@@ -504,38 +573,116 @@ class Predictor:
 
 PRED_DIR = Path(__file__).resolve().parents[1] / "Predictions"
 
+# Excel-facing headers. Internal frames keep the raw P_*/x* names (the GUI
+# and summary_frame read those); the workbook gets short display names.
+BAT_HEADERS = {"slot": "Slot", "PlayerId": "ID", "CareerG": "Career G",
+               "P_HR": "HR", "P_Hit": "Hit", "P_2Hits": "2+ Hits",
+               "P_1B": "Single", "P_2B": "Double", "P_TB2": "2+ TB",
+               "P_Run": "Run", "P_RBI": "RBI",
+               "P_HRR2": "H+R+RBI 2+", "P_HRR3": "H+R+RBI 3+",
+               "P_BB": "BB", "P_SB": "SB", "P_K": "K", "P_2K": "2+ K"}
+ST_HEADERS = {"PlayerId": "ID"}
+GAME_HEADERS = {"WinProb": "Win Prob",
+                "exp_away_runs": "Away Score", "exp_home_runs": "Home Score",
+                "exp_total_runs": "Total Runs", "exp_lineup_HR": "Lineup HRs"}
+
+# over-probability columns are renamed by pattern (any line value works)
+_OVER_PATTERNS = [(re.compile(r"^P_over_(.+)$"), "K > {}"),
+                  (re.compile(r"^P_outs_over_(.+)$"), "Outs > {}"),
+                  (re.compile(r"^P_bb_over_(.+)$"), "BB > {}"),
+                  (re.compile(r"^P_hits_over_(.+)$"), "Hits > {}"),
+                  (re.compile(r"^P_runs_over_(.+)$"), "Runs > {}")]
+
+# reading order per sheet; an entry ending in "> " pulls that whole family
+# of over columns, sorted by line
+BAT_ORDER = ["Game", "Team", "Slot", "Name", "ID", "Career G",
+             "HR", "Hit", "2+ Hits", "Single", "Double", "2+ TB",
+             "Run", "RBI", "xHRR", "H+R+RBI 2+", "H+R+RBI 3+",
+             "BB", "SB", "xSO", "K", "2+ K"]
+ST_ORDER = ["Game", "Team", "Opponent", "Name", "ID", "xK", "K > ",
+            "xOuts", "Outs > ", "xHits", "Hits > ", "xBB", "BB > "]
+GAME_ORDER = ["Game", "Date", "Venue", "Winner", "Win Prob",
+              "Away Score", "Home Score", "Total Runs", "Runs > ",
+              "Lineup HRs"]
+
+
+def _display(df, headers, order, drop=()):
+    """Workbook view of a board: drop internal-only columns, give every
+    header a short display name, and arrange columns in reading order.
+    Columns the order list doesn't know about keep their place at the end."""
+    df = df.drop(columns=[c for c in drop if c in df.columns])
+    ren = {}
+    for c in df.columns:
+        if c in headers:
+            ren[c] = headers[c]
+        else:
+            for pat, fmt in _OVER_PATTERNS:
+                m = pat.match(c)
+                if m:
+                    ren[c] = fmt.format(m.group(1))
+                    break
+    df = df.rename(columns=ren)
+    cols, out = list(df.columns), []
+    for item in order:
+        if item.endswith("> "):
+            out += sorted((c for c in cols if c.startswith(item)),
+                          key=lambda c: float(c.rsplit(" ", 1)[1]))
+        elif item in cols:
+            out.append(item)
+    out += [c for c in cols if c not in out]
+    return df[out]
+
 GLOSSARY = [
     ("How to read this workbook",
      "Every number is the model's estimated chance that something happens "
      "in this game. 25% means: in 100 similar situations, expect it about "
      "25 times. Nothing is ever certain."),
-    ("P_HR", "Chance the batter hits a home run in this game."),
-    ("HR_fair_odds", "The break-even sportsbook price for that HR chance. "
-     "If a book offers longer odds (bigger + number), the bet pays more "
-     "than the risk suggests; shorter odds pay less."),
-    ("xHR", "Expected number of home runs (accounts for multi-HR games)."),
-    ("P_Hit", "Chance of at least one hit."),
-    ("P_2Hits", "Chance of two or more hits."),
-    ("P_TB2", "Chance of two or more total bases (e.g. a double, or two "
+    ("Highlighted columns", "The red-tinted columns are the headline "
+     "numbers: the model's expected counts (xK, xOuts, xHits, xBB, xSO, "
+     "xHRR), and the predicted winner, win probability, total runs and "
+     "lineup HRs on the Games sheet. The percentage columns next to the "
+     "counts price the over/under lines."),
+    ("HR", "Chance the batter hits a home run in this game."),
+    ("Hit", "Chance of at least one hit."),
+    ("2+ Hits", "Chance of two or more hits."),
+    ("Single", "Chance of at least one single."),
+    ("Double", "Chance of at least one double."),
+    ("2+ TB", "Chance of two or more total bases (e.g. a double, or two "
      "singles)."),
-    ("P_Run", "Chance the batter scores a run."),
-    ("P_RBI", "Chance the batter drives in at least one run."),
-    ("P_BB", "Chance of at least one walk."),
-    ("P_SB", "Chance of at least one stolen base."),
-    ("CareerG", "The batter's career MLB games before today. Predictions "
+    ("Run", "Chance the batter scores a run."),
+    ("RBI", "Chance the batter drives in at least one run."),
+    ("xHRR", "Expected combined hits + runs + RBIs."),
+    ("H+R+RBI 2+ / 3+", "Chance of 2+ / 3+ combined hits + runs + RBIs "
+     "(the H+R+RBI prop at the 1.5 / 2.5 line)."),
+    ("BB", "Chance of at least one walk."),
+    ("SB", "Chance of at least one stolen base."),
+    ("xSO", "Expected strikeouts by the batter."),
+    ("K / 2+ K", "Chance the batter strikes out at least once / twice."),
+    ("Career G", "The batter's career MLB games before today. Predictions "
      "for players under ~50 games are the least reliable (the model has "
-     "little history to work from) - treat their picks with extra caution."),
+     "little history to work from) - those show in red; treat their picks "
+     "with extra caution."),
+    ("ID", "The player's MLB id, for cross-referencing stats sites; safe "
+     "to ignore."),
     ("xK", "Projected strikeouts for the starting pitcher."),
-    ("P_over_X", "Chance the starter records more than X strikeouts."),
-    ("exp_lineup_HR", "Expected total home runs by the players entered."),
-    ("exp_total_runs", "Expected combined runs scored by both teams."),
-    ("Winner / WinProb", "The team the model favors and its win "
+    ("K > X", "Chance the starter records more than X strikeouts."),
+    ("xOuts", "Projected outs recorded by the starter (18 = six innings)."),
+    ("Outs > X", "Chance the starter records more than X outs."),
+    ("xBB / BB > X", "Projected walks allowed by the starter, and the "
+     "chance of more than X."),
+    ("xHits / Hits > X", "Projected hits allowed by the starter, and "
+     "the chance of more than X."),
+    ("Fair odds (Summary sheet)", "The break-even sportsbook price for the "
+     "HR chance. If a book offers longer odds (bigger + number), the bet "
+     "pays more than the risk suggests; shorter odds pay less."),
+    ("Lineup HRs", "Expected total home runs by the players entered."),
+    ("Total Runs / Runs > X", "Expected combined runs scored by both "
+     "teams, and the chance of more than X."),
+    ("Winner / Win Prob", "The team the model favors and its win "
      "probability (always the bigger side of the home/away split). Treat it "
      "as a probability, not a pick: on a half-season holdout the winner "
      "model shows no statistically significant edge over always taking the "
      "home team."),
-    ("HomeWinProb", "The same probability expressed from the home team's "
-     "side, for reference."),
     ("Slot", "Batting-order position (1 = leadoff)."),
     ("A caution", "These are model estimates from historical data. They do "
      "not account for injuries, breaking news, or the sportsbook's own "
@@ -608,16 +755,34 @@ def summary_frame(specs, out):
     return pd.DataFrame(lines, columns=["What", "The model says"])
 
 
+# display headers holding a probability (shown as a percent); over columns
+# ("K > 4.5" etc.) are recognized by the " > " in their name
+PCT_COLS = {"HR", "Hit", "2+ Hits", "Single", "Double", "2+ TB", "Run",
+            "RBI", "H+R+RBI 2+", "H+R+RBI 3+", "BB", "SB", "K", "2+ K",
+            "Win Prob"}
+# the headline columns get the red highlight: the expected counts, and the
+# Games sheet's predicted winner, win probability, total runs and lineup HRs
+HI_COLS = {"xK", "xOuts", "xBB", "xHits", "xSO", "xHRR",
+           "Winner", "Win Prob", "Total Runs", "Lineup HRs"}
+
+
 def _polish(path):
-    """Make the workbook readable: bold frozen navy headers, percent formats,
-    autofit column widths, thin borders around the whole data block, a light
-    zebra stripe, and filter/sort dropdowns on the data sheets."""
+    """Make the workbook readable, in MLB colors (navy #041E42, red
+    #BF0D3E): frozen bold headers, percent formats, autofit column widths
+    (padded for the filter dropdown arrows), thin borders, a light zebra
+    stripe, a red tint + red header on the headline columns, a red flag on
+    sub-50-game batters, and filter/sort dropdowns on the data sheets."""
     import openpyxl
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     wb = openpyxl.load_workbook(path)
     head_font = Font(bold=True, color="FFFFFF")
-    head_fill = PatternFill("solid", fgColor="041E42")
+    head_fill = PatternFill("solid", fgColor="041E42")     # MLB navy
+    hi_head_fill = PatternFill("solid", fgColor="BF0D3E")  # MLB red
     stripe_fill = PatternFill("solid", fgColor="EAF0F8")
+    hi_fill = PatternFill("solid", fgColor="F5DBE2")       # light MLB red
+    hi_font = Font(bold=True, color="041E42")
+    dim_font = Font(color="808B99")                        # ID column
+    warn_font = Font(bold=True, color="BF0D3E")            # Career G < 50
     thin = Side(style="thin", color="B7C2D4")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     center = Alignment(horizontal="center", vertical="center")
@@ -630,31 +795,47 @@ def _polish(path):
     for ws in wb.worksheets:
         ws.freeze_panes = "A2"
         ws.sheet_view.showGridLines = False
-        if ws.title in ("Batter Props", "Starter Ks", "Games"):
+        filtered = ws.title in ("Batter Props", "Pitching Props", "Games")
+        if filtered:
             ws.auto_filter.ref = ws.dimensions  # sort/filter dropdowns
         max_row, max_col = ws.max_row, ws.max_column
 
         headers = [str(c.value) for c in ws[1]]
         for j, cell in enumerate(ws[1], start=1):
             cell.font = head_font
-            cell.fill = head_fill
+            cell.fill = hi_head_fill if headers[j - 1] in HI_COLS else head_fill
             cell.alignment = center if headers[j - 1] not in text_cols else left
             cell.border = border
 
         for j, h in enumerate(headers, start=1):
             is_text = h in text_cols
+            is_pct = " > " in h or h in PCT_COLS
+            hi = h in HI_COLS
             for i in range(2, max_row + 1):
                 c = ws.cell(row=i, column=j)
                 c.border = border
                 c.alignment = left if is_text else center
-                if h.startswith("P_") or h in ("WinProb", "HomeWinProb"):
+                if is_pct:
                     c.number_format = "0.0%"
-                if i % 2 == 1:
+                if h == "ID":
+                    c.font = dim_font
+                if hi:
+                    c.fill = hi_fill
+                    c.font = hi_font
+                elif i % 2 == 1:
                     c.fill = stripe_fill
+                # sub-50-game batters are the least reliable picks (Glossary)
+                if (h == "Career G" and isinstance(c.value, (int, float))
+                        and c.value < 50):
+                    c.font = warn_font
 
-        # autofit: widest of header / any cell, clamped; percents count as ~6
+        # autofit: widest of header / any cell, clamped; percents count as
+        # ~6 chars. The filter dropdown arrow is ~3 chars wide on the RIGHT
+        # of the header cell, and headers are centered — so the header needs
+        # arrow-width padding on BOTH sides to stay clear of it.
+        pad = 6 if filtered else 0
         for j, h in enumerate(headers, start=1):
-            longest = len(h)
+            longest = len(h) + pad
             for i in range(2, max_row + 1):
                 v = ws.cell(row=i, column=j).value
                 if v is None:
@@ -697,11 +878,13 @@ def save_excel(spec, out, path=None):
     ] + [(f"P(runs over {k})", v) for k, v in t["P_over_runs"].items()]
     info = pd.DataFrame(info_rows, columns=["Field", "Value"])
     summary = summary_frame([spec], out)
-    batters = out["batters"].sort_values("P_HR", ascending=False)
-    starters = out["starters"].sort_values("xK", ascending=False)
+    batters = _display(out["batters"].sort_values("P_HR", ascending=False),
+                       BAT_HEADERS, BAT_ORDER, drop=("xHR", "HR_fair_odds"))
+    starters = _display(out["starters"].sort_values("xK", ascending=False),
+                        ST_HEADERS, ST_ORDER)
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         batters.to_excel(xw, sheet_name="Batter Props", index=False)
-        starters.to_excel(xw, sheet_name="Starter Ks", index=False)
+        starters.to_excel(xw, sheet_name="Pitching Props", index=False)
         info.to_excel(xw, sheet_name="Game", index=False)
         summary.to_excel(xw, sheet_name="Summary", index=False)
         pd.DataFrame(GLOSSARY, columns=["Term", "Meaning"]).to_excel(
@@ -730,12 +913,15 @@ def save_excel_slate(specs, out, path=None):
         date = min(s["date"] for s in specs)
         path = PRED_DIR / (f'{date}_slate_{len(specs)}games_'
                            f'{_t.strftime("%H%M%S")}.xlsx')
-    batters = out["batters"].sort_values("P_HR", ascending=False)
-    starters = out["starters"].sort_values("xK", ascending=False)
-    games = out["games"].sort_values("WinProb", ascending=False)
+    batters = _display(out["batters"].sort_values("P_HR", ascending=False),
+                       BAT_HEADERS, BAT_ORDER, drop=("xHR", "HR_fair_odds"))
+    starters = _display(out["starters"].sort_values("xK", ascending=False),
+                        ST_HEADERS, ST_ORDER)
+    games = _display(out["games"].sort_values("WinProb", ascending=False),
+                     GAME_HEADERS, GAME_ORDER, drop=("HomeWinProb",))
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         batters.to_excel(xw, sheet_name="Batter Props", index=False)
-        starters.to_excel(xw, sheet_name="Starter Ks", index=False)
+        starters.to_excel(xw, sheet_name="Pitching Props", index=False)
         games.to_excel(xw, sheet_name="Games", index=False)
         summary_frame(specs, out).to_excel(xw, sheet_name="Summary", index=False)
         pd.DataFrame(GLOSSARY, columns=["Term", "Meaning"]).to_excel(
@@ -832,13 +1018,14 @@ def _compare_row(train_row, serve_row, cols, label, worst, counter):
 
 def selftest(pred):
     """Compare inference-path features against the training frames for a
-    real 2026 game: they must match, or training and serving have drifted.
-    Covers the batter rows, the starter (K-model) rows, and (when the
-    artifact has one) the winner row."""
+    real game from the newest season in the frames: they must match, or
+    training and serving have drifted. Covers the batter rows, the starter
+    (K-model) rows, and (when the artifact has one) the winner row."""
     frames = joblib.load(ART / "frames.joblib")
     bf = frames["bf"]
-    b26 = bf[(bf["Season"] == 2026) & bf["StarterId"].notna()]
-    gamepk = int(b26["GamePk"].iloc[-1])
+    season = int(bf["Season"].max())
+    recent = bf[(bf["Season"] == season) & bf["StarterId"].notna()]
+    gamepk = int(recent["GamePk"].iloc[-1])
     spec = spec_from_game(pred.stores, gamepk)
     print(f"selftest on GamePk {gamepk}: {spec['away_team']} @ "
           f"{spec['home_team']} {spec['date']}")

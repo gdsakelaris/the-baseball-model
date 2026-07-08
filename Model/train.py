@@ -3,23 +3,33 @@
 Models (all LightGBM):
   batter props (binary + isotonic calibration):
     hr, hit, hits2 (2+ hits), tb2 (2+ total bases), run (run scored),
-    rbi (1+ RBI), bb (walk), sb (stolen base)
+    rbi (1+ RBI), bb (walk), sb (stolen base), single (1+), double (1+),
+    bk/bk2 (1+/2+ batter strikeouts), hrr2/hrr3 (2+/3+ hits+runs+RBIs)
   k     starter strikeouts in the game              Poisson regression
+  count heads (starter-K pattern, mean + cal-year NB dispersion):
+    xbk/xhrr (batter K and H+R+RBI means), outs, pbb, pha (starter outs /
+    walks allowed / hits allowed, with P(over) lines)
   runs  game total runs                             Poisson regression
 
 Honest evaluation protocol (no leakage):
-  train on 2020-2024  ->  early-stop & calibrate on 2025  ->  test on 2026.
-The shipped artifacts are exactly the models those 2026 numbers describe.
+  train on every season but the newest two  ->  early-stop & calibrate on
+  the next-to-newest  ->  test on the newest (e.g. 2020-2024 / 2025 / 2026).
+The split is DERIVED from the seasons present in the data (suite_years), so
+the annual rollover needs no code edit: once a new season accrues real
+games it becomes the holdout, the old holdout graduates to calibration, and
+one more season enters training. The shipped artifacts are exactly the
+models the holdout numbers describe.
 
-2026 is CONFIRM-ONLY. Iterating on features/params against the 2026 numbers
-quietly overfits the holdout, so model selection runs on a separate suite
-(train<=2023, cal 2024, test 2025) that the default run also refreshes:
+The holdout season is CONFIRM-ONLY. Iterating on features/params against
+its numbers quietly overfits it, so model selection runs on a separate
+suite shifted one season back (e.g. train<=2023, cal 2024, test 2025) that
+the default run also refreshes:
 
     python Model/train.py --rebuild --select   # selection suite only (fast loop)
-    python Model/evaluate_deep.py              # full workup on 2025 (default)
-    ...iterate until satisfied, then...
+    python Model/evaluate_deep.py              # full workup on the selection
+    ...iterate until satisfied, then...        #   test year (default)
     python Model/train.py                      # BOTH suites (frames cached)
-    python Model/evaluate_deep.py --confirm    # ONE confirming look at 2026
+    python Model/evaluate_deep.py --confirm    # ONE confirming look at the holdout
 
 Usage:
     python Model/train.py [--rebuild] [--select]
@@ -73,7 +83,8 @@ LGB_WIN = dict(n_estimators=3000, learning_rate=0.02, num_leaves=15,
 # describe. Each prop's actual column list is saved in its artifact, so
 # predict/evaluate pick it up automatically.
 _SB_FEATS = ["c_sb_pa_sh", "s_sb_pa_sh", "r7_sb_pa_sh", "r15_sb_pa_sh",
-             "r30_sb_pa_sh", "c_sb_succ", "psb_sb27", "psb_stop"]
+             "r30_sb_pa_sh", "d_sb_pa_sh", "c_sb_succ", "psb_sb27",
+             "psb_stop", "tsb_sb_g", "tsb_stop"]
 _RUNRBI = ["c_r_pa_sh", "s_r_pa_sh", "c_rbi_pa_sh", "s_rbi_pa_sh"]
 _CTX = ["ctx_ahead_obp", "ctx_behind_slg"]   # teammates ahead/behind
 _OBP = ["c_obp", "s_obp"]
@@ -88,17 +99,58 @@ _POS = ["pos_c_share", "pos_dh_share"]
 _PEN2 = ["pen_h_bf", "pen_hl_era", "pen_hl_k_bf", "pen_np_l3"]
 _TLOC = ["toff_loc_hr_pa", "toff_loc_r_pg"]
 _HBF = ["pc_h_bf", "ps_h_bf", "p5_h_bf"]     # starter hit suppression
+# Statcast contact quality (scrape_statcast.py). Split power vs hit-type so
+# the same dilution discipline applies: barrels/EV speak to power props,
+# xBA/xwOBA/GB to anything needing contact, nothing to walks or steals.
+_BIP_PWR = ["bip_ev", "bip_la", "bip_hh", "bip_brl",
+            "bip_pull", "bip_pullair",
+            "bipd_ev", "bipd_brl", "bipd_pullair",
+            "pbip_ev", "pbip_la", "pbip_hh", "pbip_brl",
+            "pbipd_ev", "pbipd_brl"]
+_BIP_HIT = ["bip_n", "bip_xba", "bip_xwoba", "bip_gb",
+            "bipd_n", "bipd_xwoba", "bipd_gb",
+            "pbip_n", "pbip_xba", "pbip_xwoba", "pbip_gb",
+            "pbipd_n", "pbipd_xwoba", "pbipd_gb"]
+_PLATE = ["bd_wsw_c", "bd_wsw_d", "bd_chase_c", "bd_chase_d"]
+# NOTE: hand-split contact quality (bvh_*/pvh_*) was routed here as
+# _VHB_PWR/_VHB_CON (2026-07-07), came back within noise on every prop and
+# pushed tb2 ECE past its band; it now lives in the frames only (see the
+# NOTE in features.batter_feature_cols). tsb_* (battery SB-allowed, same
+# batch) stays: sb-only routing, positive tilt, no regressions.
+_SPD = ["bat_sprint", "bat_hp1b"]            # raw footspeed: SB + run only
+_DEF = ["opp_oaa"]                           # opponent defense: BABIP props
+_PSW = ["p_swstr_d"]                         # opposing starter whiff form
+
+# batter strikeouts: keep only K-flavored signal (k rates, plate discipline,
+# starter/bullpen whiff, arsenal) — everything else is dilution risk
+_BK_EXC = (_SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR + _HBF
+           + _PEN2 + _TLOC + _BIP_PWR + _BIP_HIT + _SPD + _DEF)
 
 PROP_EXCLUDE = {
-    "hr":    _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH,
-    "hit":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR,
-    "hits2": _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR,
-    "tb2":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB,
-    "run":   _SB_FEATS + _PWR + _XBH + _IBB,
-    "rbi":   _SB_FEATS + _PWR,
-    "bb":    _SB_FEATS + _RUNRBI + _CTX + _PWR + _XBH + _HBF + _PEN2 + _TLOC,
+    "hr":    _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _SPD + _DEF,
+    "hit":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
+             + _BIP_PWR + _SPD,
+    "hits2": _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
+             + _BIP_PWR + _SPD,
+    "tb2":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _SPD,
+    "run":   _SB_FEATS + _PWR + _XBH + _IBB + _BIP_PWR + _PLATE,
+    "rbi":   _SB_FEATS + _PWR + _BIP_PWR + _SPD + _PLATE,
+    "bb":    _SB_FEATS + _RUNRBI + _CTX + _PWR + _XBH + _HBF + _PEN2 + _TLOC
+             + _BIP_PWR + _BIP_HIT + _SPD + _DEF,
     "sb":    _VSH + _RUNRBI + _CTX + _OBP + _PWR + _XBH + _IBB + _PEN2
-             + _TLOC + _HBF + _VLOC + _POS,
+             + _TLOC + _HBF + _VLOC + _POS + _BIP_PWR + _BIP_HIT + _DEF
+             + _PLATE + _PSW,
+    # singles = contact + footspeed (beat-out grounders), no power groups
+    "single": _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
+              + _BIP_PWR,
+    # doubles = gap power + speed (stretching); HR-log quality stays out
+    "double": _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _PWR,
+    "bk":    _BK_EXC,
+    "bk2":   _BK_EXC,
+    # H+R+RBI is a broad, high-base-rate target (tb2-like robustness):
+    # only the steal columns clearly don't speak to it
+    "hrr2":  _SB_FEATS,
+    "hrr3":  _SB_FEATS,
 }
 
 # batter prop -> (target column, description)
@@ -111,6 +163,31 @@ PROPS = {
     "rbi": ("y_rbi", "1+ RBI"),
     "bb": ("y_bb", "1+ walk"),
     "sb": ("y_sb", "stolen base"),
+    "single": ("y_1b", "1+ single"),
+    "double": ("y_2b", "1+ double"),
+    "bk": ("y_bk1", "1+ batter strikeout"),
+    "bk2": ("y_bk2", "2+ batter strikeouts"),
+    "hrr2": ("y_hrr2", "2+ hits+runs+RBIs"),
+    "hrr3": ("y_hrr3", "3+ hits+runs+RBIs"),
+}
+
+# Count-style props: Poisson LGBM (starter-K pattern) + per-line logistic
+# calibrators fit on the calibration year (predict.count_over). Batter heads
+# exist for the MEANS (xSO, xHRR) — their half-point lines are priced by the
+# calibrated binary heads above; starter heads price their own lines.
+# `exclude` names the PROP_EXCLUDE entry supplying the column routing.
+COUNT_HEADS = {
+    "xbk":  dict(frame="bat", target="bk_count", exclude="bk",
+                 lines=[0.5, 1.5, 2.5], desc="batter strikeouts"),
+    "xhrr": dict(frame="bat", target="hrr_count", exclude="hrr2",
+                 lines=[1.5, 2.5, 3.5], desc="hits+runs+RBIs"),
+    "outs": dict(frame="starts", target="y_outs", exclude=None,
+                 lines=[14.5, 15.5, 16.5, 17.5, 18.5],
+                 desc="starter outs recorded"),
+    "pbb":  dict(frame="starts", target="y_pbb", exclude=None,
+                 lines=[0.5, 1.5, 2.5], desc="starter walks allowed"),
+    "pha":  dict(frame="starts", target="y_pha", exclude=None,
+                 lines=[3.5, 4.5, 5.5, 6.5], desc="starter hits allowed"),
 }
 
 
@@ -347,6 +424,54 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     log(f"starter-K dispersion ({cal_yr} cal year): {k_disp:.2f} "
         f"(Poisson assumes 1.00)")
 
+    # count heads (starter-K pattern): Poisson mean + cal-year dispersion
+    count_models = {}
+    for cname, ch in COUNT_HEADS.items():
+        frame = bf if ch["frame"] == "bat" else sf
+        cols = ([c for c in bat_cols
+                 if c not in PROP_EXCLUDE.get(ch["exclude"], ())]
+                if ch["frame"] == "bat" else st_cols)
+        tr_mean = frame.loc[frame["Season"].isin(train_yrs),
+                            ch["target"]].mean()
+
+        def cbase(te, _m=tr_mean, _n=cname):
+            if _n == "xbk":
+                return (te["s_k_pct_sh"] * 4.1).fillna(_m)
+            if _n == "outs":
+                return (te["p_ip_per_start"] * 3).fillna(_m).clip(0, 27)
+            if _n == "pbb":
+                return (te["ps_bb_bf"] * (te["ps_BF"] / te["p_starts_season"])
+                        ).fillna(_m).clip(0, 8)
+            if _n == "pha":
+                return (te["ps_h_bf"] * (te["ps_BF"] / te["p_starts_season"])
+                        ).fillna(_m).clip(0, 12)
+            return pd.Series(_m, index=te.index)  # xhrr: league mean
+
+        model, m = fit_poisson(frame, cols, ch["target"], train_yrs, cal_yr,
+                               test_yr, cname.upper(), cbase)
+        ca = frame[frame["Season"] == cal_yr]
+        mu_cal = model.predict(ca[cols])
+        y_cal = ca[ch["target"]].to_numpy()
+        disp = float(np.mean((y_cal - mu_cal) ** 2) / np.mean(mu_cal))
+        m["dispersion_cal"] = round(disp, 4)
+        # per-line logistic calibrators on the CAL year (the count-head
+        # analog of the binary props' isotonic): P(over line) as a direct
+        # monotone function of mu. Outs/batter-K counts run UNDER Poisson
+        # variance (bounded by PA / the manager's hook), so nb_over — which
+        # can only widen, never narrow — misprices their tails; consumers
+        # fall back to nb_over only when a line has no calibrator.
+        line_cals = {}
+        for line in ch["lines"]:
+            over = (y_cal > line).astype(int)
+            if 0 < over.mean() < 1:
+                line_cals[line] = LogisticRegression(
+                    C=1e6, max_iter=1000).fit(mu_cal.reshape(-1, 1), over)
+        metrics[f"{cname}_{test_yr}"] = m
+        count_models[cname] = {"model": model, "cols": cols, "disp": disp,
+                               "lines": ch["lines"], "line_cals": line_cals,
+                               "frame": ch["frame"],
+                               "target": ch["target"], "desc": ch["desc"]}
+
     def team_baseline(te):
         league = tg.loc[tg["Season"].isin(train_yrs), "y_runs"].mean()
         return te["off_r_pg"].fillna(league)
@@ -391,11 +516,31 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         "props": props,
         "k_model": k_model, "team_runs_model": team_runs_model,
         "win_model": win_model, "total_disp": total_disp, "k_disp": k_disp,
+        "count_models": count_models,
         "bat_cols": bat_cols, "st_cols": st_cols, "tg_cols": tg_cols,
         "cat_levels": cat_levels,
         "metrics": metrics,
+        # evaluate_deep reads these instead of hardcoding seasons
+        "years": {"train": list(train_yrs), "cal": int(cal_yr),
+                  "test": int(test_yr)},
     }
     return artifacts, metrics
+
+
+def suite_years(bf, min_rows=2000):
+    """Derive the shipping split from the seasons actually in the data:
+    the newest season with at least min_rows batter-games is the
+    confirm-only holdout, the season before it calibrates, everything
+    earlier trains. A brand-new season graduates in automatically once
+    ~2 weeks of games accrue (below that its rows are simply not scored,
+    and the previous split keeps shipping). The selection suite is the
+    same split shifted one season back."""
+    counts = bf["Season"].value_counts()
+    seasons = sorted(int(s) for s in counts.index if counts[s] >= min_rows)
+    if len(seasons) < 4:
+        raise SystemExit(f"need at least 4 seasons of data to form the "
+                         f"train/cal/holdout splits, have {seasons}")
+    return seasons[:-2], seasons[-2], seasons[-1]
 
 
 def main():
@@ -403,8 +548,8 @@ def main():
     ap.add_argument("--rebuild", action="store_true",
                     help="rebuild feature frames even if cached")
     ap.add_argument("--select", action="store_true",
-                    help="train ONLY the model-selection suite (train<=2023, "
-                         "cal 2024, test 2025) — the fast iteration loop. "
+                    help="train ONLY the model-selection suite (one season "
+                         "back from shipping) — the fast iteration loop. "
                          "The default run trains it too, then the shipping "
                          "models on top.")
     args = ap.parse_args()
@@ -456,26 +601,34 @@ def main():
     wf = gf[~gf["ShortGame"].fillna(False)].dropna(subset=["y_home_win"])
     wf = wf.sort_values("GamePk").reset_index(drop=True)  # canonical order
 
-    # -- selection suite (always refreshed): iterate here, never vs 2026 --
-    log("=== SELECTION suite (train<=2023, cal 2024, test 2025) — "
-        "2026 stays untouched ===")
+    # season splits derived from the data — no code edit at the annual
+    # rollover; the holdout promotes itself once the new season has games
+    train_yrs, cal_yr, hold_yr = suite_years(bf)
+    sel_tr, sel_cal, sel_te = train_yrs[:-1], train_yrs[-1], cal_yr
+
+    # -- selection suite (always refreshed): iterate here, never vs the
+    # holdout --
+    log(f"=== SELECTION suite (train<={sel_tr[-1]}, cal {sel_cal}, test "
+        f"{sel_te}) — {hold_yr} stays untouched ===")
     sel_art, sel_metrics = train_suite(bf, sf, tg, wf, cat_levels,
-                                       [2020, 2021, 2022, 2023], 2024, 2025)
-    sel_art["trained_on"] = ("selection suite: 2020-2023, calibrated "
-                             "2024, tested 2025 (2026 untouched)")
+                                       sel_tr, sel_cal, sel_te)
+    sel_art["trained_on"] = (f"selection suite: {sel_tr[0]}-{sel_tr[-1]}, "
+                             f"calibrated {sel_cal}, tested {sel_te} "
+                             f"({hold_yr} untouched)")
     joblib.dump(sel_art, ART / "models_bt.joblib", compress=3)
     with open(ART / "metrics_select.json", "w") as f:
         json.dump(sel_metrics, f, indent=2)
     log(f"saved selection artifacts to {ART / 'models_bt.joblib'}")
     if args.select:
-        log("next: python Model/evaluate_deep.py   (scores this suite on 2025)")
+        log(f"next: python Model/evaluate_deep.py   (scores this suite on "
+            f"{sel_te})")
         return
 
-    # -- shipping suite, tested (confirm-only) on the 2026 holdout ------
-    log("=== final models (train<=2024, cal 2025, test 2026 holdout) ===")
-    train_yrs = [2020, 2021, 2022, 2023, 2024]
+    # -- shipping suite, tested (confirm-only) on the holdout ------
+    log(f"=== final models (train<={train_yrs[-1]}, cal {cal_yr}, test "
+        f"{hold_yr} holdout) ===")
     artifacts, metrics = train_suite(bf, sf, tg, wf, cat_levels,
-                                     train_yrs, 2025, 2026)
+                                     train_yrs, cal_yr, hold_yr)
     bat_cols = artifacts["bat_cols"]
     props = artifacts["props"]
 
@@ -483,32 +636,33 @@ def main():
     slot_pa = bf[bf["Season"].isin(train_yrs)].groupby("slot")["PA"].mean().to_dict()
     league_hr_pa = (bf.loc[bf["Season"].isin(train_yrs), "HR"].sum()
                     / bf.loc[bf["Season"].isin(train_yrs), "PA"].sum())
-    te = bf[bf["Season"] == 2026]
+    te = bf[bf["Season"] == hold_yr]
     nb = naive_hr_baseline(te, slot_pa, league_hr_pa)
-    metrics["hr_2026"]["logloss_naive_seasonrate"] = float(
+    metrics[f"hr_{hold_yr}"]["logloss_naive_seasonrate"] = float(
         log_loss(te["y_hr"], nb.clip(1e-4, 1 - 1e-4)))
-    metrics["hr_2026"]["brier_naive_seasonrate"] = float(
+    metrics[f"hr_{hold_yr}"]["brier_naive_seasonrate"] = float(
         brier_score_loss(te["y_hr"], nb))
 
-    # In-season drift offsets for serving: a per-prop log-odds shift fit on the
-    # test-year (2026) games available at train time, so the daily retrain keeps
-    # it current as the run environment drifts (evaluate_deep Section 4). STORED,
-    # not applied here — evaluate_deep scores the raw props so the holdout stays
-    # honest; the Predictor uses these only under --recal, and Section 10 is the
-    # leakage-free backtest that says whether they actually help.
+    # In-season drift offsets for serving: a per-prop log-odds shift fit on
+    # the holdout-year games available at train time, so the daily retrain
+    # keeps it current as the run environment drifts (evaluate_deep Section
+    # 4). STORED, not applied here — evaluate_deep scores the raw props so
+    # the holdout stays honest; the Predictor uses these only under --recal,
+    # and Section 10 is the leakage-free backtest that says whether they
+    # actually help.
     import recalibrate as R
     from predict import predict_prop as _predict_prop
-    te26 = bf[bf["Season"] == 2026]
+    te_hold = bf[bf["Season"] == hold_yr]
     inseason_offsets = {}
     for name, (target, _desc) in PROPS.items():
-        y26 = te26[target].to_numpy()
-        if len(y26) > 200 and 0 < y26.mean() < 1:
-            p26 = _predict_prop(props[name], te26[bat_cols])
-            inseason_offsets[name] = round(float(R.fit_logit_offset(p26, y26)), 4)
+        y_h = te_hold[target].to_numpy()
+        if len(y_h) > 200 and 0 < y_h.mean() < 1:
+            p_h = _predict_prop(props[name], te_hold[bat_cols])
+            inseason_offsets[name] = round(float(R.fit_logit_offset(p_h, y_h)), 4)
         else:
             inseason_offsets[name] = 0.0
     metrics["inseason_offsets"] = inseason_offsets
-    log(f"in-season drift offsets (2026): {inseason_offsets}")
+    log(f"in-season drift offsets ({hold_yr}): {inseason_offsets}")
 
     # multi-HR correction: E[HR | HR>=1], for expected-HR outputs
     tr_hr = bf[bf["Season"].isin(train_yrs) & (bf["hr_count"] >= 1)]
@@ -519,7 +673,8 @@ def main():
         "slot_pa": slot_pa, "league_hr_pa": league_hr_pa,
         "inseason_offsets": inseason_offsets,
         "metrics": metrics,
-        "trained_on": "2020-2024, calibrated 2025, holdout-tested 2026 YTD",
+        "trained_on": (f"{train_yrs[0]}-{train_yrs[-1]}, calibrated "
+                       f"{cal_yr}, holdout-tested {hold_yr} YTD"),
     })
     joblib.dump(artifacts, ART / "models.joblib", compress=3)
     with open(ART / "metrics.json", "w") as f:
