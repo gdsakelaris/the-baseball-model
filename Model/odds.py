@@ -31,14 +31,34 @@ ODDS_COLUMNS = ["Date", "GamePk", "Team", "PlayerId", "PlayerName",
 # key the scraper requests; `line` is the over/under number that equals the
 # prop (over 0.5 = "1+", over 1.5 = "2+"); `label` is for display.
 PROP_MARKET = {
-    "hr":    dict(api="batter_home_runs",    line=0.5, label="1+ HR"),
-    "hit":   dict(api="batter_hits",         line=0.5, label="1+ hit"),
-    "hits2": dict(api="batter_hits",         line=1.5, label="2+ hits"),
-    "tb2":   dict(api="batter_total_bases",  line=1.5, label="2+ total bases"),
-    "run":   dict(api="batter_runs_scored",  line=0.5, label="run scored"),
-    "rbi":   dict(api="batter_rbis",         line=0.5, label="1+ RBI"),
-    "bb":    dict(api="batter_walks",        line=0.5, label="1+ walk"),
-    "sb":    dict(api="batter_stolen_bases", line=0.5, label="stolen base"),
+    "hr":     dict(api="batter_home_runs",     line=0.5, label="1+ HR"),
+    "hit":    dict(api="batter_hits",          line=0.5, label="1+ hit"),
+    "hits2":  dict(api="batter_hits",          line=1.5, label="2+ hits"),
+    "tb2":    dict(api="batter_total_bases",   line=1.5, label="2+ total bases"),
+    "run":    dict(api="batter_runs_scored",   line=0.5, label="run scored"),
+    "rbi":    dict(api="batter_rbis",          line=0.5, label="1+ RBI"),
+    "bb":     dict(api="batter_walks",         line=0.5, label="1+ walk"),
+    "sb":     dict(api="batter_stolen_bases",  line=0.5, label="stolen base"),
+    "single": dict(api="batter_singles",       line=0.5, label="1+ single"),
+    "double": dict(api="batter_doubles",       line=0.5, label="1+ double"),
+    "bk":     dict(api="batter_strikeouts",    line=0.5, label="1+ batter K"),
+    "bk2":    dict(api="batter_strikeouts",    line=1.5, label="2+ batter K"),
+    "hrr2":   dict(api="batter_hits_runs_rbis", line=1.5, label="2+ H+R+RBI"),
+    "hrr3":   dict(api="batter_hits_runs_rbis", line=2.5, label="3+ H+R+RBI"),
+}
+
+# Pitcher/starter count props the model predicts as multi-line count heads
+# (predict.py xK, xOuts, xHits, xBB, xER). Kept SEPARATE from PROP_MARKET
+# because Section 9 grades single-line binary props keyed to `results`; these
+# have many lines and no such binary key, so the scraper captures every line
+# the book posts and Section 7b evaluates the count heads. `api` is the Odds
+# API market key; `label` is for display. All five confirmed live 2026-07-08.
+STARTER_MARKET = {
+    "pk":    dict(api="pitcher_strikeouts",   label="pitcher strikeouts"),
+    "pouts": dict(api="pitcher_outs",          label="pitcher outs"),
+    "phits": dict(api="pitcher_hits_allowed",  label="pitcher hits allowed"),
+    "pbb":   dict(api="pitcher_walks",         label="pitcher walks"),
+    "per":   dict(api="pitcher_earned_runs",   label="pitcher earned runs"),
 }
 
 # reverse lookups used by the scraper and Section 9:
@@ -146,13 +166,17 @@ def pick_side(p_over, over_price, under_price):
 
 
 def load_odds(path, year=None):
-    """Load the odds store as a DataFrame in canonical schema. Missing file ->
-    empty frame with the right columns (Section 9 degrades gracefully). Coerces
-    Date to a date, prices to numeric, and optionally filters to one season."""
+    """Load the odds store as a DataFrame in canonical schema. A missing OR
+    empty file -> empty frame with the right columns (Section 9 degrades
+    gracefully — e.g. after the store is cleared to re-scrape). Coerces Date to
+    a date, prices to numeric, and optionally filters to one season."""
     path = Path(path)
     if not path.exists():
         return pd.DataFrame(columns=ODDS_COLUMNS)
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:      # file exists but has no header/rows
+        return pd.DataFrame(columns=ODDS_COLUMNS)
     for c in ODDS_COLUMNS:
         if c not in df.columns:
             df[c] = np.nan

@@ -58,8 +58,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import features as F  # noqa: E402
 import odds as O  # noqa: E402
 import recalibrate as R  # noqa: E402
-from predict import (american_odds, count_over, nb_over,  # noqa: E402
-                     poisson_over, poisson_win, predict_prop, predict_win)
+from predict import (american_odds, apply_stack, count_over,  # noqa: E402
+                     nb_over, poisson_over, poisson_win, predict_prop,
+                     predict_win)
 from train import PROPS  # noqa: E402
 
 ART = Path(__file__).resolve().parent / "artifacts"
@@ -82,7 +83,8 @@ NOISE_BAND = {"_auc": 0.004, "_edge": 0.001, "_ece": 0.003, "_top10": 0.02,
 # exact-key overrides where the metric's scale differs from its suffix class
 # (outs run ~16.5 a start, hits allowed ~5 — their MAE jitter is larger than
 # the K model's; provisional sizes, tune after a few retrains)
-NOISE_BAND_EXACT = {"outs_mae": 0.03, "pha_mae": 0.015, "xhrr_mae": 0.01}
+NOISE_BAND_EXACT = {"outs_mae": 0.03, "pha_mae": 0.015, "xhrr_mae": 0.01,
+                    "per_mae": 0.015, "xtb_mae": 0.01}
 
 
 def noise_band(metric):
@@ -532,7 +534,216 @@ def _market_consensus(store, api, line):
         n_books=("fair", "size")).reset_index()
 
 
-def section_market(results, year, store_path, n_boot):
+def _grade_against_market(name, model, cons, n_boot, key="PlayerId"):
+    """Join a model's per-event P(over) to the de-vigged market consensus and
+    grade it: model vs market log loss on the shared events, plus flat-1u ROI
+    on every side the model prices +EV at the best book price. `model` carries
+    Date, the join key (`key`: PlayerId for player props, Team for game
+    markets), p (model P(over)) and y (0/1 outcome). Returns a summary row
+    dict, or None if fewer than 20 events join."""
+    cons = cons.copy()
+    if key == "PlayerId":
+        cons["PlayerId"] = pd.to_numeric(cons["PlayerId"], errors="coerce")
+    j = model.merge(cons, on=["Date", key], how="inner")
+    if len(j) < 20:
+        return None
+    yv = j["y"].to_numpy()
+    mp = np.clip(j["p"].to_numpy(), 1e-4, 1 - 1e-4)
+    fq = np.clip(j["fair"].to_numpy(), 1e-4, 1 - 1e-4)
+    both = len(np.unique(yv)) > 1
+    m_ll = log_loss(yv, mp) if both else float("nan")
+    k_ll = log_loss(yv, fq) if both else float("nan")
+    # flat 1u on every side the model prices +EV, at the best book price,
+    # settled at the real outcome
+    profit, bdays = [], []
+    for _, row in j.iterrows():
+        side, _ev = O.pick_side(row["p"], row["best_over"], row["best_under"])
+        if side is None:
+            continue
+        price = row["best_over"] if side == "over" else row["best_under"]
+        won = (row["y"] == 1) if side == "over" else (row["y"] == 0)
+        profit.append(O.settle(price, bool(won)))
+        bdays.append(row["Date"])
+    if profit:
+        profit, days = np.array(profit), np.array(bdays)
+        lo, hi = _dayblock_roi_ci(days, profit, n_boot)
+        roi_s = f"{profit.mean():+.1%} [{lo:+.1%},{hi:+.1%}]"
+    else:
+        roi_s = "—"
+    holds = j["hold"].dropna()
+    return {
+        "prop": name, "events": len(j),
+        "med hold": f"{holds.median():.1%}" if len(holds) else "—",
+        "model ll": f"{m_ll:.4f}" if both else "—",
+        "market ll": f"{k_ll:.4f}" if both else "—",
+        "model<mkt": ("yes" if (both and m_ll < k_ll) else "no"),
+        "+EV bets": len(profit),
+        "flat ROI [95% CI]": roi_s,
+    }
+
+
+def _starter_market_rows(sf_y, art, store, n_boot):
+    """Section 9 for the pitcher count props (strikeouts, outs, walks, hits,
+    earned runs). These are multi-line, so each line the book posts is graded
+    on its own: the model's P(over line) comes from the K model (nb_over) or
+    the matching count head (count_over), the outcome is the real start's count
+    > line, joined to the market on (Date, PlayerId). Prop labels are the
+    scraper's keys plus the line, e.g. 'pk 6.5', 'per 2.5'."""
+    if sf_y is None or not len(sf_y):
+        return []
+    date = pd.to_datetime(sf_y["Date"]).dt.date.to_numpy()
+    pid = pd.to_numeric(sf_y["PlayerId"], errors="coerce").to_numpy()
+    # api market -> (mu, actual-count array, P(over line) fn)
+    providers = {}
+    if art.get("k_model") is not None and "y_so" in sf_y.columns:
+        k_disp = float(art.get("k_disp", 1.0))
+        mu_k = art["k_model"].predict(prep(sf_y, art["st_cols"], art["cat_levels"]))
+        providers["pitcher_strikeouts"] = (
+            mu_k, sf_y["y_so"].to_numpy().astype(float),
+            lambda mu, line: np.array([nb_over(m, line, k_disp) for m in mu]))
+    cm = art.get("count_models", {})
+    api_of = {"outs": "pitcher_outs", "pbb": "pitcher_walks",
+              "pha": "pitcher_hits_allowed", "per": "pitcher_earned_runs"}
+    for cname, api in api_of.items():
+        head = cm.get(cname)
+        if head is None or head.get("frame") != "starts":
+            continue
+        mu = head["model"].predict(prep(sf_y, head["cols"], art["cat_levels"]))
+        y = sf_y[head["target"]].to_numpy().astype(float)
+        providers[api] = (mu, y, (lambda h: lambda mu, line:
+                                  count_over(h, mu, line))(head))
+    key_of = {m["api"]: k for k, m in O.STARTER_MARKET.items()}
+    rows = []
+    for api, (mu, yv, prob_fn) in providers.items():
+        lines = sorted({float(l) for l in
+                        store.loc[store["Market"] == api, "Line"].dropna()})
+        for line in lines:
+            cons = _market_consensus(store, api, line)
+            if cons.empty:
+                continue
+            model = pd.DataFrame({"Date": date, "PlayerId": pid,
+                                  "p": prob_fn(mu, line),
+                                  "y": (yv > line).astype(int)})
+            row = _grade_against_market(f"{key_of.get(api, api)} {line:g}",
+                                        model, cons, n_boot)
+            if row:
+                rows.append(row)
+    return rows
+
+
+def _game_consensus(store, api, line):
+    """Like _market_consensus but for game markets, keyed on (Date, Team=home)
+    since game rows carry no PlayerId. de-vig gives fair P(over) for totals and
+    fair P(home) for h2h (the store puts OverPrice=home, UnderPrice=away).
+    `line` is None for h2h (a moneyline has no point)."""
+    m = store[store["Market"] == api]
+    if line is not None:
+        m = m[(m["Line"] - line).abs() < 1e-6]
+    recs = []
+    for _, r in m.iterrows():
+        fo, hold = O.devig_two_way(r["OverPrice"], r["UnderPrice"])
+        if np.isnan(fo):
+            continue
+        recs.append((r["Date"], r["Team"], fo, hold,
+                     r["OverPrice"], r["UnderPrice"]))
+    cols = ["Date", "Team", "fair", "hold", "best_over", "best_under", "n_books"]
+    if not recs:
+        return pd.DataFrame(columns=cols)
+    md = pd.DataFrame(recs, columns=["Date", "Team", "fair", "hold",
+                                     "over", "under"])
+    return md.groupby(["Date", "Team"], dropna=False).agg(
+        fair=("fair", "median"), hold=("hold", "median"),
+        best_over=("over", "max"), best_under=("under", "max"),
+        n_books=("fair", "size")).reset_index()
+
+
+def _game_market_rows(gf_y, art, store, n_boot):
+    """Section 9 for the game markets. totals: model P(over runs) from the
+    team-runs Poisson (nb_over, cal-year dispersion). h2h: model P(home win)
+    from the win model — betting the 'over' side backs the home team. Both join
+    to the game holdout on (Date, home team) since game rows carry no PlayerId."""
+    if gf_y is None or not len(gf_y):
+        return []
+    if store[store["Market"].isin(("totals", "h2h"))].empty:
+        return []
+    tg = F.build_team_game_frame(gf_y)
+    tp = art["team_runs_model"].predict(prep(tg, art["tg_cols"], art["cat_levels"]))
+    n = len(gf_y)
+    mu_away, mu_home = tp[:n], tp[n:]
+    total_mu = mu_away + mu_home
+    disp = float(art.get("total_disp", 1.0))
+    home_y = pd.to_numeric(gf_y["HomeScore"], errors="coerce").to_numpy()
+    away_y = pd.to_numeric(gf_y["AwayScore"], errors="coerce").to_numpy()
+    date = pd.to_datetime(gf_y["Date"]).dt.date.to_numpy()
+    team = gf_y["HomeTeam"].to_numpy()
+    total_y = home_y + away_y
+    rows = []
+    for line in sorted({float(l) for l in
+                        store.loc[store["Market"] == "totals", "Line"].dropna()}):
+        cons = _game_consensus(store, "totals", line)
+        if cons.empty:
+            continue
+        model = pd.DataFrame({
+            "Date": date, "Team": team,
+            "p": np.array([nb_over(m, line, disp) for m in total_mu]),
+            "y": (total_y > line).astype(int)})
+        row = _grade_against_market(f"totals {line:g}", model, cons, n_boot,
+                                    key="Team")
+        if row:
+            rows.append(row)
+    win = art.get("win_model", {})
+    if not store[store["Market"] == "h2h"].empty and win.get("cols") \
+            and all(c in gf_y.columns for c in win["cols"]):
+        p_home = predict_win(win, prep(gf_y, win["cols"], art["cat_levels"]),
+                             mu_home, mu_away)
+        cons = _game_consensus(store, "h2h", None)
+        if not cons.empty:
+            model = pd.DataFrame({"Date": date, "Team": team, "p": p_home,
+                                  "y": (home_y > away_y).astype(int)})
+            row = _grade_against_market("h2h (home)", model, cons, n_boot,
+                                        key="Team")
+            if row:
+                rows.append(row)
+    return rows
+
+
+def _batter_count_market_rows(bf_y, art, store, n_boot):
+    """Section 9 for batter count-head lines the binary props DON'T cover —
+    3+/4+ total bases (xtb), 4+ H+R+RBI (xhrr). P(over line) from the count
+    head's count_over; any line already owned by a binary prop (in PROP_MARKET)
+    is skipped, so each line is graded once by its better-calibrated head."""
+    cm = art.get("count_models", {})
+    if bf_y is None or not len(bf_y) or not cm:
+        return []
+    bat_api = {"xtb": "batter_total_bases", "xhrr": "batter_hits_runs_rbis",
+               "xbk": "batter_strikeouts"}
+    owned = {(m["api"], m["line"]) for m in O.PROP_MARKET.values()}
+    date = pd.to_datetime(bf_y["Date"]).dt.date.to_numpy()
+    pid = pd.to_numeric(bf_y["PlayerId"], errors="coerce").to_numpy()
+    rows = []
+    for cname, api in bat_api.items():
+        head = cm.get(cname)
+        if head is None or head.get("frame") != "bat":
+            continue
+        mu = head["model"].predict(prep(bf_y, head["cols"], art["cat_levels"]))
+        y = bf_y[head["target"]].to_numpy().astype(float)
+        for line in sorted({float(l) for l in
+                            store.loc[store["Market"] == api, "Line"].dropna()}):
+            if (api, line) in owned:      # a binary prop already grades this
+                continue
+            cons = _market_consensus(store, api, line)
+            if cons.empty:
+                continue
+            model = pd.DataFrame({"Date": date, "PlayerId": pid,
+                                  "p": count_over(head, mu, line),
+                                  "y": (y > line).astype(int)})
+            row = _grade_against_market(f"{cname} {line:g}", model, cons, n_boot)
+            if row:
+                rows.append(row)
+    return rows
+
+
+def section_market(results, bf_y, sf_y, gf_y, art, year, store_path, n_boot):
     print("\n=== 9. Model vs. the market ===")
     store = O.load_odds(store_path, year=year)
     if store.empty:
@@ -553,50 +764,21 @@ def section_market(results, year, store_path, n_boot):
               f"accrue — treat it\n  as anecdote.")
     rows = []
     for name, meta in O.PROP_MARKET.items():
-        r = results[name]
+        r = results.get(name)
+        if r is None:  # prop not scored on this artifact (e.g. older model)
+            continue
         model = pd.DataFrame({"Date": pd.to_datetime(r["d"]).date,
                               "PlayerId": pd.to_numeric(r["pid"]),
                               "p": r["p"], "y": r["y"]})
         cons = _market_consensus(store, meta["api"], meta["line"])
         if cons.empty:
             continue
-        cons["PlayerId"] = pd.to_numeric(cons["PlayerId"], errors="coerce")
-        j = model.merge(cons, on=["Date", "PlayerId"], how="inner")
-        if len(j) < 20:
-            continue
-        yv = j["y"].to_numpy()
-        mp = np.clip(j["p"].to_numpy(), 1e-4, 1 - 1e-4)
-        fq = np.clip(j["fair"].to_numpy(), 1e-4, 1 - 1e-4)
-        both = len(np.unique(yv)) > 1
-        m_ll = log_loss(yv, mp) if both else float("nan")
-        k_ll = log_loss(yv, fq) if both else float("nan")
-        # flat 1u on every side the model prices +EV, at the best book price,
-        # settled at the real outcome
-        profit, bdays = [], []
-        for _, row in j.iterrows():
-            side, _ev = O.pick_side(row["p"], row["best_over"], row["best_under"])
-            if side is None:
-                continue
-            price = row["best_over"] if side == "over" else row["best_under"]
-            won = (row["y"] == 1) if side == "over" else (row["y"] == 0)
-            profit.append(O.settle(price, bool(won)))
-            bdays.append(row["Date"])
-        if profit:
-            profit, days = np.array(profit), np.array(bdays)
-            lo, hi = _dayblock_roi_ci(days, profit, n_boot)
-            roi_s = f"{profit.mean():+.1%} [{lo:+.1%},{hi:+.1%}]"
-        else:
-            roi_s = "—"
-        holds = j["hold"].dropna()
-        rows.append({
-            "prop": name, "events": len(j),
-            "med hold": f"{holds.median():.1%}" if len(holds) else "—",
-            "model ll": f"{m_ll:.4f}" if both else "—",
-            "market ll": f"{k_ll:.4f}" if both else "—",
-            "model<mkt": ("yes" if (both and m_ll < k_ll) else "no"),
-            "+EV bets": len(profit),
-            "flat ROI [95% CI]": roi_s,
-        })
+        row = _grade_against_market(name, model, cons, n_boot)
+        if row:
+            rows.append(row)
+    rows += _starter_market_rows(sf_y, art, store, n_boot)
+    rows += _batter_count_market_rows(bf_y, art, store, n_boot)
+    rows += _game_market_rows(gf_y, art, store, n_boot)
     if not rows:
         print("  Odds present, but none matched the holdout predictions on "
               "(date, player).\n  Check that scraped player names resolved to "
@@ -609,44 +791,80 @@ def section_market(results, year, store_path, n_boot):
     print("  'flat ROI' bets 1u on every side the model prices +EV at the best "
           "book price and\n  settles at the outcome. Negative = the vig eats "
           "the edge.")
+    print("  Labels: batter binary props ('hr','tb2',...); batter count-head "
+          "lines the binaries\n  don't cover ('xtb 2.5' = 3+ TB, 'xhrr 3.5'); "
+          "pitcher lines ('pk 6.5','per 2.5'); and\n  game markets ('totals "
+          "8.5'; 'h2h (home)' = model P(home win) vs the moneyline).")
 
 
 # ------------------------------------------------ in-season recalibration
 
 
+# drift-guard variants compared side by side; "expand" is what train.py
+# currently stores for `predict.py --recal`.
+# VERDICT (2026-07-07, both years): no variant beats the incumbent. On the
+# one genuinely drifting prop (bb, 2026) all three offsets tie at +0.0005 —
+# right at the noise line — and temp loses everywhere (1/14). The Section-4
+# drift (~1-2pp) is real but too small to correct profitably in-season.
+# Recal stays default-OFF; this table stays as the standing monitor — if bb
+# clears +0.0005 decisively by August, expand is the variant to enable.
+RECAL_VARIANTS = [
+    ("expand", {}),
+    ("trail30", {"window_days": 30}),
+    ("trail45", {"window_days": 45}),
+    ("temp", {"temp": True}),           # expanding window + temperature term
+]
+
+
 def section_inseason(results, min_n=300):
-    print("\n=== 10. In-season recalibration (drift guard) ===")
-    rows, n_better = [], 0
+    print("\n=== 10. In-season recalibration (drift guard) — variant "
+          "shoot-out ===")
+    rows = []
+    wins = {v: 0 for v, _ in RECAL_VARIANTS}
     for name, r in results.items():
-        corrected, applied, order = R.inseason_correct(
-            r["d"], r["p"], r["y"], min_n=min_n)
-        y, p, m = r["y"][order], r["p"][order], applied
-        if m.sum() < 50 or len(np.unique(y[m])) < 2:
-            rows.append({"prop": name, "corrected n": int(m.sum()),
-                         "logloss raw": "-", "logloss recal": "-",
-                         "ll gain": "-", "drift raw": "-",
-                         "drift recal": "-", "verdict": "n/a"})
-            continue
-        ll_raw = log_loss(y[m], np.clip(p[m], 1e-4, 1 - 1e-4))
-        ll_rec = log_loss(y[m], corrected[m])
-        better = ll_rec < ll_raw - 1e-6
-        n_better += int(better)
-        rows.append({"prop": name, "corrected n": int(m.sum()),
-                     "logloss raw": f"{ll_raw:.4f}",
-                     "logloss recal": f"{ll_rec:.4f}",
-                     "ll gain": f"{ll_raw - ll_rec:+.4f}",
-                     "drift raw": f"{(y[m].mean() - p[m].mean()) * 100:+.2f}",
-                     "drift recal": f"{(y[m].mean() - corrected[m].mean()) * 100:+.2f}",
-                     "verdict": "better" if better else "worse/flat"})
+        row = {"prop": name}
+        best_v, best_gain = "raw", 0.0
+        mask = y_s = p_s = None
+        for vname, kw in RECAL_VARIANTS:
+            kwargs = dict(kw)
+            if kwargs.pop("temp", False):
+                kwargs["temp"] = r["temp"]
+            corrected, applied, order = R.inseason_correct(
+                r["d"], r["p"], r["y"], min_n=min_n, **kwargs)
+            if mask is None:            # identical across variants
+                mask, y_s = applied, r["y"][order]
+                p_s = np.clip(r["p"][order], 1e-4, 1 - 1e-4)
+                if mask.sum() < 50 or len(np.unique(y_s[mask])) < 2:
+                    break
+                row["n"] = int(mask.sum())
+                row["ll raw"] = f"{log_loss(y_s[mask], p_s[mask]):.4f}"
+            gain = (log_loss(y_s[mask], p_s[mask])
+                    - log_loss(y_s[mask], corrected[mask]))
+            row[vname] = f"{gain:+.4f}"
+            wins[vname] += int(gain > 1e-6)
+            if gain > best_gain + 1e-6:
+                best_v, best_gain = vname, gain
+        if "n" not in row:
+            row.update({"n": 0, "ll raw": "-", "best": "n/a"})
+        else:
+            row["best"] = best_v
+        rows.append(row)
     print(pd.DataFrame(rows).to_string(index=False))
-    print(f"  A per-prop log-odds shift, refit ONLY on in-season games before "
-          f"each date (after\n  {min_n} games of history accrue) - strictly "
-          f"causal. 'll gain' > 0 means the drift\n  guard helped; 'drift' "
-          f"(actual - predicted, points) should move toward 0. Helped "
-          f"{n_better}/{len(rows)} props.")
-    print("  If this consistently wins, enable it in serving: "
-          "`python Model/predict.py --recal`\n  (the daily retrain refreshes "
-          "the stored offset with all in-season data through today).")
+    helped = " | ".join(f"{v} {wins[v]}/{len(rows)}"
+                        for v, _ in RECAL_VARIANTS)
+    print(f"  Per-prop drift corrections, each refit ONLY on in-season games "
+          f"before each date\n  (after {min_n} games accrue) — strictly "
+          f"causal. Columns are log-loss GAIN over the\n  raw frozen model "
+          f"on the same rows (positive = the guard helped):\n"
+          f"    expand   one offset, all season-to-date (what --recal serves "
+          f"today)\n"
+          f"    trail30/45  one offset, last 30/45 days only (tracks a "
+          f"summer surge)\n"
+          f"    temp     offset + temperature slope, season-to-date\n"
+          f"  Helped: {helped}.")
+    print("  Read: gains under ~0.0005 are noise. A variant earns serving "
+          "(`predict.py --recal`)\n  only by winning on the props that "
+          "drift (bb/hr/run), here AND on the --confirm year.")
 
 
 # ----------------------------------------------------- baseline tracking
@@ -813,17 +1031,23 @@ def main():
     X = prep(bf_y, art["bat_cols"], art["cat_levels"])
     print(f"Scoring {len(bf_y):,} batter-games, {args.year}...")
 
+    # two passes: raw probabilities first, so stacked props (single/double
+    # borrow hit/tb2 scores, predict.apply_stack) see their donors — same
+    # order of operations as serving
+    raw_p = {name: predict_prop(art["props"][name], X)
+             for name in PROPS if name in art["props"]}
     results = {}
     for name, (target, _desc) in PROPS.items():
-        if name not in art["props"]:  # artifact predates this prop
+        if name not in raw_p:  # artifact predates this prop
             continue
-        p = predict_prop(art["props"][name], X)
+        p = apply_stack(art["props"][name], raw_p[name], raw_p)
         y = bf_y[target].to_numpy()
         base = np.full_like(p, y.mean())
         results[name] = {
             "p": p, "y": y, "d": bf_y["Date"].to_numpy(),
             "g": bf_y["GamePk"].to_numpy(),
             "pid": bf_y["PlayerId"].to_numpy(),
+            "temp": pd.to_numeric(bf_y["Temp"], errors="coerce").to_numpy(),
             "auc": roc_auc_score(y, p),
             "edge": log_loss(y, base) - log_loss(y, p),
         }
@@ -849,7 +1073,8 @@ def main():
               f"mode: no odds store\n  exists for {args.year}, and market "
               f"grading belongs to the --confirm run anyway)")
     else:
-        section_market(results, args.year, args.odds, args.boot)
+        section_market(results, bf_y, sf_y, gf_y, art, args.year, args.odds,
+                       args.boot)
     section_inseason(results)
 
     handle_baseline(summary, args.year, args.set_baseline, select=select)
@@ -868,8 +1093,10 @@ How to read this:
   - Section 9 is the real-money test: model vs. de-vigged sportsbook prices on
     the same events, plus flat-stake ROI. Needs an odds store (scrape_odds.py);
     everything above only beats a naive base rate.
-  - Section 10 asks whether a strictly-causal in-season bias shift would beat
-    the frozen model as the environment drifts (a growing Section-4 miss).
+  - Section 10 asks whether a strictly-causal in-season correction would beat
+    the frozen model as the environment drifts (a growing Section-4 miss) —
+    and which variant: season-to-date offset, trailing-window, or
+    temperature-aware.
   - Section 11 diffs this run against the --set-baseline snapshot. Deltas
     inside each metric's noise band (retrain jitter) are "within noise" —
     only movement beyond the band says a change did anything. Dispersion

@@ -7,8 +7,9 @@ Models (all LightGBM):
     bk/bk2 (1+/2+ batter strikeouts), hrr2/hrr3 (2+/3+ hits+runs+RBIs)
   k     starter strikeouts in the game              Poisson regression
   count heads (starter-K pattern, mean + cal-year NB dispersion):
-    xbk/xhrr (batter K and H+R+RBI means), outs, pbb, pha (starter outs /
-    walks allowed / hits allowed, with P(over) lines)
+    xbk/xhrr (batter K and H+R+RBI means), outs, pbb, pha, per (starter
+    outs / walks allowed / hits allowed / earned runs, with P(over) lines;
+    per also drives a derived expected ERA in predict.py)
   runs  game total runs                             Poisson regression
 
 Honest evaluation protocol (no leakage):
@@ -74,6 +75,27 @@ LGB_WIN = dict(n_estimators=3000, learning_rate=0.02, num_leaves=15,
                min_child_samples=150, subsample=0.9, subsample_freq=1,
                colsample_bytree=0.7, reg_lambda=10.0, objective="binary",
                verbose=-1)
+
+# Monotonic constraints (HR only): physics/domain says HR probability can
+# only rise with these — exit velo, barrel rate, own HR rate, HR-friendly
+# park, heat, altitude. Constraining the GBM is pure regularization: it
+# cannot create signal, only stop trees fitting noise wiggles in thin
+# regions. "advanced" is the least accuracy-costly enforcement.
+# BENCHED (2026-07-07, cal-2024 fit previewed on 2025): within-noise on
+# everything — AUC +0.0003, logloss -0.0008 (edge +0.0008 < .001 band),
+# but top10 -0.0087 (the pick metric got slightly worse). Neutral change,
+# so the simpler unconstrained model ships. The wiring stays: repopulate
+# HR_MONOTONE below into MONOTONE to re-enable (e.g. if a future serving
+# robustness guarantee on odd GUI inputs is wanted — monotonicity is
+# defensible even at flat metrics, it just didn't earn its way in on
+# accuracy). Fill the dict to re-enable (Experiment 4 of the program).
+HR_MONOTONE = {
+    "bip_ev": 1, "bipd_ev": 1, "bip_brl": 1, "bipd_brl": 1, "bip_hh": 1,
+    "hrq_ev_avg": 1, "hrq_dist_avg": 1, "hrq_dist_max": 1,
+    "c_hr_pa_sh": 1, "s_hr_pa_sh": 1, "d_hr_pa_sh": 1,
+    "park_hr_pg": 1, "Temp": 1, "Elevation_ft": 1,
+}
+MONOTONE = {}
 
 # Per-prop feature routing. The batter frame carries a SUPERSET of columns;
 # each prop trains on the superset minus the groups that don't speak to it.
@@ -171,6 +193,21 @@ PROPS = {
     "hrr3": ("y_hrr3", "3+ hits+runs+RBIs"),
 }
 
+# Calibration-layer stacking for the thin-signal props: a logistic on
+# logits blends a thin prop's score with thick-prop donors, fit ONLY on
+# the calibration year (donor scores there are honest out-of-sample —
+# donors never train on cal_yr). Applied identically by evaluate_deep and
+# serving through predict.apply_stack; artifacts without a "stack" key
+# pass through unchanged.
+# BENCHED (2026-07-07, cal-2024 fit previewed on 2025 with the incumbent
+# selection artifacts): self coefs ~0.95 with donors ~0 or canceling
+# (double: hit -0.25 / tb2 +0.26); double got WORSE on AUC/logloss/ECE,
+# single flat with worse ECE. The thin props' own models already extract
+# what the donors know — they see the same features. Machinery stays
+# (predict.apply_stack + the two-pass loops are pass-through no-ops);
+# repopulate this dict to retry with different donors.
+STACK_DONORS = {}
+
 # Count-style props: Poisson LGBM (starter-K pattern) + per-line logistic
 # calibrators fit on the calibration year (predict.count_over). Batter heads
 # exist for the MEANS (xSO, xHRR) — their half-point lines are priced by the
@@ -181,6 +218,8 @@ COUNT_HEADS = {
                  lines=[0.5, 1.5, 2.5], desc="batter strikeouts"),
     "xhrr": dict(frame="bat", target="hrr_count", exclude="hrr2",
                  lines=[1.5, 2.5, 3.5], desc="hits+runs+RBIs"),
+    "xtb":  dict(frame="bat", target="tb_count", exclude="tb2",
+                 lines=[1.5, 2.5, 3.5], desc="total bases"),
     "outs": dict(frame="starts", target="y_outs", exclude=None,
                  lines=[14.5, 15.5, 16.5, 17.5, 18.5],
                  desc="starter outs recorded"),
@@ -188,6 +227,8 @@ COUNT_HEADS = {
                  lines=[0.5, 1.5, 2.5], desc="starter walks allowed"),
     "pha":  dict(frame="starts", target="y_pha", exclude=None,
                  lines=[3.5, 4.5, 5.5, 6.5], desc="starter hits allowed"),
+    "per":  dict(frame="starts", target="y_per", exclude=None,
+                 lines=[1.5, 2.5, 3.5, 4.5], desc="starter earned runs"),
 }
 
 
@@ -398,11 +439,49 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
 
     for name, (target, _desc) in PROPS.items():
         cols = [c for c in bat_cols if c not in PROP_EXCLUDE.get(name, ())]
+        params = None
+        mono = MONOTONE.get(name)
+        if mono:    # categoricals and unlisted cols get 0 (unconstrained)
+            params = dict(LGB_CLS,
+                          monotone_constraints=[mono.get(c, 0) for c in cols],
+                          monotone_constraints_method="advanced")
         prop, m = fit_classifier(bf, cols, target,
-                                 train_yrs, cal_yr, test_yr, name.upper())
+                                 train_yrs, cal_yr, test_yr, name.upper(),
+                                 params=params)
         prop["cols"] = cols
         props[name] = prop
         metrics[f"{name}_{test_yr}"] = m
+
+    # thin-prop stacking (STACK_DONORS): fit on the calibration year, then
+    # log the test-year effect for a first read — evaluate_deep applies the
+    # same stacker (predict.apply_stack) and its Section 11 is the verdict.
+    # The per-prop metrics above stay PLAIN; the STACK log line shows both.
+    if STACK_DONORS:
+        from predict import apply_stack, predict_prop  # local: avoids cycle
+        from recalibrate import _logit
+        ca = bf[bf["Season"] == cal_yr]
+        te = bf[bf["Season"] == test_yr]
+        p_ca, p_te = {}, {}
+        for name, donors in STACK_DONORS.items():
+            for d in {name, *donors}:
+                if d not in p_ca:
+                    p_ca[d] = predict_prop(props[d], ca)
+                    p_te[d] = predict_prop(props[d], te)
+            y_ca = ca[PROPS[name][0]].to_numpy()
+            Z = np.column_stack([_logit(p_ca[name])]
+                                + [_logit(p_ca[d]) for d in donors])
+            lr = LogisticRegression(C=1e6, max_iter=1000).fit(Z, y_ca)
+            props[name]["stack"] = {"donors": list(donors), "lr": lr}
+            y_te = te[PROPS[name][0]].to_numpy()
+            p0 = np.clip(p_te[name], 1e-4, 1 - 1e-4)
+            p1 = apply_stack(props[name], p_te[name], p_te)
+            coefs = " ".join(f"{n}:{c:+.2f}" for n, c in
+                             zip(["self", *donors], lr.coef_[0]))
+            log(f"STACK {name.upper()} [{test_yr}]: AUC "
+                f"{roc_auc_score(y_te, p1):.4f} (plain "
+                f"{roc_auc_score(y_te, p_te[name]):.4f}) | logloss "
+                f"{log_loss(y_te, p1):.4f} (plain {log_loss(y_te, p0):.4f}) "
+                f"| coefs {coefs}")
 
     def k_baseline(te):
         league = sf.loc[sf["Season"].isin(train_yrs), "y_so"].mean()
@@ -445,6 +524,10 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
             if _n == "pha":
                 return (te["ps_h_bf"] * (te["ps_BF"] / te["p_starts_season"])
                         ).fillna(_m).clip(0, 12)
+            if _n == "per":
+                # season ERA (ER per 9 IP) scaled to this start's expected IP
+                return (te["ps_era"] * te["p_ip_per_start"] / 9
+                        ).fillna(_m).clip(0, 10)
             return pd.Series(_m, index=te.index)  # xhrr: league mean
 
         model, m = fit_poisson(frame, cols, ch["target"], train_yrs, cal_yr,

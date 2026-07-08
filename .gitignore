@@ -26,6 +26,7 @@ __pycache__/
 .venv/
 venv/
 .env
+.odds_api_key
 
 # local tooling
 .claude/

@@ -51,6 +51,21 @@ DECAY_EPOCH = pd.Timestamp("2020-01-01")
 DECAY_STATS = ["PA", "HR", "TB", "SO", "BB", "SB"]
 DECAY_SHRINK = ("hr_pa", "tb_ab", "k_pct", "bb_pct", "sb_pa")
 
+# Expected exposure (xPA): every binary prop is really P(gets N plate
+# appearances) x P(event per PA), but the trees only see per-PA rates and
+# slot — they cannot form a PA-per-game ratio from cumulative sums. Two
+# explicit exposure features: xpa_bat (the batter's own decayed PA per
+# game — pinch-hit / platoon-removal / early-pull risk) and xpa_slot
+# (as-of league PA per game at tonight's lineup slot — leadoff 4.48 vs
+# nine hole 3.31).
+# BENCHED (2026-07-07 selection run): 1 better (rbi_top10, barely past
+# band) vs 3 worse (rbi/single/bk ECE past band), every AUC/edge within
+# noise — calibration harm without ranking gain; slot + per-PA rates
+# evidently already carry the usable exposure signal. Both stay in the
+# frames and the Stores/predict wiring, but out of batter_feature_cols.
+XPA_PRIOR = 4.3          # league PA per batter-game (shrinkage target)
+XPA_K = 10.0             # games of shrinkage for xpa_bat
+
 # ---------------------------------------------------------------- loading
 
 
@@ -240,6 +255,10 @@ def _batter_asof(gb):
         xw = df[s].to_numpy(dtype="float64") * wup
         cs = pd.Series(xw, index=df.index).groupby(df["PlayerId"]).cumsum() - xw
         df[f"_dk_{s}"] = cs * wdn
+    # decayed count of games played (weight 1 per game): the denominator of
+    # xpa_bat, the batter's decayed PA per game (exposure)
+    cs = pd.Series(wup, index=df.index).groupby(df["PlayerId"]).cumsum() - wup
+    df["_dk_G"] = cs * wdn
     # platoon splits: career as-of sums in games vs L / vs R opposing starters
     for hand in ("L", "R"):
         mask = df["opp_hand"] == hand
@@ -259,7 +278,7 @@ def _batter_asof(gb):
     asof_cols = (["g_career", "g_season", "days_rest"]
                  + [f"c_{s}" for s in BAT_STATS] + [f"s_{s}" for s in BAT_STATS]
                  + [f"r{w}_{s}" for w in ROLL_WINDOWS for s in ROLL_STATS]
-                 + [f"_dk_{s}" for s in DECAY_STATS]
+                 + [f"_dk_{s}" for s in DECAY_STATS] + ["_dk_G"]
                  + [f"_vs{h}_{s}" for h in ("L", "R") for s in VSH_STATS]
                  + [f"_loc{f}_{s}" for f in (0, 1) for s in LOC_STATS]
                  + ["_posC_n", "_posDH_n"])
@@ -1151,6 +1170,29 @@ def _platoon(rows):
     return rows
 
 
+def _slot_pa_table(gb):
+    """Per (slot, Date): as-of league PA per game at that lineup slot —
+    strictly before the date (a day's own games never inform it). Built
+    from the RAW game logs by both the training merge and the Stores
+    lookup, so the two paths share one population by construction.
+    cum_pa/cum_n are INCLUSIVE cumsums (through the row's own day);
+    xpa_slot subtracts the own day out. First-ever day per slot is NaN."""
+    slot = pd.to_numeric(gb["BattingOrder"], errors="coerce")
+    starters = pd.DataFrame({
+        "slot": (slot // 100), "Date": gb["Date"],
+        "PA": pd.to_numeric(gb["PA"], errors="coerce").fillna(0.0),
+    })[(slot % 100 == 0)]
+    starters["slot"] = starters["slot"].astype(int)
+    day = (starters.groupby(["slot", "Date"], sort=True)["PA"]
+           .agg(day_pa="sum", day_n="size").reset_index())
+    g = day.groupby("slot", sort=False)
+    day["cum_pa"] = g["day_pa"].cumsum()
+    day["cum_n"] = g["day_n"].cumsum()
+    day["xpa_slot"] = ((day["cum_pa"] - day["day_pa"])
+                       / (day["cum_n"] - day["day_n"]))
+    return day
+
+
 BATTER_FEATURES = None  # populated below
 
 
@@ -1164,6 +1206,12 @@ def build_batter_frame(raw):
     df["slot"] = pd.to_numeric(df["BattingOrder"], errors="coerce")
     df = df[(df["slot"] % 100 == 0)].copy()
     df["slot"] = (df["slot"] // 100).astype(int)
+
+    # expected exposure at tonight's slot: as-of league PA/G at that
+    # lineup slot (see XPA_PRIOR note; the shared table guarantees the
+    # inference lookup computes the identical number)
+    df = df.merge(_slot_pa_table(gb)[["slot", "Date", "xpa_slot"]],
+                  on=["slot", "Date"], how="left")
 
     # opposing starter
     starters = gp.loc[gp["GS"] == 1, ["GamePk", "Team", "PlayerId"]].rename(
@@ -1409,6 +1457,10 @@ def build_batter_frame(raw):
     for k, v in decayed_feats({s: df[f"_dk_{s}"] for s in DECAY_STATS}).items():
         df[k] = v
     add_bat_trends(df)
+    # batter's own decayed PA per game (exposure: pinch-hit/platoon-removal
+    # risk), shrunk toward the league PA/G; a debut player sits at the prior
+    df["xpa_bat"] = ((df["_dk_PA"] + XPA_K * XPA_PRIOR)
+                     / (df["_dk_G"] + XPA_K))
     # stolen-base success rate (career, shrunk toward the league rate)
     df["c_sb_succ"] = ((df["c_SB"] + SB_SUCC_K * SB_SUCC_PRIOR)
                        / (df["c_SB"] + df["c_CS"] + SB_SUCC_K))
@@ -1479,6 +1531,7 @@ def build_batter_frame(raw):
     df["y_hrr3"] = (hrr >= 3).astype(int)
     df["bk_count"] = df["SO"]
     df["hrr_count"] = hrr
+    df["tb_count"] = df["TB"]   # total bases -> expected-TB head (xTB)
     return df
 
 
@@ -1530,9 +1583,11 @@ def batter_feature_cols():
              # to slightly negative for every prop; hand-split contact
              # quality (bvh_*/pvh_*, 2026-07-07) was within noise everywhere
              # and pushed tb2 ECE past its band — ECE drifted worse in most
-             # props that received it. All stay in the frames but out of
-             # the batter models. Fatigue (p_np_*) and lg_* help
-             # the K model and live in starts cols.
+             # props that received it; exposure features (xpa_bat/xpa_slot,
+             # 2026-07-07 eve) likewise — rbi/single/bk ECE past band, no
+             # AUC/edge movement (see the XPA_PRIOR note). All stay in the
+             # frames but out of the batter models. Fatigue (p_np_*) and
+             # lg_* help the K model and live in starts cols.
              # This is the SUPERSET; per-prop trimming (e.g. SB features
              # only reach the SB model) lives in train.py PROP_EXCLUDE.
              *CAT_COLS]
@@ -1625,6 +1680,7 @@ def build_starts_frame(raw, batter_frame=None):
     st["y_outs"] = st["Outs"]
     st["y_pbb"] = st["BB"]
     st["y_pha"] = st["H"]
+    st["y_per"] = st["ER"]  # earned runs allowed -> expected-ER head (xER)
     return st
 
 
@@ -1975,6 +2031,7 @@ class Stores:
         self.tsb_tab = _team_sb_allowed_table(r["gb"])
         self.park_tab = _park_table(r["gb"], r["games"])
         self.env_tab = _league_env_table(r["gb"])
+        self.slot_pa_tab = _slot_pa_table(r["gb"])
         self.res_rows = _team_results_rows(r["games"])
         self.res_tab = _daily_cum(self.res_rows.drop(columns=["GamePk"]),
                                   ["Team", "Season"], ["W", "RF", "RA"])
@@ -2030,6 +2087,18 @@ class Stores:
                 "vloc_tb_ab_sh": _shrink(s["TB"], s["PA"], "tb_ab"),
                 "vloc_k_pct_sh": _shrink(s["SO"], s["PA"], "k_pct")}
 
+    def xpa_slot(self, slot, date):
+        """As-of league PA per game at a lineup slot: the shared
+        _slot_pa_table's inclusive cumsums through the last game-day
+        strictly before `date` — identical to the training merge, where a
+        row's value excludes its own day."""
+        t = self.slot_pa_tab
+        m = t[(t["slot"] == slot) & (t["Date"] < date)]
+        if not len(m):
+            return np.nan
+        last = m.iloc[-1]
+        return float(last["cum_pa"] / last["cum_n"])
+
     def _prior_val(self, tab, pid, season, col):
         """Prior-season lookup with the same y-1-then-y-2 fallback as
         _merge_prior_season."""
@@ -2067,6 +2136,7 @@ class Stores:
                     out[f"r{w}_{k}"] = np.nan
                 out.update(shrunk_from_sums(zero, f"r{w}", roll=True))
             out.update(decayed_feats({s: 0.0 for s in DECAY_STATS}))
+            out["xpa_bat"] = XPA_PRIOR      # zero decayed sums -> the prior
         else:
             hs = h[h["Season"] == season]
             for pre, frame in [("c", h), ("s", hs)]:
@@ -2109,9 +2179,12 @@ class Stores:
             # vectorized exp-cumsum-then-discount computation exactly
             wd = np.exp(-DECAY_LAM
                         * (date - h["Date"]).dt.days.to_numpy(dtype="float64"))
-            out.update(decayed_feats(
-                {s: float((h[s].to_numpy(dtype="float64") * wd).sum())
-                 for s in DECAY_STATS}))
+            dks = {s: float((h[s].to_numpy(dtype="float64") * wd).sum())
+                   for s in DECAY_STATS}
+            out.update(decayed_feats(dks))
+            # decayed PA per game (exposure), same shrink as the frame
+            out["xpa_bat"] = ((dks["PA"] + XPA_K * XPA_PRIOR)
+                              / (float(wd.sum()) + XPA_K))
         out["bat_goao"] = self._prior_val(self.bat_prior, pid, season, "bat_goao")
         out["bat_sprint"] = (
             self._prior_val(self.sprint_prior, pid, season, "SprintSpeed")

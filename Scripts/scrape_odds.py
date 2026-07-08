@@ -9,18 +9,26 @@ Source: The Odds API (https://the-odds-api.com). Set an API key once:
 
 Then run it near game time to snapshot that day's closing-ish lines:
 
-    python Scripts/scrape_odds.py                        # today, home runs only (default)
-    python Scripts/scrape_odds.py --markets all          # every prop + totals + h2h
-    python Scripts/scrape_odds.py --markets hr,bb,totals --date 2026-07-04
+    python Scripts/scrape_odds.py                        # today, everything (default)
+    python Scripts/scrape_odds.py --markets props        # player props only, no game markets
+    python Scripts/scrape_odds.py --markets hr,pk,totals --date 2026-07-04
+
+The default 'all' captures every posted player prop the model predicts plus the
+game markets (totals = over/under runs, h2h = moneyline / winner). Run it twice
+a day and it just works: player-prop markets cost 1 credit PER GAME while the
+game markets are one flat bulk call, and a rerun near first pitch SKIPS games
+already underway (their pregame line is final), so the second run only pays for
+games not yet started. write_store de-dupes on (Date, PlayerId, Market, Line,
+Book) keeping the latest capture, so re-running never duplicates rows — it
+upgrades each line toward its closing value.
 
 IMPORTANT on the free tier: it covers moneyline/totals for current & upcoming
 games, but player props ("additional markets") and historical snapshots are
-paid add-ons. So the honest workflow is GOING FORWARD capture — run this daily
-and you accumulate your own closing-line history; Section 9 lights up over the
-games you've collected. A purchased historical dump or a scrape from elsewhere
-also works: just write rows in the Model/odds.py schema to the same CSV.
-Each requested market costs one credit PER GAME, so --markets defaults to home
-runs only; use --markets all for everything, or a custom list to fit the quota.
+paid add-ons, so the default set needs a paid key. The honest workflow is GOING
+FORWARD capture — run this daily and you accumulate your own closing-line
+history; Section 9 lights up over the games you've collected. A purchased
+historical dump or a scrape from elsewhere also works: just write rows in the
+Model/odds.py schema to the same CSV.
 
 Without a key the script explains this and exits 0 (nothing to do), so it is
 safe to wire into a scheduler before you have props access.
@@ -43,29 +51,77 @@ from get_todays_games import (NICKNAME_TO_ABBREV, build_name_index,  # noqa: E40
                               norm_name)
 
 API = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
-PROP_APIS = sorted({m["api"] for m in O.PROP_MARKET.values()})
+PROP_APIS = sorted({m["api"] for m in O.PROP_MARKET.values()} |
+                   {m["api"] for m in O.STARTER_MARKET.values()})
 GAME_MARKETS = ["totals", "h2h"]           # over/under total runs; moneyline
 
-# Each market costs 1 credit PER GAME per region (a 14-game slate x 9 markets =
-# 126 of a 500/month free quota). Default is home runs only (~14 credits/slate,
-# so 500/month covers ~35 daily runs); pass --markets all, or a custom list
-# like hr,bb,sb,totals, for more.
-DEFAULT_MARKETS = "hr"
+# US sportsbooks don't post every market the model predicts. Confirmed empty
+# across the whole 2026-07-08 slate: batter strikeouts. 'props'/'all' skip
+# these so a run never requests an always-empty market; an explicit
+# --markets bk still works (e.g. a region that does post it).
+UNPOSTED_APIS = {"batter_strikeouts"}
+
+# Player-prop markets cost 1 credit PER GAME per region; the game markets
+# (totals, h2h) come from ONE flat bulk call (2 credits total, not per game).
+# The default 'all' pulls every posted player prop the model predicts (10
+# batter + 5 pitcher) plus game markets, so a 14-game slate is ~14x15 + 2 =
+# ~212 credits. A rerun near first pitch skips games already underway (their
+# pregame line is final), so it only pays for games not yet started. Use
+# 'props' for player props only, or a list like hr,pk,totals to spend less.
+DEFAULT_MARKETS = "all"
+
+
+KEY_FILE = ROOT / ".odds_api_key"
+
+
+def load_key(cli_key=None):
+    """Resolve the API key from, in order: --key, a local .odds_api_key file
+    (gitignored), then $ODDS_API_KEY. The FILE is checked BEFORE the env var on
+    purpose: an ODDS_API_KEY set in an already-open terminal goes stale, and a
+    wrong stale key silently burns the wrong account's quota — exactly the bug
+    that bit here. The file is the deliberate, persistent source of truth; set
+    it once and it always wins. Use --key for a one-off override."""
+    if cli_key:
+        return cli_key
+    if KEY_FILE.exists():
+        k = KEY_FILE.read_text(encoding="utf-8").strip()
+        if k:
+            return k
+    return os.environ.get("ODDS_API_KEY")
+
+
+def _api_of(k):
+    """Odds API market key for one of our market keys (batter prop, pitcher
+    prop, or a game market that is already its own api key)."""
+    if k in O.PROP_MARKET:
+        return O.PROP_MARKET[k]["api"]
+    if k in O.STARTER_MARKET:
+        return O.STARTER_MARKET[k]["api"]
+    return k
 
 
 def resolve_markets(spec):
-    """'hr,bb,totals' (our prop keys + game markets) or 'all' -> the ordered,
-    de-duped list of Odds API market keys to request."""
-    valid = list(O.PROP_MARKET) + GAME_MARKETS
-    keys = (valid if spec.strip().lower() == "all"
-            else [k.strip() for k in spec.split(",") if k.strip()])
+    """A market spec -> the ordered, de-duped list of Odds API market keys to
+    request. `spec` is 'all' (every player prop + game market), 'props' (every
+    player prop the model predicts, the default), or a comma list of our keys:
+    batter props (PROP_MARKET), pitcher props (STARTER_MARKET), and/or the game
+    markets totals, h2h."""
+    prop_keys = list(O.PROP_MARKET) + list(O.STARTER_MARKET)
+    valid = prop_keys + GAME_MARKETS
+    s = spec.strip().lower()
+    if s in ("all", "props"):
+        # auto sets drop markets no US book posts; an explicit list keeps them
+        auto = prop_keys + (GAME_MARKETS if s == "all" else [])
+        keys = [k for k in auto if _api_of(k) not in UNPOSTED_APIS]
+    else:
+        keys = [k.strip() for k in spec.split(",") if k.strip()]
     unknown = [k for k in keys if k not in valid]
     if unknown:
-        raise SystemExit(f"unknown market(s): {', '.join(unknown)}. "
-                         f"valid: {', '.join(valid)}, or 'all'.")
+        raise SystemExit(f"unknown market(s): {', '.join(unknown)}. valid: "
+                         f"{', '.join(valid)}, or 'props'/'all'.")
     apis, seen = [], set()
     for k in keys:
-        api = O.PROP_MARKET[k]["api"] if k in O.PROP_MARKET else k
+        api = _api_of(k)
         if api not in seen:
             seen.add(api)
             apis.append(api)
@@ -216,30 +272,53 @@ def write_store(rows, out):
     return len(best)
 
 
+def _commence(e):
+    """An event's commence_time as a tz-aware UTC datetime, or None if absent
+    or unparseable (treated as 'not yet started', so never skipped)."""
+    t = e.get("commence_time")
+    if not t:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--date", default=dt.date.today().isoformat(),
                     help="slate date YYYY-MM-DD (default today)")
-    ap.add_argument("--key", default=os.environ.get("ODDS_API_KEY"))
+    ap.add_argument("--key", default=None,
+                    help="Odds API key; else $ODDS_API_KEY, else the local "
+                         ".odds_api_key file (set once, survives forever)")
     ap.add_argument("--regions", default="us")
     ap.add_argument("--out", default=str(O.DEFAULT_STORE))
     ap.add_argument("--markets", default=DEFAULT_MARKETS,
-                    help="comma-separated markets: prop keys ("
-                         + ", ".join(O.PROP_MARKET) + ") and/or totals, h2h; "
-                         "or 'all'. Each costs 1 credit per game. Default: "
-                         + DEFAULT_MARKETS)
+                    help="comma-separated market keys (batter: "
+                         + ", ".join(O.PROP_MARKET) + "; pitcher: "
+                         + ", ".join(O.STARTER_MARKET) + "; game: "
+                         + ", ".join(GAME_MARKETS) + "), or 'props' (all "
+                         "player props) or 'all' (props + game markets). "
+                         "Default: " + DEFAULT_MARKETS)
+    ap.add_argument("--include-started", action="store_true",
+                    help="also fetch games already underway (default: on "
+                         "today's slate they are skipped — their pregame line "
+                         "is final, so a rerun near first pitch pays only for "
+                         "games not yet started)")
     args = ap.parse_args()
+    args.key = load_key(args.key)
     markets = resolve_markets(args.markets)
     prop_markets = [m for m in markets if m not in GAME_MARKETS]
+    game_markets = [m for m in markets if m in GAME_MARKETS]
 
     if not args.key:
-        print("No ODDS_API_KEY found in this shell. Get a free key at "
-              "https://the-odds-api.com, then either:\n"
-              "  this session:  $env:ODDS_API_KEY = \"...\"   (PowerShell)\n"
-              "  persistent:    setx ODDS_API_KEY \"...\"  then open a NEW terminal\n"
-              "  one-off:       python Scripts/scrape_odds.py --key <key>\n"
-              "(setx does NOT affect the shell you run it in.) Nothing to "
-              "capture — exiting.")
+        print("No Odds API key found. Get one at https://the-odds-api.com, "
+              "then pick ONE:\n"
+              f"  persistent (recommended):  write the key into {KEY_FILE}\n"
+              "     (one line, no quotes) — every run reads it, no env needed\n"
+              "  env var:   setx ODDS_API_KEY \"...\"  then open a NEW terminal\n"
+              "  one-off:   python Scripts/scrape_odds.py --key <key>\n"
+              "Nothing to capture — exiting.")
         return  # exit 0: safe to schedule before you have a key
 
     captured_at = dt.datetime.now().isoformat(timespec="seconds")
@@ -251,14 +330,56 @@ def main():
         sys.exit(1)
     events = [e for e in events if str(e.get("commence_time", "")).startswith(day)]
     n_reg = len(args.regions.split(","))
-    print(f"{len(events)} MLB events on {day} (api requests left: {remain})")
-    print(f"markets [{', '.join(markets)}] x {len(events)} games"
-          f"{f' x {n_reg} regions' if n_reg > 1 else ''} "
-          f"= ~{len(markets) * len(events) * n_reg} credits")
+
+    # Skip games already underway: their pregame prices are final, so a later
+    # rerun spends credits only on games not yet started. write_store de-dupes
+    # regardless, so this changes cost, never the stored data. Applied only to
+    # today's slate (a past/future date is fetched in full).
+    now = dt.datetime.now(dt.timezone.utc)
+    pending = events
+    if not args.include_started and day == dt.date.today().isoformat():
+        pending = [e for e in events
+                   if _commence(e) is None or _commence(e) > now]
+    n_skip = len(events) - len(pending)
+    pend_ids = {e.get("id") for e in pending}
+
+    est = len(prop_markets) * len(pending) * n_reg + len(game_markets) * n_reg
+    print(f"{len(events)} MLB events on {day}"
+          f"{f' ({n_skip} already started, skipped)' if n_skip else ''} "
+          f"(api requests left: {remain})")
+    print(f"markets [{', '.join(markets)}]: props x {len(pending)} games"
+          f"{f' x {n_reg} regions' if n_reg > 1 else ''}"
+          f"{' + totals/h2h (1 bulk call)' if game_markets else ''} "
+          f"= ~{est} credits")
 
     idx = build_name_index()
     all_rows, n_prop, n_game = [], 0, 0
-    for e in events:
+
+    # Game markets (totals/h2h) are 'featured' markets on the bulk endpoint:
+    # ONE call returns the whole slate for markets x regions credits (not per
+    # game). Keep only pending games so a rerun never overwrites a captured
+    # closing line with an in-play price.
+    if game_markets and pend_ids:
+        try:
+            slate, remain = fetch(
+                f"{API}/odds",
+                {"apiKey": args.key, "regions": args.regions,
+                 "markets": ",".join(game_markets), "oddsFormat": "american"})
+        except Exception as ex:
+            print(f"  game markets fetch failed ({ex})", file=sys.stderr)
+            slate = []
+        for ev in slate:
+            if ev.get("id") not in pend_ids:
+                continue
+            ha = full_name_to_abbrev(ev.get("home_team", ""))
+            aa = full_name_to_abbrev(ev.get("away_team", ""))
+            gm = parse_event_games(ev, ha, aa, day, "", captured_at)
+            all_rows += gm
+            n_game += len(gm)
+        print(f"  game markets: {n_game} rows across the slate (left: {remain})")
+
+    # Player props live only on the per-event endpoint: one call per game.
+    for e in (pending if prop_markets else []):
         home_abbr = full_name_to_abbrev(e.get("home_team", ""))
         away_abbr = full_name_to_abbrev(e.get("away_team", ""))
         resolver = make_resolver(idx, home_abbr, away_abbr)
@@ -266,19 +387,16 @@ def main():
             data, remain = fetch(
                 f"{API}/events/{e['id']}/odds",
                 {"apiKey": args.key, "regions": args.regions,
-                 "markets": ",".join(markets), "oddsFormat": "american"})
+                 "markets": ",".join(prop_markets), "oddsFormat": "american"})
         except Exception as ex:
             print(f"  {away_abbr}@{home_abbr}: odds fetch failed ({ex})",
                   file=sys.stderr)
             continue
         pr = parse_event_props(data, resolver, day, "", captured_at,
                                prop_apis=prop_markets)
-        gm = parse_event_games(data, home_abbr, away_abbr, day, "", captured_at)
-        all_rows += pr + gm
+        all_rows += pr
         n_prop += len(pr)
-        n_game += len(gm)
-        print(f"  {away_abbr}@{home_abbr}: {len(pr)} prop + {len(gm)} game "
-              f"rows (left: {remain})")
+        print(f"  {away_abbr}@{home_abbr}: {len(pr)} prop rows (left: {remain})")
 
     total = write_store(all_rows, args.out)
     print(f"\nwrote {n_prop} prop + {n_game} game rows this run; "

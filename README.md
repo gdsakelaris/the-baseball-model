@@ -16,7 +16,9 @@ Per game (or a full slate of games, ranked cross-game):
   walk, stolen base, single, double, 1+/2+ strikeouts, and 2+/3+
   hits+runs+RBIs — plus expected HR, K, and H+R+RBI counts.
 - **Starter props** — expected strikeouts with P(over) for lines 3.5–8.5,
-  and outs recorded / walks allowed / hits allowed with per-line P(over).
+  and outs recorded / walks allowed / hits allowed / earned runs with
+  per-line P(over), plus an expected ERA derived from the earned-runs and
+  outs heads.
 - **Game outcomes** — expected runs per team, total-runs P(over) from a
   negative binomial (real totals run ~2× Poisson variance), and a home-win
   probability from a dedicated winner model (Elo with cross-season

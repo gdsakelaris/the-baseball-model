@@ -22,7 +22,6 @@
 686796,Blake Walston,Arizona Diamondbacks,Bullpen,L,L,"6' 5""",175,06/28/2001
 672515,Gabriel Moreno,Arizona Diamondbacks,Catcher,R,R,"5' 9""",195,02/14/2000
 543510,James McCann,Arizona Diamondbacks,Catcher,R,R,"6' 2""",235,06/13/1990
-680728,Adrian Del Castillo,Arizona Diamondbacks,Catcher,L,R,"5' 9""",208,09/27/1999
 656976,Pavin Smith,Arizona Diamondbacks,First Base,L,L,"6' 2""",208,02/06/1996
 694374,Tim Tawa,Arizona Diamondbacks,First Base,R,R,"5' 11""",196,04/07/1999
 545121,Ildemaro Vargas,Arizona Diamondbacks,First Base,S,R,"5' 11""",202,07/16/1991
@@ -39,8 +38,9 @@
 675911,Spencer Strider,Atlanta Braves,Rotation,R,R,"6' 0""",195,10/28/1998
 693821,Bryce Elder,Atlanta Braves,Rotation,R,R,"6' 2""",220,05/19/1999
 656550,Grant Holmes,Atlanta Braves,Rotation,L,R,"6' 0""",226,03/22/1996
-527048,Martín Pérez,Atlanta Braves,Rotation,L,L,"6' 0""",210,04/04/1991
 625643,Reynaldo López,Atlanta Braves,Rotation,R,R,"6' 1""",225,01/04/1994
+527048,Martín Pérez,Atlanta Braves,Rotation,L,L,"6' 0""",210,04/04/1991
+694462,Hurston Waldrep,Atlanta Braves,Rotation,R,R,"6' 2""",210,03/01/2002
 666214,Joey Wentz,Atlanta Braves,Rotation,L,L,"6' 5""",220,10/06/1997
 680885,Spencer Schwellenbach,Atlanta Braves,Rotation,R,R,"6' 1""",200,05/31/2000
 628452,Raisel Iglesias,Atlanta Braves,Bullpen,R,R,"6' 2""",190,01/04/1990
@@ -49,9 +49,10 @@
 800311,Didier Fuentes,Atlanta Braves,Bullpen,R,R,"6' 0""",170,06/17/2005
 689266,Dylan Dodd,Atlanta Braves,Bullpen,L,L,"6' 2""",210,06/06/1998
 641755,Tyler Kinley,Atlanta Braves,Bullpen,R,R,"6' 4""",220,01/31/1991
-694462,Hurston Waldrep,Atlanta Braves,Bullpen,R,R,"6' 2""",210,03/01/2002
 664849,Danny Young,Atlanta Braves,Bullpen,L,L,"6' 3""",200,05/27/1994
+675916,James Karinchak,Atlanta Braves,Bullpen,R,R,"6' 3""",215,09/22/1995
 702275,JR Ritchie,Atlanta Braves,Bullpen,R,R,"6' 2""",185,06/26/2003
+682989,Victor Mederos,Atlanta Braves,Bullpen,R,R,"6' 2""",222,06/08/2001
 686948,Drake Baldwin,Atlanta Braves,Catcher,L,R,"6' 0""",225,03/28/2001
 663698,Joey Bart,Atlanta Braves,Catcher,R,R,"6' 2""",242,12/15/1996
 669221,Sean Murphy,Atlanta Braves,Catcher,R,R,"6' 3""",228,10/04/1994
@@ -87,7 +88,7 @@
 642585,Félix Bautista,Baltimore Orioles,Bullpen,R,R,"6' 8""",285,06/20/1995
 682274,Yaramil Hiraldo,Baltimore Orioles,Bullpen,R,R,"6' 1""",220,12/31/1995
 681882,Colin Selby,Baltimore Orioles,Bullpen,R,R,"6' 2""",215,10/24/1997
-687721,Cameron Weston,Baltimore Orioles,Bullpen,R,R,"6' 2""",215,08/27/2000
+675919,Nick Raquet,Baltimore Orioles,Bullpen,R,L,"6' 0""",215,12/12/1995
 689296,Anthony Nunez,Baltimore Orioles,Bullpen,S,R,"6' 2""",220,07/10/2001
 668939,Adley Rutschman,Baltimore Orioles,Catcher,S,R,"6' 1""",230,02/06/1998
 694212,Samuel Basallo,Baltimore Orioles,Catcher,L,R,"6' 4""",250,08/13/2004
@@ -121,7 +122,6 @@
 543056,Danny Coulombe,Boston Red Sox,Bullpen,L,L,"5' 10""",190,10/26/1989
 670912,Johan Oviedo,Boston Red Sox,Bullpen,R,R,"6' 6""",275,03/02/1998
 670245,Ryan Watson,Boston Red Sox,Bullpen,R,R,"6' 5""",225,11/15/1997
-687941,Alec Gamboa,Boston Red Sox,Bullpen,S,L,"6' 1""",205,01/17/1997
 665966,Carlos Narváez,Boston Red Sox,Catcher,R,R,"5' 11""",190,11/26/1998
 657136,Connor Wong,Boston Red Sox,Catcher,R,R,"5' 10""",190,05/19/1996
 575929,Willson Contreras,Boston Red Sox,First Base,R,R,"6' 0""",240,05/13/1992
@@ -162,7 +162,6 @@
 702303,Riley Martin,Chicago Cubs,Bullpen,L,L,"6' 1""",215,03/19/1998
 663423,Trent Thornton,Chicago Cubs,Bullpen,R,R,"6' 0""",190,09/30/1993
 669020,Ryan Rolison,Chicago Cubs,Bullpen,R,L,"6' 2""",213,07/11/1997
-669060,Bryse Wilson,Chicago Cubs,Bullpen,R,R,"6' 2""",255,12/20/1997
 621053,Tyler Ferguson,Chicago Cubs,Bullpen,R,R,"6' 4""",225,10/05/1993
 681799,Ethan Roberts,Chicago Cubs,Bullpen,R,R,"5' 10""",180,07/04/1997
 668970,Gavin Hollowell,Chicago Cubs,Bullpen,R,R,"6' 7""",215,11/04/1997
@@ -222,7 +221,6 @@
 671096,Andrew Abbott,Cincinnati Reds,Rotation,L,L,"6' 0""",192,06/01/1999
 666157,Nick Lodolo,Cincinnati Reds,Rotation,L,L,"6' 6""",216,02/05/1998
 663903,Brady Singer,Cincinnati Reds,Rotation,R,R,"6' 5""",215,08/04/1996
-695076,Rhett Lowder,Cincinnati Reds,Rotation,R,R,"6' 1""",200,03/08/2002
 695505,Chase Burns,Cincinnati Reds,Rotation,R,R,"6' 3""",210,01/16/2003
 682227,Brandon Williamson,Cincinnati Reds,Rotation,R,L,"6' 6""",210,04/02/1998
 641941,Emilio Pagán,Cincinnati Reds,Bullpen,L,R,"6' 2""",208,05/07/1991
@@ -234,6 +232,7 @@
 594580,Sam Moll,Cincinnati Reds,Bullpen,L,L,"5' 9""",190,01/03/1992
 622088,Tejay Antone,Cincinnati Reds,Bullpen,R,R,"6' 4""",230,12/05/1993
 670062,Julian Garcia,Cincinnati Reds,Bullpen,L,R,"6' 3""",206,05/13/1995
+695076,Rhett Lowder,Cincinnati Reds,Bullpen,R,R,"6' 1""",200,03/08/2002
 663886,Tyler Stephenson,Cincinnati Reds,Catcher,R,R,"6' 3""",225,08/16/1996
 624431,Jose Trevino,Cincinnati Reds,Catcher,R,R,"5' 9""",215,11/28/1992
 701398,Sal Stewart,Cincinnati Reds,First Base,R,R,"6' 1""",224,12/07/2003
@@ -345,7 +344,6 @@
 837227,Tatsuya Imai,Houston Astros,Rotation,R,R,"5' 11""",176,05/09/1998
 681293,Spencer Arrighetti,Houston Astros,Rotation,R,R,"6' 2""",186,01/02/2000
 663567,Peter Lambert,Houston Astros,Rotation,R,R,"6' 2""",208,04/18/1997
-681347,Mike Burrows,Houston Astros,Rotation,R,R,"6' 1""",200,11/08/1999
 621121,Lance McCullers Jr.,Houston Astros,Rotation,L,R,"6' 1""",200,10/02/1993
 687888,Brandon Walter,Houston Astros,Rotation,L,L,"6' 2""",201,09/08/1996
 669854,Ronel Blanco,Houston Astros,Rotation,R,R,"6' 3""",265,08/31/1993
@@ -361,6 +359,7 @@
 656986,Bennett Sousa,Houston Astros,Bullpen,L,L,"6' 3""",220,04/06/1995
 701121,Logan VanWey,Houston Astros,Bullpen,R,R,"6' 2""",205,02/14/1999
 664299,Cristian Javier,Houston Astros,Bullpen,R,R,"6' 1""",210,03/26/1997
+695001,Alimber Santa,Houston Astros,Bullpen,R,R,"5' 10""",228,05/03/2003
 673237,Yainer Diaz,Houston Astros,Catcher,R,R,"5' 11""",195,09/21/1998
 543877,Christian Vázquez,Houston Astros,Catcher,R,R,"5' 8""",205,08/21/1990
 572233,Christian Walker,Houston Astros,First Base,R,R,"5' 11""",208,03/28/1991
@@ -393,6 +392,7 @@
 674444,Steven Cruz,Kansas City Royals,Bullpen,R,R,"6' 7""",225,06/15/1999
 657756,Connor Seabold,Kansas City Royals,Bullpen,R,R,"6' 2""",190,01/24/1996
 694360,Beck Way,Kansas City Royals,Bullpen,R,R,"6' 4""",200,08/06/1999
+621016,Jose Cuas,Kansas City Royals,Bullpen,R,R,"6' 3""",195,06/28/1994
 677976,Randy Dobnak,Kansas City Royals,Bullpen,R,R,"6' 1""",230,01/17/1995
 521692,Salvador Perez,Kansas City Royals,Catcher,R,R,"6' 2""",255,05/10/1990
 695600,Carter Jensen,Kansas City Royals,Catcher,L,R,"6' 0""",210,07/03/2003
@@ -505,7 +505,6 @@
 689414,Liam Hicks,Miami Marlins,Catcher,L,R,"5' 9""",185,06/02/1999
 640459,Brian Navarreto,Miami Marlins,Catcher,R,R,"6' 1""",233,12/29/1994
 669065,Kyle Stowers,Miami Marlins,First Base,L,L,"6' 2""",215,01/02/1998
-681393,Connor Norby,Miami Marlins,First Base,R,R,"5' 10""",180,06/08/2000
 665052,Griffin Conine,Miami Marlins,First Base,L,R,"6' 1""",210,07/11/1997
 669364,Xavier Edwards,Miami Marlins,Second Base,S,R,"5' 9""",175,08/09/1999
 677870,Leo Jiménez,Miami Marlins,Second Base,R,R,"5' 10""",215,05/17/2001
@@ -542,13 +541,14 @@
 668930,Brice Turang,Milwaukee Brewers,Second Base,L,R,"6' 0""",190,11/21/1999
 687401,Joey Ortiz,Milwaukee Brewers,Second Base,R,R,"5' 10""",192,07/14/1998
 666152,David Hamilton,Milwaukee Brewers,Third Base,L,R,"5' 10""",192,09/29/1997
+686217,Sal Frelick,Milwaukee Brewers,Third Base,L,R,"5' 9""",191,04/19/2000
 806198,Cooper Pratt,Milwaukee Brewers,Shortstop,R,R,"6' 4""",210,08/18/2004
 694192,Jackson Chourio,Milwaukee Brewers,Left Field,R,R,"6' 1""",199,03/11/2004
+800325,Luis Lara,Milwaukee Brewers,Left Field,S,R,"5' 7""",169,11/17/2004
 592885,Christian Yelich,Milwaukee Brewers,Left Field,L,R,"6' 4""",220,12/05/1991
 663604,Brandon Lockridge,Milwaukee Brewers,Left Field,R,R,"6' 0""",197,03/14/1997
-663368,Blake Perkins,Milwaukee Brewers,Left Field,S,R,"6' 0""",185,09/10/1996
+675659,Greg Jones,Milwaukee Brewers,Left Field,S,R,"6' 0""",189,03/07/1998
 669003,Garrett Mitchell,Milwaukee Brewers,Center Field,L,R,"6' 2""",229,09/04/1998
-686217,Sal Frelick,Milwaukee Brewers,Center Field,L,R,"5' 9""",191,04/19/2000
 657746,Joe Ryan,Minnesota Twins,Rotation,R,R,"6' 2""",205,06/05/1996
 671737,Taj Bradley,Minnesota Twins,Rotation,R,R,"6' 2""",220,03/20/2001
 641927,Bailey Ober,Minnesota Twins,Rotation,R,R,"6' 9""",260,07/12/1995
@@ -566,7 +566,7 @@
 701519,Travis Adams,Minnesota Twins,Bullpen,R,R,"6' 1""",197,01/19/2000
 681892,Kody Funderburk,Minnesota Twins,Bullpen,L,L,"6' 4""",230,11/27/1996
 694397,Marco Raya,Minnesota Twins,Bullpen,R,R,"6' 1""",170,08/07/2002
-689520,Cody Laweryson,Minnesota Twins,Bullpen,L,R,"6' 4""",205,05/10/1998
+808970,Woo-Suk Go,Minnesota Twins,Bullpen,R,R,"5' 11""",198,08/06/1998
 680777,Ryan Jeffers,Minnesota Twins,Catcher,R,R,"6' 2""",235,06/03/1997
 605170,Victor Caratini,Minnesota Twins,Catcher,S,R,"6' 0""",225,08/17/1993
 656577,Alex Jackson,Minnesota Twins,Catcher,R,R,"6' 1""",238,12/25/1995
@@ -579,8 +579,8 @@
 668952,Ryan Kreidler,Minnesota Twins,Third Base,R,R,"6' 3""",208,11/12/1997
 663616,Trevor Larnach,Minnesota Twins,Left Field,L,R,"6' 3""",223,02/26/1997
 668885,Austin Martin,Minnesota Twins,Left Field,R,R,"5' 10""",185,03/23/1999
+702176,Alan Roden,Minnesota Twins,Left Field,L,R,"5' 11""",215,12/22/1999
 693459,Kyler Fedko,Minnesota Twins,Left Field,R,R,"6' 0""",215,09/21/1999
-621439,Byron Buxton,Minnesota Twins,Center Field,R,R,"6' 1""",190,12/18/1993
 642547,Freddy Peralta,New York Mets,Rotation,R,R,"6' 0""",198,06/04/1996
 690997,Nolan McLean,New York Mets,Rotation,R,R,"6' 2""",214,07/24/2001
 605280,Clay Holmes,New York Mets,Rotation,R,R,"6' 5""",245,03/27/1993
@@ -594,15 +594,13 @@
 673540,Kodai Senga,New York Mets,Bullpen,L,R,"6' 1""",202,01/30/1993
 681810,Austin Warren,New York Mets,Bullpen,R,R,"6' 0""",170,02/05/1996
 672335,Cionel Pérez,New York Mets,Bullpen,R,L,"6' 0""",175,04/21/1996
-680702,Joey Gerber,New York Mets,Bullpen,R,R,"6' 4""",212,05/03/1997
+676910,Matt Seelinger,New York Mets,Bullpen,R,R,"6' 3""",190,04/19/1995
 682626,Francisco Alvarez,New York Mets,Catcher,R,R,"5' 10""",233,11/19/2001
 620443,Luis Torrens,New York Mets,Catcher,R,R,"5' 11""",217,05/02/1996
 676724,Jared Young,New York Mets,First Base,L,R,"6' 2""",200,07/09/1995
 668901,Mark Vientos,New York Mets,First Base,R,R,"6' 3""",185,12/11/1999
-593871,Jorge Polanco,New York Mets,First Base,S,R,"6' 0""",208,07/05/1993
 543760,Marcus Semien,New York Mets,Second Base,R,R,"6' 0""",195,09/17/1990
 683146,Brett Baty,New York Mets,Second Base,L,R,"6' 3""",210,11/13/1999
-677595,Ronny Mauricio,New York Mets,Second Base,S,R,"6' 3""",166,04/04/2001
 666182,Bo Bichette,New York Mets,Third Base,R,R,"5' 11""",190,03/05/1998
 676572,Eric Wagaman,New York Mets,Third Base,R,R,"6' 4""",210,08/14/1997
 596019,Francisco Lindor,New York Mets,Shortstop,S,R,"5' 10""",190,11/14/1993
@@ -611,6 +609,7 @@
 701807,Carson Benge,New York Mets,Left Field,L,R,"6' 1""",184,01/20/2003
 805999,A.J. Ewing,New York Mets,Center Field,L,R,"5' 10""",160,08/10/2004
 673357,Luis Robert Jr.,New York Mets,Center Field,R,R,"6' 2""",225,08/03/1997
+593871,Jorge Polanco,New York Mets,Designated Hitter,S,R,"6' 0""",208,07/05/1993
 608331,Max Fried,New York Yankees,Rotation,L,L,"6' 4""",190,01/18/1994
 693645,Cam Schlittler,New York Yankees,Rotation,R,R,"6' 6""",215,02/05/2001
 701542,Will Warren,New York Yankees,Rotation,R,R,"6' 2""",200,06/16/1999
@@ -625,7 +624,7 @@
 621112,Paul Blackburn,New York Yankees,Bullpen,R,R,"6' 1""",196,12/04/1993
 642232,Ryan Yarbrough,New York Yankees,Bullpen,R,L,"6' 5""",205,12/31/1991
 656234,Jake Bird,New York Yankees,Bullpen,R,R,"6' 3""",215,12/04/1995
-694341,Brendan Beck,New York Yankees,Bullpen,R,R,"6' 2""",218,10/06/1998
+683409,Angel Chivilli,New York Yankees,Bullpen,R,R,"6' 2""",185,07/28/2002
 687396,Brent Headrick,New York Yankees,Bullpen,L,L,"6' 6""",235,12/17/1997
 669224,Austin Wells,New York Yankees,Catcher,L,R,"6' 1""",220,07/12/1999
 700250,Ben Rice,New York Yankees,Catcher,L,R,"6' 2""",228,02/22/1999
@@ -647,25 +646,21 @@
 695611,Gage Jump,Athletics,Rotation,L,L,"6' 0""",200,04/12/2003
 669372,J.T. Ginn,Athletics,Rotation,R,R,"6' 2""",200,05/20/1999
 678022,Jack Perkins,Athletics,Rotation,R,R,"6' 1""",220,12/26/1999
-695034,Kade Morris,Athletics,Rotation,R,R,"6' 3""",190,06/21/2002
 686993,Justin Sterner,Athletics,Bullpen,R,R,"6' 1""",215,08/29/1996
 643410,Mark Leiter Jr.,Athletics,Bullpen,R,R,"6' 0""",210,03/13/1991
 663687,Hogan Harris,Athletics,Bullpen,R,L,"6' 3""",230,12/26/1996
 665622,Luis Medina,Athletics,Bullpen,R,R,"6' 1""",175,05/03/1999
 660761,José Suarez,Athletics,Bullpen,L,L,"5' 10""",225,01/03/1998
 665660,Elvis Alvarado,Athletics,Bullpen,R,R,"6' 6""",253,02/23/1999
+682052,Jacob Lopez,Athletics,Bullpen,L,L,"6' 4""",220,03/11/1998
 686930,Mason Barnett,Athletics,Bullpen,R,R,"6' 0""",218,11/07/2000
 669127,Shea Langeliers,Athletics,Catcher,R,R,"5' 11""",205,11/18/1997
 641680,Jonah Heim,Athletics,Catcher,S,R,"6' 4""",220,06/27/1995
-661531,Brian Serven,Athletics,Catcher,R,R,"6' 0""",207,05/05/1995
 691016,Tyler Soderstrom,Athletics,Catcher,L,R,"6' 2""",200,11/24/2001
 701762,Nick Kurtz,Athletics,First Base,L,L,"6' 5""",240,03/12/2003
-608841,Joey Meneses,Athletics,First Base,R,R,"6' 4""",235,05/06/1992
 643446,Jeff McNeil,Athletics,Second Base,L,R,"6' 0""",195,04/08/1992
 680869,Zack Gelof,Athletics,Second Base,R,R,"6' 2""",205,10/19/1999
-687231,Darell Hernaiz,Athletics,Second Base,R,R,"5' 11""",190,08/03/2001
 811965,Joshua Kuroda-Grauer,Athletics,Second Base,R,R,"5' 10""",205,01/31/2003
-691777,Max Muncy,Athletics,Third Base,R,R,"6' 0""",180,08/25/2002
 675961,Alika Williams,Athletics,Third Base,R,R,"6' 1""",183,03/12/1999
 805779,Jacob Wilson,Athletics,Shortstop,R,R,"6' 2""",190,03/30/2002
 667670,Brent Rooker,Athletics,Left Field,R,R,"6' 3""",225,11/01/1994
@@ -685,9 +680,9 @@
 689147,Orion Kerkering,Philadelphia Phillies,Bullpen,R,R,"6' 2""",204,04/04/2001
 642152,Lou Trivino III,Philadelphia Phillies,Bullpen,R,R,"6' 5""",232,10/01/1991
 621383,Tanner Banks,Philadelphia Phillies,Bullpen,R,L,"6' 1""",205,10/24/1991
+676661,Max Lazar,Philadelphia Phillies,Bullpen,R,R,"6' 1""",200,06/03/1999
 680742,Jonathan Bowlan,Philadelphia Phillies,Bullpen,R,R,"6' 6""",240,12/01/1996
 686751,Seth Johnson,Philadelphia Phillies,Bullpen,R,R,"6' 1""",205,09/19/1998
-679775,Kyle Backhus,Philadelphia Phillies,Bullpen,L,L,"6' 4""",185,01/31/1998
 592663,J.T. Realmuto,Philadelphia Phillies,Catcher,R,R,"6' 0""",212,03/18/1991
 665561,Rafael Marchán,Philadelphia Phillies,Catcher,S,R,"5' 9""",170,02/25/1999
 596117,Garrett Stubbs,Philadelphia Phillies,Catcher,L,R,"5' 9""",170,05/26/1993
@@ -725,6 +720,7 @@
 682997,Tyler Callihan,Pittsburgh Pirates,First Base,L,R,"5' 11""",205,06/22/2000
 664040,Brandon Lowe,Pittsburgh Pirates,Second Base,L,R,"5' 9""",181,07/06/1994
 693304,Nick Gonzales,Pittsburgh Pirates,Second Base,R,R,"5' 8""",193,05/27/1999
+687394,Jack Brannigan,Pittsburgh Pirates,Second Base,R,R,"6' 0""",201,03/11/2001
 804606,Konnor Griffin,Pittsburgh Pirates,Shortstop,R,R,"6' 3""",222,04/24/2006
 668804,Bryan Reynolds,Pittsburgh Pirates,Left Field,S,R,"6' 2""",210,01/27/1995
 663968,Jake Mangum,Pittsburgh Pirates,Left Field,S,L,"5' 11""",191,03/08/1996
@@ -736,6 +732,7 @@
 621111,Walker Buehler,San Diego Padres,Rotation,R,R,"6' 2""",185,07/28/1994
 656288,Griffin Canning,San Diego Padres,Rotation,R,R,"6' 2""",180,05/11/1996
 676664,JP Sears,San Diego Padres,Rotation,R,L,"5' 11""",180,02/19/1996
+608566,Germán Márquez,San Diego Padres,Rotation,R,R,"6' 1""",230,02/22/1995
 608337,Lucas Giolito,San Diego Padres,Rotation,R,R,"6' 6""",245,07/14/1994
 601713,Nick Pivetta,San Diego Padres,Rotation,R,R,"6' 5""",210,02/14/1993
 605397,Joe Musgrove,San Diego Padres,Rotation,R,R,"6' 5""",230,12/04/1992
@@ -747,11 +744,10 @@
 673513,Yuki Matsui,San Diego Padres,Bullpen,L,L,"5' 8""",165,10/30/1995
 606996,Kyle Hart,San Diego Padres,Bullpen,L,L,"6' 5""",200,11/23/1992
 699134,Bradgley Rodriguez,San Diego Padres,Bullpen,R,R,"6' 1""",160,11/16/2003
-608566,Germán Márquez,San Diego Padres,Bullpen,R,R,"6' 1""",230,02/22/1995
 669093,Jeremiah Estrada,San Diego Padres,Bullpen,S,R,"6' 1""",185,11/01/1998
 688158,David Morgan,San Diego Padres,Bullpen,R,R,"6' 0""",185,10/26/1999
 592094,Jason Adam,San Diego Padres,Bullpen,R,R,"6' 3""",229,08/04/1991
-689690,Alek Jacob,San Diego Padres,Bullpen,L,R,"6' 3""",190,06/16/1998
+666745,Jhony Brito,San Diego Padres,Bullpen,R,R,"6' 2""",210,02/17/1998
 669134,Luis Campusano,San Diego Padres,Catcher,R,R,"5' 10""",232,09/29/1998
 660710,Rodolfo Durán,San Diego Padres,Catcher,R,R,"5' 8""",181,02/19/1998
 666023,Freddy Fermin,San Diego Padres,Catcher,R,R,"5' 10""",200,05/16/1995
@@ -844,6 +840,8 @@
 677865,Justin Bruihl,St. Louis Cardinals,Bullpen,L,L,"6' 2""",215,06/26/1997
 691008,Max Rajcic,St. Louis Cardinals,Bullpen,R,R,"6' 0""",240,08/03/2001
 694335,Matt Svanson,St. Louis Cardinals,Bullpen,R,R,"6' 5""",235,01/31/1999
+694363,Jared Shuster,St. Louis Cardinals,Bullpen,L,L,"6' 3""",220,08/03/1998
+700669,Gordon Graceffo,St. Louis Cardinals,Bullpen,R,R,"6' 4""",220,03/17/2000
 671056,Iván Herrera,St. Louis Cardinals,Catcher,R,R,"5' 11""",220,06/01/2000
 699625,Jimmy Crooks,St. Louis Cardinals,Catcher,L,R,"6' 0""",230,07/19/2001
 686780,Pedro Pagés,St. Louis Cardinals,Catcher,R,R,"5' 11""",245,09/17/1998
@@ -942,6 +940,7 @@
 571578,Patrick Corbin,Toronto Blue Jays,Bullpen,L,L,"6' 4""",225,07/19/1989
 573009,Joe Mantiply,Toronto Blue Jays,Bullpen,R,L,"6' 4""",219,03/01/1991
 554340,Yimi García,Toronto Blue Jays,Bullpen,R,R,"6' 1""",230,08/18/1990
+689149,Chad Dallas,Toronto Blue Jays,Bullpen,R,R,"5' 11""",206,06/26/2000
 672386,Alejandro Kirk,Toronto Blue Jays,Catcher,R,R,"5' 8""",245,11/06/1998
 678218,Brandon Valenzuela,Toronto Blue Jays,Catcher,S,R,"6' 0""",225,10/02/2000
 665489,Vladimir Guerrero Jr.,Toronto Blue Jays,First Base,R,R,"6' 0""",245,03/16/1999
@@ -955,7 +954,6 @@
 664770,Nathan Lukes,Toronto Blue Jays,Left Field,L,R,"5' 11""",180,07/12/1994
 660821,Jesús Sánchez,Toronto Blue Jays,Left Field,L,R,"6' 3""",222,10/07/1997
 664702,Myles Straw,Toronto Blue Jays,Left Field,R,R,"5' 9""",178,10/17/1994
-682818,Yohendrick Piñango,Toronto Blue Jays,Left Field,L,L,"5' 10""",170,05/07/2002
 623993,Anthony Santander,Toronto Blue Jays,Left Field,S,R,"6' 1""",230,10/19/1994
 682729,Jonatan Clase,Toronto Blue Jays,Left Field,S,R,"5' 10""",150,05/23/2002
 662139,Daulton Varsho,Toronto Blue Jays,Center Field,L,R,"5' 8""",207,07/02/1996
@@ -970,8 +968,8 @@
 690925,Clayton Beeter,Washington Nationals,Bullpen,R,R,"6' 2""",220,10/09/1998
 687377,Orlando Ribalta,Washington Nationals,Bullpen,R,R,"6' 7""",245,03/05/1998
 676571,PJ Poulin,Washington Nationals,Bullpen,R,L,"6' 1""",195,07/25/1996
+640454,Matt Krook,Washington Nationals,Bullpen,L,L,"6' 4""",225,10/21/1994
 664875,Justin Lawrence,Washington Nationals,Bullpen,R,R,"6' 3""",211,11/25/1994
-669371,Cole Henry,Washington Nationals,Bullpen,R,R,"6' 4""",200,07/15/1999
 687223,Carson Palmquist,Washington Nationals,Bullpen,L,L,"6' 3""",206,10/17/2000
 683000,Riley Cornelio,Washington Nationals,Bullpen,R,R,"6' 3""",195,06/06/2000
 660688,Keibert Ruiz,Washington Nationals,Catcher,S,R,"5' 11""",238,07/20/1998

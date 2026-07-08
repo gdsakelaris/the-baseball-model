@@ -12,8 +12,11 @@ once with one combined, cross-game-ranked board):
   segment; they're marked `*` in the GUI).
 - **Per starter:** expected strikeouts and P(over) for K lines 3.5–8.5,
   negative-binomial-shaded by the calibration-year K dispersion; plus
-  outs recorded, walks allowed, and hits allowed with per-line P(over)
-  from cal-year logistic line calibrators.
+  outs recorded, walks allowed, hits allowed, and earned runs with
+  per-line P(over) from cal-year logistic line calibrators; and an
+  expected ERA derived from the earned-runs and outs heads
+  (27 × xER / xOuts). Single-start ERA is inherently noisy — the
+  earned-run over/under lines are the sellable output.
 - **Per game:** expected lineup home runs; expected total runs with
   P(over) from a negative binomial whose dispersion is measured on the
   calibration year (real totals run ~2x Poisson variance); and a home-win

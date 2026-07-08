@@ -39,10 +39,11 @@ PROP_COLS = {"hr": "P_HR", "hit": "P_Hit", "hits2": "P_2Hits",
              "hrr2": "P_HRR2", "hrr3": "P_HRR3"}
 
 # batter count heads -> mean column; starter count heads -> (mean, P prefix)
-BAT_COUNT_COLS = {"xbk": "xSO", "xhrr": "xHRR"}
+BAT_COUNT_COLS = {"xbk": "xSO", "xhrr": "xHRR", "xtb": "xTB"}
 ST_COUNT_COLS = {"outs": ("xOuts", "P_outs_over"),
                  "pbb": ("xBB", "P_bb_over"),
-                 "pha": ("xHits", "P_hits_over")}
+                 "pha": ("xHits", "P_hits_over"),
+                 "per": ("xER", "P_er_over")}
 
 
 def american_odds(p):
@@ -89,6 +90,21 @@ def count_over(head, mu, line):
     if lc is not None:
         return lc.predict_proba(mu.reshape(-1, 1))[:, 1]
     return np.array([nb_over(m, line, head["disp"]) for m in mu])
+
+
+def apply_stack(prop, p_self, donor_ps):
+    """Calibration-layer stacking for thin-signal props: a logistic (fit on
+    the calibration year by train.py, never the holdout) blends the prop's
+    own calibrated probability with its donor props' scores in log-odds
+    space. donor_ps maps prop name -> probability array for the SAME rows.
+    Props without a "stack" key, or with a donor missing from donor_ps,
+    pass through unchanged (old-artifact guard)."""
+    st = prop.get("stack") if isinstance(prop, dict) else None
+    if not st or any(d not in donor_ps for d in st["donors"]):
+        return p_self
+    Z = np.column_stack([R._logit(p_self)]
+                        + [R._logit(donor_ps[d]) for d in st["donors"]])
+    return np.clip(st["lr"].predict_proba(Z)[:, 1], 1e-4, 1 - 1e-4)
 
 
 def predict_prop(prop, X):
@@ -219,7 +235,9 @@ class Predictor:
                                    home=home)
                 bio = s.bio(pid)
                 row = {"slot": slot, "Home": home, "Season": season,
-                       "month": date.month, **b, **st_feats, **toff,
+                       "month": date.month,
+                       "xpa_slot": s.xpa_slot(slot, date),
+                       **b, **st_feats, **toff,
                        **toff_loc, **pen, **pen_hl, **pen_fat, **tsb, **phrq,
                        **pbip, **s.bip_batter(pid, date),
                        **s.pd_batter_feats(pid, date),
@@ -458,16 +476,21 @@ class Predictor:
         batters["CareerG"] = pd.to_numeric(
             bdf["g_career"], errors="coerce").fillna(0).astype(int).to_numpy()
         offs = self.offsets if self.recal else {}
+        # two passes: raw probabilities first, so stacked props (see
+        # apply_stack) can see their donors' scores
+        raw_p = {prop: predict_prop(a["props"][prop], X)
+                 for prop in PROP_COLS if prop in a["props"]}
         for prop, col in PROP_COLS.items():
-            if prop not in a["props"]:  # artifact predates this prop
+            if prop not in raw_p:  # artifact predates this prop
                 continue
-            p = predict_prop(a["props"][prop], X)
+            p = apply_stack(a["props"][prop], raw_p[prop], raw_p)
             if offs.get(prop):
                 p = R.apply_offset(p, offs[prop])
             batters[col] = np.round(p, 4)
         batters["xHR"] = np.round(batters["P_HR"] * a["multi_hr"], 4)
         batters["HR_fair_odds"] = [american_odds(p) for p in batters["P_HR"]]
-        # count-head means (xSO = batter strikeouts, xHRR = hits+runs+RBIs)
+        # count-head means (xSO = batter Ks, xHRR = hits+runs+RBIs,
+        # xTB = total bases)
         for cname, col in BAT_COUNT_COLS.items():
             head = a.get("count_models", {}).get(cname)
             if head is not None:
@@ -503,7 +526,6 @@ class Predictor:
                 for line in head["lines"]:
                     starters[f"{pre}_{line}"] = np.round(
                         count_over(head, mu, line), 3)
-
         gdf = self._team_rows(spec)
         Xg = self._prep(gdf, a["tg_cols"])
         mu_away, mu_home = a["team_runs_model"].predict(Xg)
@@ -591,16 +613,29 @@ _OVER_PATTERNS = [(re.compile(r"^P_over_(.+)$"), "K > {}"),
                   (re.compile(r"^P_outs_over_(.+)$"), "Outs > {}"),
                   (re.compile(r"^P_bb_over_(.+)$"), "BB > {}"),
                   (re.compile(r"^P_hits_over_(.+)$"), "Hits > {}"),
+                  (re.compile(r"^P_er_over_(.+)$"), "ER > {}"),
                   (re.compile(r"^P_runs_over_(.+)$"), "Runs > {}")]
 
 # reading order per sheet; an entry ending in "> " pulls that whole family
 # of over columns, sorted by line
 BAT_ORDER = ["Game", "Team", "Slot", "Name", "ID", "Career G",
-             "HR", "Hit", "2+ Hits", "Single", "Double", "2+ TB",
-             "Run", "RBI", "xHRR", "H+R+RBI 2+", "H+R+RBI 3+",
-             "BB", "SB", "xSO", "K", "2+ K"]
-ST_ORDER = ["Game", "Team", "Opponent", "Name", "ID", "xK", "K > ",
-            "xOuts", "Outs > ", "xHits", "Hits > ", "xBB", "BB > "]
+             "HR",
+             "xTB", "2+ TB",
+             "Hit", "2+ Hits",
+             "RBI",
+             "Run",
+             "xHRR", "H+R+RBI 2+", "H+R+RBI 3+",
+             "SB",
+             "xSO", "K", "2+ K",
+             "Single",
+             "Double",
+             "BB"]
+ST_ORDER = ["Game", "Team", "Opponent", "Name", "ID",
+            "xK", "K > ",
+            "xER", "ER > ",
+            "xOuts", "Outs > ",
+            "xHits", "Hits > ",
+            "xBB", "BB > "]
 GAME_ORDER = ["Game", "Date", "Venue", "Winner", "Win Prob",
               "Away Score", "Home Score", "Total Runs", "Runs > ",
               "Lineup HRs"]
@@ -638,8 +673,9 @@ GLOSSARY = [
      "in this game. 25% means: in 100 similar situations, expect it about "
      "25 times. Nothing is ever certain."),
     ("Highlighted columns", "The red-tinted columns are the headline "
-     "numbers: the model's expected counts (xK, xOuts, xHits, xBB, xSO, "
-     "xHRR), and the predicted winner, win probability, total runs and "
+     "numbers: the model's expected counts (xK, xOuts, xHits, xBB, xER, "
+     "xSO, xHRR, xTB), and the predicted winner, win probability, total runs "
+     "and "
      "lineup HRs on the Games sheet. The percentage columns next to the "
      "counts price the over/under lines."),
     ("HR", "Chance the batter hits a home run in this game."),
@@ -647,6 +683,8 @@ GLOSSARY = [
     ("2+ Hits", "Chance of two or more hits."),
     ("Single", "Chance of at least one single."),
     ("Double", "Chance of at least one double."),
+    ("xTB", "Expected total bases (1B + 2x2B + 3x3B + 4xHR) — the headline "
+     "count behind the total-bases market."),
     ("2+ TB", "Chance of two or more total bases (e.g. a double, or two "
      "singles)."),
     ("Run", "Chance the batter scores a run."),
@@ -672,6 +710,14 @@ GLOSSARY = [
      "chance of more than X."),
     ("xHits / Hits > X", "Projected hits allowed by the starter, and "
      "the chance of more than X."),
+    ("xER / ER > X", "Projected earned runs allowed by the starter, and "
+     "the chance of more than X."),
+    ("Expected counts vs. their over/under", "The x-counts (xK, xOuts, "
+     "xHits, xBB, xER) are AVERAGES. Because a few blow-up innings pull the "
+     "average up while most starts come in lower, the 50/50 point of the "
+     "over/under sits a little BELOW the average - so e.g. an xHits of 4.6 "
+     "can still be under 50% to go over 4.5. The two columns are the same "
+     "prediction shown two ways, not a contradiction."),
     ("Fair odds (Summary sheet)", "The break-even sportsbook price for the "
      "HR chance. If a book offers longer odds (bigger + number), the bet "
      "pays more than the risk suggests; shorter odds pay less."),
@@ -762,7 +808,7 @@ PCT_COLS = {"HR", "Hit", "2+ Hits", "Single", "Double", "2+ TB", "Run",
             "Win Prob"}
 # the headline columns get the red highlight: the expected counts, and the
 # Games sheet's predicted winner, win probability, total runs and lineup HRs
-HI_COLS = {"xK", "xOuts", "xBB", "xHits", "xSO", "xHRR",
+HI_COLS = {"xK", "xOuts", "xBB", "xHits", "xER", "xSO", "xHRR", "xTB",
            "Winner", "Win Prob", "Total Runs", "Lineup HRs"}
 
 
