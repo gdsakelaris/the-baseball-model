@@ -1,0 +1,66 @@
+=== Feature-group routing (batter props): ok = trains on it, . = excluded, ~ = partial ===
+
+  group        hr   hit  hits   tb2   run   rbi    bb    sb  sing  doub    bk   bk2  hrr2  hrr3
+  SB            .     .     .     .     .     .     .    ok     .     .     .     .     .     .
+  RUNRBI        .     .     .     .    ok    ok     .     .     .     .     .     .    ok    ok
+  CTX           .     .     .     .    ok    ok     .     .     .     .     .     .    ok    ok
+  OBP           .     .     .     .    ok    ok    ok     .     .     .     .     .    ok    ok
+  PWR          ok     .     .    ok     .     .     .     .     .     .     .     .    ok    ok
+  XBH           .     .     .    ok     .    ok     .     .     .    ok     .     .    ok    ok
+  IBB          ok     .     .     .     .    ok    ok     .     .     .     .     .    ok    ok
+  VSH          ok    ok    ok    ok    ok    ok    ok     .    ok    ok    ok    ok    ok    ok
+  VLOC         ok    ok    ok    ok    ok    ok    ok     .    ok    ok    ok    ok    ok    ok
+  POS          ok    ok    ok    ok    ok    ok    ok     .    ok    ok    ok    ok    ok    ok
+  PEN2         ok    ok    ok    ok    ok    ok     .     .    ok    ok     .     .    ok    ok
+  TLOC         ok    ok    ok    ok    ok    ok     .     .    ok    ok     .     .    ok    ok
+  HBF          ok    ok    ok    ok    ok    ok     .     .    ok    ok     .     .    ok    ok
+  BIP_PWR      ok     .     .    ok     .    ok     .     .     .    ok     .     .    ok    ok
+  BIP_HIT      ok    ok    ok    ok    ok    ok     .     .    ok    ok     .     .    ok    ok
+  PLATE        ok    ok    ok    ok    ok     .    ok     .    ok    ok    ok    ok    ok    ok
+  SPD           .    ok     .     .    ok     .     .    ok    ok    ok     .     .    ok    ok
+  DEF           .    ok    ok    ok    ok    ok     .     .    ok    ok     .     .    ok    ok
+  PSW          ok    ok    ok    ok    ok    ok    ok     .    ok    ok    ok    ok    ok    ok
+  UMP           .     .     .     .     .     .    ok     .     .     .    ok    ok     .     .
+  PARK_OFF     ok    ok    ok    ok    ok    ok     .     .    ok    ok     .     .    ok    ok
+  BAT          ok    ok    ok    ok    ok    ok    ok    ok    ok    ok    ok    ok    ok    ok
+
+=== Sibling routing gaps: a group most of a family gets, but some members exclude ===
+  (candidates to test via evaluate_deep.py --paired; nothing is applied here)
+
+  [contact/hits  ] PWR      has: tb2                        GAP: hit, hits2, single, double
+  [contact/hits  ] XBH      has: tb2, double                GAP: hit, hits2, single
+  [contact/hits  ] BIP_PWR  has: tb2, double                GAP: hit, hits2, single
+  [contact/hits  ] SPD      has: hit, single, double        GAP: hits2, tb2
+  [extra-base    ] RUNRBI   has: hrr2, hrr3                 GAP: hr, tb2, double
+  [extra-base    ] CTX      has: hrr2, hrr3                 GAP: hr, tb2, double
+  [extra-base    ] OBP      has: hrr2, hrr3                 GAP: hr, tb2, double
+  [extra-base    ] PWR      has: hr, tb2, hrr2, hrr3        GAP: double
+  [extra-base    ] XBH      has: tb2, double, hrr2, hrr3    GAP: hr
+  [extra-base    ] IBB      has: hr, hrr2, hrr3             GAP: tb2, double
+  [extra-base    ] SPD      has: double, hrr2, hrr3         GAP: hr, tb2
+  [extra-base    ] DEF      has: tb2, double, hrr2, hrr3    GAP: hr
+  [run-production] PWR      has: hrr2, hrr3                 GAP: run, rbi
+  [run-production] XBH      has: rbi, hrr2, hrr3            GAP: run
+  [run-production] IBB      has: rbi, hrr2, hrr3            GAP: run
+  [run-production] BIP_PWR  has: rbi, hrr2, hrr3            GAP: run
+  [run-production] PLATE    has: run, hrr2, hrr3            GAP: rbi
+  [run-production] SPD      has: run, hrr2, hrr3            GAP: rbi
+  [K/discipline  ] OBP      has: bb                         GAP: bk, bk2
+  [K/discipline  ] IBB      has: bb                         GAP: bk, bk2
+  [speed         ] SB       has: sb                         GAP: single, hit, run
+  [speed         ] RUNRBI   has: run                        GAP: sb, single, hit
+  [speed         ] CTX      has: run                        GAP: sb, single, hit
+  [speed         ] OBP      has: run                        GAP: sb, single, hit
+  [speed         ] VSH      has: single, hit, run           GAP: sb
+  [speed         ] VLOC     has: single, hit, run           GAP: sb
+  [speed         ] POS      has: single, hit, run           GAP: sb
+  [speed         ] PEN2     has: single, hit, run           GAP: sb
+  [speed         ] TLOC     has: single, hit, run           GAP: sb
+  [speed         ] HBF      has: single, hit, run           GAP: sb
+  [speed         ] BIP_HIT  has: single, hit, run           GAP: sb
+  [speed         ] PLATE    has: single, hit, run           GAP: sb
+  [speed         ] DEF      has: single, hit, run           GAP: sb
+  [speed         ] PSW      has: single, hit, run           GAP: sb
+  [speed         ] PARK_OFF has: single, hit, run           GAP: sb
+
+  Count heads inherit their base prop's routing (xtb<-tb2, xhrr<-hrr2, xbk<-bk), so a base-prop gap propagates to its head.

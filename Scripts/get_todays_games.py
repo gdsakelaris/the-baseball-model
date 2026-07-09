@@ -102,6 +102,19 @@ def norm_name(name):
     return re.sub(r"\s+", " ", name).strip()
 
 
+# FantasyPros suffixes some lineup slugs with a position ('josh-lowe-3b',
+# 'nick-gonzales-if') to disambiguate; strip it before name resolution.
+POS_TOKENS = {"p", "c", "1b", "2b", "3b", "ss", "lf", "cf", "rf", "of",
+              "dh", "if", "sp", "rp", "ph", "pr", "util"}
+
+
+def strip_pos_slug(name):
+    parts = name.replace("-", " ").split()
+    if len(parts) > 2 and parts[-1].lower() in POS_TOKENS:
+        parts = parts[:-1]
+    return " ".join(parts)
+
+
 def full_name_to_abbrev():
     m = {}
     with open(DATA_DIR / "mlb_batting_stats.csv",
@@ -112,16 +125,27 @@ def full_name_to_abbrev():
 
 
 def build_name_index():
-    """(team, normalized name) -> pid, plus a globally-unique name map."""
-    by_team, by_name = {}, {}
+    """Layered name lookup for resolving fallback lineup names to pids. Beyond
+    exact (team, norm) and globally-unique norm, it adds a space-collapsed key
+    (so 'O'Hearn'->'o hearn' still matches slug 'ohearn', and 'J.T.'->'j t'
+    matches 'jt') and a team-scoped last-name + first-initial map (so 'caleb'
+    resolves 'Cal Raleigh', 'lucas'->'Luke Raley', 'jung-lee'->'Jung Hoo Lee').
+    Every non-exact tier is consulted only when it lands on a single pid, so a
+    loose match can never pick the wrong player."""
+    idx = {"exact": {}, "glob": {}, "team_col": {}, "col": {}, "team_lfi": {}}
     full2ab = full_name_to_abbrev()
 
     def add(team, name, pid):
         n = norm_name(name)
         if not n:
             return
-        by_team[(team, n)] = pid
-        by_name.setdefault(n, set()).add(pid)
+        toks = n.split()
+        c = "".join(toks)
+        idx["exact"][(team, n)] = pid
+        idx["glob"].setdefault(n, set()).add(pid)
+        idx["team_col"].setdefault((team, c), set()).add(pid)
+        idx["col"].setdefault(c, set()).add(pid)
+        idx["team_lfi"].setdefault((team, toks[-1], toks[0][0]), set()).add(pid)
 
     with open(DATA_DIR / "mlb_rosters.csv", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
@@ -135,18 +159,48 @@ def build_name_index():
     rows.sort(key=lambda r: r["Date"])
     for r in rows:
         add(r["Team"], r["Name"], int(r["PlayerId"]))
-    return by_team, by_name
+    return idx
 
 
 def resolve(name, team, idx):
-    by_team, by_name = idx
-    n = norm_name(name)
-    if (team, n) in by_team:
-        return by_team[(team, n)]
-    pids = by_name.get(n)
-    if pids and len(pids) == 1:
-        return next(iter(pids))
+    """Slug/name -> pid via progressively looser but still-unambiguous tiers."""
+    n = norm_name(strip_pos_slug(name))
+    if not n:
+        return None
+    if (team, n) in idx["exact"]:
+        return idx["exact"][(team, n)]
+    toks = n.split()
+    c = "".join(toks)
+    for m, key in ((idx["team_col"], (team, c)),   # collapsed, unique in team
+                   (idx["glob"], n),               # exact norm, globally unique
+                   (idx["col"], c),                # collapsed, globally unique
+                   (idx["team_lfi"],               # last name + first initial
+                    (team, toks[-1], toks[0][0]))):
+        hit = m.get(key)
+        if hit and len(hit) == 1:
+            return next(iter(hit))
     return None
+
+
+def build_umpire_index():
+    """normalized HP-ump name -> HpUmpId, from mlb_umpires.csv (the same file
+    the model keys its ump tendency on). This bridges tonight's scraped ump
+    NAME (rotowire) to the ID the model needs. Latest id per name."""
+    path = DATA_DIR / "mlb_umpires.csv"
+    if not path.exists():
+        return {}
+    idx = {}
+    rows = sorted(csv.DictReader(open(path, encoding="utf-8-sig")),
+                  key=lambda r: r.get("Date", ""))
+    for r in rows:
+        n = norm_name(r.get("HpUmp", ""))
+        uid = r.get("HpUmpId")
+        if n and uid:
+            try:
+                idx[n] = int(float(uid))
+            except ValueError:
+                pass
+    return idx
 
 
 def player_id_from_href(href):
@@ -311,6 +365,15 @@ def scrape_rotowire():
             temp = float(m.group(1)) if m else None
         tm = g.select_one(".lineup__time")
         day_night = parse_time_daynight(tm.get_text(strip=True) if tm else "")
+        # home-plate umpire: name is the <a> inside .lineup__umpire (falls
+        # back to a regex on the div text: "Umpire: <name> 9.1 R/G ...")
+        ump_a = g.select_one(".lineup__umpire a")
+        umpire = ump_a.get_text(strip=True) if ump_a else None
+        if not umpire:
+            ud = g.select_one(".lineup__umpire")
+            m = re.search(r"Umpire:\s*(.+?)\s+[\d.]+\s*R/G",
+                          ud.get_text(" ", strip=True)) if ud else None
+            umpire = m.group(1).strip() if m else None
         condition = ""
         icon = g.select_one(".lineup__weather-icon")
         alt = (icon.get("alt") or "").lower() if icon else ""
@@ -332,7 +395,7 @@ def scrape_rotowire():
             return slugs[:9]
 
         out[(away, home)] = {"temp": temp, "condition": condition,
-                             "day_night": day_night,
+                             "day_night": day_night, "umpire": umpire,
                              "away_lineup": names_of("is-visit"),
                              "home_lineup": names_of("is-home")}
     return out
@@ -341,12 +404,16 @@ def scrape_rotowire():
 # --------------------------------------------------------------- assembly
 
 def resolve_lineup(slugs, team, idx):
+    """Resolve posted names to pids, keeping each player's slot = his spot in
+    the posted batting order. An unresolved name leaves that slot empty rather
+    than shifting everyone up, so the GUI shows exactly which slot to fill by
+    hand and the other eight stay in their real positions."""
     out, used = [], set()
-    for slug in slugs:
+    for slot, slug in enumerate(slugs, start=1):
         pid = resolve(slug, team, idx)
         if pid and pid not in used:
             used.add(pid)
-            out.append([pid, len(out) + 1])
+            out.append([pid, slot])
     return out
 
 
@@ -426,7 +493,8 @@ def main():
         roto = {}
 
     idx = build_name_index()
-    filled = {"temp": 0, "wind": 0, "cond": 0, "dome": 0}
+    ump_idx = build_umpire_index()
+    filled = {"temp": 0, "wind": 0, "cond": 0, "dome": 0, "ump": 0}
     # Lineup-source accounting, per TEAM-SIDE (there are 2 per game), decided
     # by comparing the pids mlb.com gave against the pids after fallbacks —
     # NOT by whether a side reached a full 9 (a fallback that fills in only a
@@ -450,6 +518,14 @@ def main():
         g["wind_dir"] = f.get("wind_dir") or ""
         if not g["day_night"]:  # fall back to rotowire's game time
             g["day_night"] = r.get("day_night")
+
+        # home-plate umpire (rotowire name -> HpUmpId the model uses); the
+        # GUI loads hp_ump_id into the spec so ump_feats has real history
+        g["hp_ump"] = r.get("umpire")
+        g["hp_ump_id"] = (ump_idx.get(norm_name(g["hp_ump"]))
+                          if g.get("hp_ump") else None)
+        if g["hp_ump_id"] is not None:
+            filled["ump"] += 1
 
         # roof closed: sources report no weather for indoor games
         if g["venue"] in DOME_VENUES and g["temp"] is None and \
@@ -501,6 +577,7 @@ def main():
           f"wind {filled['wind']}/{len(games)}, "
           f"condition {filled['cond']}/{len(games)}, "
           f"dome defaults {filled['dome']}")
+    print(f"  home-plate umpire resolved: {filled['ump']}/{len(games)}")
     for g, src in zip(games, sources):
         print(f'  {g["away_team"]:>3} @ {g["home_team"]:<3} {g["venue"]:<28} '
               f'{g["day_night"] or "?":<5} temp {str(g["temp"]) or "?":>5}  '

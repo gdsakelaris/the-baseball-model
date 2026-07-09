@@ -204,6 +204,8 @@ def load_raw():
             d["csw_n"] = d["wh_n"] + d["cs_n"]      # called strikes + whiffs
     sprint = _opt("mlb_sprint_speed.csv")
     oaa = _opt("mlb_oaa.csv")
+    umps = _opt("mlb_umpires.csv", parse_dates=["Date"])
+    bat_track = _opt("mlb_bat_tracking.csv")   # bat speed / swing (2023+ only)
 
     # 7-inning doubleheaders (2020-21) bias per-game rates; flag to exclude.
     outs_per_game = gp.groupby("GamePk")["Outs"].sum()
@@ -220,7 +222,8 @@ def load_raw():
     raw = dict(games=games, gb=gb, gp=gp, rosters=rosters, parks=parks,
                hr=hr, ars_p=ars_p, ars_b=ars_b, hands=hands,
                bat_season=bat_season, pit_season=pit_season, bip=bip,
-               pdp=pdp, pdb=pdb, sprint=sprint, oaa=oaa)
+               pdp=pdp, pdb=pdb, sprint=sprint, oaa=oaa, umps=umps,
+               bat_track=bat_track)
     raw["gb"] = annotate_opp_hand(gb, gp, hands)
     return raw
 
@@ -241,7 +244,7 @@ def annotate_opp_hand(gb, gp, hands):
 
 BAT_STATS = ["PA", "AB", "H", "HR", "TB", "SO", "BB",
              "SB", "CS", "R", "RBI", "2B", "3B", "HBP", "IBB",
-             "HRR2", "HRR3"]
+             "HRR2", "HRR3", "GIDP", "SF"]
 PIT_STATS = ["BF", "HR", "SO", "BB", "Outs", "ER", "H", "Strikes", "NP"]
 VSH_STATS = ["PA", "HR", "TB", "SO"]  # platoon splits track these
 LOC_STATS = ["PA", "H", "HR", "TB", "SO"]  # home/away venue splits
@@ -425,10 +428,38 @@ def _team_sb_allowed_table(gb):
 
 
 def _park_table(gb, games):
-    hr_per_game = gb.groupby("GamePk", as_index=False)["HR"].sum()
-    gv = games.merge(hr_per_game, on="GamePk", how="left")
-    gv["HR"] = gv["HR"].fillna(0)
-    return _daily_cum(gv, ["Venue"], ["HR"])
+    # per-game venue totals for the park factors: HR (legacy) plus runs, hits,
+    # doubles and total bases, so the offensive props get the run-environment
+    # signal a lone HR factor misses.
+    stats = ["HR", "R", "H", "2B", "TB"]
+    per_game = gb.groupby("GamePk", as_index=False)[stats].sum()
+    gv = games.merge(per_game, on="GamePk", how="left")
+    gv[stats] = gv[stats].fillna(0)
+    return _daily_cum(gv, ["Venue"], stats)
+
+
+# rbi opportunity, DEEPER-ORDER ISOLATION: mean career OBP of the hitters 3-5
+# spots AHEAD in the order (wrapping). ctx_ahead_obp already covers the 1st-2nd
+# ahead, so this deliberately isolates ONLY the deeper table those two miss —
+# the honest test of whether the order beyond the immediate two men on carries
+# RBI signal of its own. (The earlier full-order decayed version was dominated
+# by the -1/-2 terms = a ctx_ahead_obp duplicate, and came back flat.) Equal
+# weights => a plain NaN-skipping mean. Shared by the vectorized frame and the
+# serving path so the two agree (selftest parity).
+RBI_OPP_AHEAD = ((-3, 1.0), (-4, 1.0), (-5, 1.0))
+
+
+def rbi_opp_from_slots(obp_by_slot, slot):
+    """Weighted, NaN-skipping mean of the career OBP of the hitters ahead of
+    `slot` (obp_by_slot maps slot -> OBP), renormalized over the hitters that
+    have a value. Serving path; the frame computes the same value vectorized."""
+    num = den = 0.0
+    for off, w in RBI_OPP_AHEAD:
+        v = obp_by_slot.get(((slot + off - 1) % 9) + 1)
+        if v is not None and not pd.isna(v):
+            num += w * v
+            den += w
+    return num / den if den > 0 else np.nan
 
 
 ENV_COLS = ["lg_hr_pa", "lg_r_pa", "lg_k_pa", "lg_bb_pa", "lg_sb_pa"]
@@ -976,6 +1007,13 @@ SHRINK = {
     "sb_pa":  (0.016, 200, "SB", "PA"),   # steals are player-idiosyncratic
     "r_pa":   (0.125, 250, "R",  "PA"),   # runs scored (lineup context)
     "rbi_pa": (0.115, 250, "RBI", "PA"),
+    # productive/unproductive outs (2026-07-09, train._PRODOUT -> run/rbi):
+    # GIDP is a rally-killer that erases baserunners and the batter (suppresses
+    # both his run and the runners' RBI); SF is a productive out that cashes a
+    # run (an RBI without a hit). Both rare + noisy -> strong prior K; league
+    # rates measured off the full game-batting log (GIDP/PA 0.018, SF/PA 0.007).
+    "gidp_pa": (0.018,  200, "GIDP", "PA"),
+    "sf_pa":   (0.0067, 250, "SF",   "PA"),
 }
 SHRINK_ROLL = ("hr_pa", "tb_ab", "k_pct", "sb_pa",
                "r_pa", "rbi_pa")  # rolling: PA denominator
@@ -995,6 +1033,23 @@ SHRINK_ROLL = ("hr_pa", "tb_ab", "k_pct", "sb_pa",
 # batter_feature_cols and re-route in train.py (a d_-only retry is the
 # cheapest variant if ever revisited).
 HRR_SHRINK = {"hrr2_g": (0.395, 40.0), "hrr3_g": (0.250, 40.0)}
+
+# Home-plate umpire zone tendency: his career K% and BB% per batter-faced
+# over PRIOR games (both teams' pitching lines), EB-shrunk toward the league
+# rate. A tight zone inflates walks and suppresses strikeouts and vice
+# versa; this is the only zone-authority signal, routed to the K/BB props.
+# Priors are the measured league K/BF and BB/BF; K (~5 games of BF) only
+# bites for an ump's first handful of games — they accrue ~75 BF/game and
+# hundreds of games across the dataset, so the estimate is otherwise firm.
+UMP_K_PRIOR, UMP_BB_PRIOR, UMP_K = 0.226, 0.085, 400.0
+
+# Statcast bat tracking (scrape_bat_tracking.py, 2023+): raw CSV column ->
+# feature name. Prior-season, routed to the power props (train._BAT). BANKED
+# BUT INERT until the training window covers a bat-tracking season (~2027);
+# wired now so it self-activates at the rollover with no code change.
+BAT_TRACK_REN = {"BatSpeed": "bt_speed", "SwingLength": "bt_swlen",
+                 "HardSwingRate": "bt_hardsw", "BlastPerSwing": "bt_blast"}
+BAT_TRACK_COLS = list(BAT_TRACK_REN.values())
 
 # stolen-base success rate: prior ~ league SB% ; small K (fast to stabilize)
 SB_SUCC_PRIOR, SB_SUCC_K = 0.75, 20.0
@@ -1052,6 +1107,56 @@ def hrr_hist_feats(sums, den, pre):
         prior, k = HRR_SHRINK[f"hrr{line}_g"]
         out[f"{pre}_hrr{line}_g_sh"] = (sums[f"HRR{line}"] + k * prior) / (den + k)
     return out
+
+
+def _ump_game_totals(gp):
+    """Per-game strikeout / walk / batters-faced totals (both teams'
+    pitching lines) — the raw material for a home-plate ump's zone
+    tendency. Shared by the vectorized frame and the inference store."""
+    g = gp[["GamePk", "SO", "BB", "BF"]].copy()
+    for c in ("SO", "BB", "BF"):
+        g[c] = pd.to_numeric(g[c], errors="coerce")
+    return g.groupby("GamePk").agg(g_SO=("SO", "sum"), g_BB=("BB", "sum"),
+                                   g_BF=("BF", "sum")).reset_index()
+
+
+def _ump_shrink(so, bb, bf):
+    """Shrunk (K%, BB%) per batter-faced from as-of ump totals — the single
+    definition both paths call so training and serving agree exactly."""
+    return ((so + UMP_K * UMP_K_PRIOR) / (bf + UMP_K),
+            (bb + UMP_K * UMP_BB_PRIOR) / (bf + UMP_K))
+
+
+def _ump_asof(umps, gp):
+    """Per-GamePk home-plate-umpire tendency, as-of (his K%/BB% over PRIOR
+    games only, leakage-free). An umpire never works the plate twice in one
+    day, so a strictly-prior cumsum is already date-clean — no doubleheader
+    snap needed."""
+    tot = _ump_game_totals(gp)
+    u = umps.merge(tot, on="GamePk", how="left")
+    u["HpUmpId"] = pd.to_numeric(u["HpUmpId"], errors="coerce")
+    u = u.dropna(subset=["HpUmpId"]).copy()
+    u["HpUmpId"] = u["HpUmpId"].astype("int64")
+    for s in ("g_SO", "g_BB", "g_BF"):
+        u[s] = pd.to_numeric(u[s], errors="coerce").fillna(0.0)
+    u = u.sort_values(["HpUmpId", "Date", "GamePk"]).reset_index(drop=True)
+    g = u.groupby("HpUmpId", sort=False)
+    cso = g["g_SO"].cumsum() - u["g_SO"]
+    cbb = g["g_BB"].cumsum() - u["g_BB"]
+    cbf = g["g_BF"].cumsum() - u["g_BF"]
+    u["ump_k_pct"], u["ump_bb_pct"] = _ump_shrink(cso, cbb, cbf)
+    return u[["GamePk", "ump_k_pct", "ump_bb_pct"]]
+
+
+def _merge_ump(df, raw):
+    """Attach ump_k_pct/ump_bb_pct by GamePk (NaN when the umpire file is
+    absent — old cache / not yet scraped — so the models impute harmlessly)."""
+    if raw.get("umps") is not None:
+        return df.merge(_ump_asof(raw["umps"], raw["gp"]), on="GamePk",
+                        how="left")
+    df["ump_k_pct"] = np.nan
+    df["ump_bb_pct"] = np.nan
+    return df
 
 
 def add_bat_trends(d):
@@ -1196,7 +1301,8 @@ def _attach_context(rows, raw, team_tab, pen_tab, park_tab,
     if pen_fat_tab is not None:
         fat = pen_fat_tab.rename(columns={"Team": "Opponent"})
         rows = rows.merge(fat, on=["Opponent", "Date"], how="left")
-    park = park_tab.rename(columns={"cum_HR": "park_cum_HR", "cum_n": "park_cum_n"})
+    park = park_tab.rename(columns={c: f"park_{c}" for c in park_tab.columns
+                                    if c.startswith("cum")})
     rows = _asof_merge(rows, park, by=["Venue"])
 
     rows["toff_hr_pa"] = rows["toff_cum_HR"] / rows["toff_cum_PA"]
@@ -1207,8 +1313,16 @@ def _attach_context(rows, raw, team_tab, pen_tab, park_tab,
     rows["pen_k_bf"] = rows["pen_cum_SO"] / rows["pen_cum_BF"]
     rows["pen_h_bf"] = rows["pen_cum_H"] / rows["pen_cum_BF"]
     rows["pen_era"] = rows["pen_cum_ER"] * 27 / rows["pen_cum_Outs"]
-    rows["park_hr_pg"] = np.where(rows["park_cum_n"] >= 30,
-                                  rows["park_cum_HR"] / rows["park_cum_n"], np.nan)
+    # per-game venue rates over all PRIOR games, gated at 30 games so a new or
+    # renamed park (Rate/Daikin) falls back to NaN. park_hr_pg reaches every
+    # batter prop (legacy); R/H/2B/TB route to the offensive props only
+    # (train._PARK_OFF).
+    ok = rows["park_cum_n"] >= 30
+    for stat, col in (("HR", "park_hr_pg"), ("R", "park_r_pg"),
+                      ("H", "park_h_pg"), ("2B", "park_2b_pg"),
+                      ("TB", "park_tb_pg")):
+        rows[col] = np.where(ok, rows[f"park_cum_{stat}"] / rows["park_cum_n"],
+                             np.nan)
     return rows
 
 
@@ -1418,6 +1532,19 @@ def build_batter_frame(raw):
     else:
         df["bat_sprint"] = np.nan
         df["bat_hp1b"] = np.nan
+    # prior-season Statcast bat tracking (bat speed / swing) — power signal
+    # for the HR / total-base props. COVERAGE: 2023+ only, so under the
+    # current selection suite (train <=2023) every training row is NaN and
+    # the feature is INERT (unlearnable) — it is wired now so it activates
+    # automatically once the season rollover puts a covered year into the
+    # training window (~2027); see BAT_TRACK_COLS / train._BAT.
+    if raw.get("bat_track") is not None:
+        bt = raw["bat_track"].rename(columns=BAT_TRACK_REN)
+        df = _merge_prior_season(df, bt[["PlayerId", "Year", *BAT_TRACK_COLS]],
+                                 "PlayerId", BAT_TRACK_COLS)
+    else:
+        for c in BAT_TRACK_COLS:
+            df[c] = np.nan
     if raw.get("oaa") is not None:
         oa = raw["oaa"].rename(columns={"Team": "PlayerId",
                                         "OAA_per162": "opp_oaa"})
@@ -1590,6 +1717,25 @@ def build_batter_frame(raw):
     df["ctx_behind_slg"] = df[["_slgp1", "_slgp2"]].mean(axis=1)
     df["ctx_ahead_obp_d"] = df[["_obpp_d-2", "_obpp_d-1"]].mean(axis=1)
     df["ctx_behind_slg_d"] = df[["_slgp_d1", "_slgp_d2"]].mean(axis=1)
+    # rbi opportunity: full-order proximity-decayed OBP of the hitters ahead
+    # (RBI_OPP_AHEAD) — expected runners on base the 2-slot ctx can't see.
+    obp_lt = df[["GamePk", "Team", "slot", "_obpp"]].drop_duplicates(
+        ["GamePk", "Team", "slot"])
+    num = np.zeros(len(df))
+    den = np.zeros(len(df))
+    for off, w in RBI_OPP_AHEAD:
+        nb = obp_lt.rename(columns={"slot": "_nslot", "_obpp": "_ahd_obp"})
+        df["_nslot"] = ((df["slot"] + off - 1) % 9) + 1
+        df = df.merge(nb, on=["GamePk", "Team", "_nslot"], how="left")
+        v = df["_ahd_obp"].to_numpy()
+        m = ~np.isnan(v)
+        num[m] += w * v[m]
+        den[m] += w
+        df = df.drop(columns=["_nslot", "_ahd_obp"])
+    df["rbi_opp_obp"] = np.where(den > 0, num / den, np.nan)
+
+    # home-plate umpire zone tendency (as-of), merged by game
+    df = _merge_ump(df, raw)
 
     df["month"] = df["Date"].dt.month
     df["y_hr"] = (df["HR"] >= 1).astype(int)
@@ -1635,7 +1781,8 @@ def batter_feature_cols():
              "toff_loc_hr_pa", "toff_loc_r_pg",
              "pen_hr_bf", "pen_k_bf", "pen_h_bf", "pen_era",
              "pen_hl_era", "pen_hl_k_bf", "pen_np_l3",
-             "park_hr_pg", "LF", "CF", "RF", "Elevation_ft",
+             "park_hr_pg", "park_r_pg", "park_h_pg", "park_2b_pg", "park_tb_pg",
+             "LF", "CF", "RF", "Elevation_ft",
              "Temp", "WindSpeed",
              "hrq_n", "hrq_ev_avg", "hrq_dist_avg", "hrq_dist_max",
              "hrq_angle_avg", "hrpt_score", "phrq_n", "phrq_ev_avg",
@@ -1649,6 +1796,9 @@ def batter_feature_cols():
              "c_xbh_ab", "s_xbh_ab", "c_obp", "s_obp", "c_ibb_pa",
              "pos_c_share", "pos_dh_share",
              "ctx_ahead_obp", "ctx_behind_slg",
+             # rbi_opp_obp BENCHED 2026-07-09 (train._CTX note): computed in
+             # both paths but out of the superset — deeper order added no RBI
+             # signal across three designs.
              # NOTE: decayed teammate ctx (ctx_*_d, 2026-07-08) BENCHED —
              # 0/0/76 within noise on run/rbi/hrr (corr with targets ~=
              # the career ctx already in the models: nothing new to add);
@@ -1666,6 +1816,13 @@ def batter_feature_cols():
              "pbipd_n", "pbipd_ev", "pbipd_brl", "pbipd_xwoba", "pbipd_gb",
              "bd_wsw_c", "bd_wsw_d", "bd_chase_c", "bd_chase_d",
              "p_swstr_d", "bat_sprint", "bat_hp1b", "opp_oaa",
+             # HP-umpire zone tendency — routed to the K/BB props only
+             # (train.py _UMP); other batter props exclude it
+             "ump_k_pct", "ump_bb_pct",
+             # Statcast bat tracking (power) — routed to hr/tb2/xtb only
+             # (train.py _BAT); INERT until ~2027 (2023+ coverage vs the
+             # <=2023 training window), banked+wired to self-activate
+             *BAT_TRACK_COLS,
              # NOTE: pull_fence/porch_margin and batter-side fatigue were
              # tried (iteration 3) and hurt the batter props on the holdout;
              # the league-environment lg_* columns (iteration 4) were flat
@@ -1767,6 +1924,9 @@ def build_starts_frame(raw, batter_frame=None):
               .reset_index().rename(columns={"Team": "Opponent"}))
         st = st.merge(lu, on=["GamePk", "Opponent"], how="left")
 
+    # home-plate umpire zone tendency (as-of), merged by game
+    st = _merge_ump(st, raw)
+
     st["month"] = st["Date"].dt.month
     st["y_so"] = st["SO"]
     # count-market targets for the starter prop heads
@@ -1793,6 +1953,10 @@ def starts_feature_cols():
             "vs_k_pct", "vs_bb_pct", "vs_hr_pa", "vs_r_pg",
             "park_hr_pg", "Elevation_ft", "Temp", "WindSpeed",
             "lg_k_pa", "lg_r_pa", "lg_hr_pa",
+            # HP-umpire zone tendency: the K model uses both; the count
+            # heads that don't speak to the zone (outs/pha/per) drop them
+            # via train.py COUNT_HEADS st_exclude
+            "ump_k_pct", "ump_bb_pct",
             "DayNight", "Condition", "WindDir"]
 
 
@@ -1946,7 +2110,8 @@ def build_game_frame(raw):
     # starter contact-quality-allowed diff (decayed xwOBA on contact)
     g["d_ps_xwcon_d"] = g["home_ps_xwcon_d"] - g["away_ps_xwcon_d"]
 
-    park = park_tab.rename(columns={"cum_HR": "park_cum_HR", "cum_n": "park_cum_n"})
+    park = park_tab.rename(columns={c: f"park_{c}" for c in park_tab.columns
+                                    if c.startswith("cum")})
     g = _asof_merge(g, park, by=["Venue"])
     g["park_hr_pg"] = np.where(g["park_cum_n"] >= 30,
                                g["park_cum_HR"] / g["park_cum_n"], np.nan)
@@ -2108,10 +2273,26 @@ class Stores:
             r["sprint"].drop_duplicates(["PlayerId", "Year"], keep="last")
             .set_index(["PlayerId", "Year"])
             if r.get("sprint") is not None else None)
+        self.bat_track_prior = (
+            r["bat_track"].drop_duplicates(["PlayerId", "Year"], keep="last")
+            .set_index(["PlayerId", "Year"])
+            if r.get("bat_track") is not None else None)
         self.oaa_prior = (
             r["oaa"].drop_duplicates(["Team", "Year"], keep="last")
             .set_index(["Team", "Year"])
             if r.get("oaa") is not None else None)
+        # HP-umpire history: per-game K/BB/BF totals grouped by ump for
+        # as-of tendency lookups (Stores.ump_feats)
+        self.ump_hist = None
+        if r.get("umps") is not None:
+            uh = r["umps"].merge(_ump_game_totals(r["gp"]), on="GamePk",
+                                 how="left")
+            uh["HpUmpId"] = pd.to_numeric(uh["HpUmpId"], errors="coerce")
+            uh = uh.dropna(subset=["HpUmpId"]).copy()
+            uh["HpUmpId"] = uh["HpUmpId"].astype("int64")
+            for s in ("g_SO", "g_BB", "g_BF"):
+                uh[s] = pd.to_numeric(uh[s], errors="coerce").fillna(0.0)
+            self.ump_hist = _LazyGroups(uh, "HpUmpId")
         tick("building team/park tables...")
         self.team_tab = _team_offense_table(r["gb"])
         self.team_loc_tab = _team_offense_loc_table(r["gb"])
@@ -2298,6 +2479,12 @@ class Stores:
         out["bat_hp1b"] = (
             self._prior_val(self.sprint_prior, pid, season, "HPto1B")
             if self.sprint_prior is not None else np.nan)
+        # prior-season bat tracking (BatSpeed etc.) -> bt_* (parity with the
+        # frame's BAT_TRACK_REN); NaN when unavailable / uncovered season
+        for raw_c, feat in BAT_TRACK_REN.items():
+            out[feat] = (self._prior_val(self.bat_track_prior, pid, season,
+                                         raw_c)
+                         if self.bat_track_prior is not None else np.nan)
 
         q = self.hrq[(self.hrq["BatterId"] == pid) & (self.hrq["Date"] < date)]
         if len(q):
@@ -2429,6 +2616,21 @@ class Stores:
         if self.oaa_prior is None:
             return np.nan
         return self._prior_val(self.oaa_prior, team, season, "OAA_per162")
+
+    def ump_feats(self, ump_id, date):
+        """HP-umpire zone tendency (K%/BB% per batter faced) over his games
+        strictly before `date`. Unknown ump / no file -> the league prior
+        (neutral), matching the vectorized _ump_asof exactly."""
+        so = bb = bf = 0.0
+        if ump_id is not None and self.ump_hist is not None:
+            h = self.ump_hist.get(int(ump_id))
+            if h is not None:
+                h = h[h["Date"] < date]
+                so = float(h["g_SO"].sum())
+                bb = float(h["g_BB"].sum())
+                bf = float(h["g_BF"].sum())
+        k, w = _ump_shrink(so, bb, bf)
+        return {"ump_k_pct": k, "ump_bb_pct": w}
 
     def _pd_sums(self, groups, pid, date):
         """(career sums, decayed sums) of the pitch-daily rows before
@@ -2639,14 +2841,19 @@ class Stores:
 
     def park(self, venue, date):
         out = {"LF": np.nan, "CF": np.nan, "RF": np.nan, "Elevation_ft": np.nan,
-               "park_hr_pg": np.nan}
+               "park_hr_pg": np.nan, "park_r_pg": np.nan, "park_h_pg": np.nan,
+               "park_2b_pg": np.nan, "park_tb_pg": np.nan}
         if venue in self.parks.index:
             p = self.parks.loc[venue]
             out.update(LF=p["LF"], CF=p["CF"], RF=p["RF"],
                        Elevation_ft=p["Elevation_ft"])
         row = self._cum(self.park_tab, {"Venue": venue}, date)
         if row is not None and row["cum_n"] >= 30:
-            out["park_hr_pg"] = row["cum_HR"] / row["cum_n"]
+            n = row["cum_n"]
+            for stat, col in (("HR", "park_hr_pg"), ("R", "park_r_pg"),
+                              ("H", "park_h_pg"), ("2B", "park_2b_pg"),
+                              ("TB", "park_tb_pg")):
+                out[col] = row[f"cum_{stat}"] / n
         return out
 
     def bio(self, pid):

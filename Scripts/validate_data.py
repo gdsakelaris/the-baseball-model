@@ -157,6 +157,16 @@ SPECS = {
         key=["Year", "Team"], max_dup_frac=0.0,
         numeric=[("OAA", 0.0)],
         min_rows=200, shrink_tol=0.999, season_col="Year"),
+    "mlb_bat_tracking.csv": dict(               # per (Year, batter); 2023+
+        required_cols=["Year", "PlayerId", "BatSpeed", "SwingLength"],
+        key=["Year", "PlayerId"], max_dup_frac=0.0,
+        numeric=[("PlayerId", 0.0), ("BatSpeed", 0.05)],
+        min_rows=400, shrink_tol=0.999, season_col="Year"),
+    "mlb_umpires.csv": dict(                    # one row per game, grows daily
+        required_cols=["GamePk", "Date", "Season", "HpUmpId", "HpUmp"],
+        key=["GamePk"], max_dup_frac=0.0, date_col="Date", fresh_days=6,
+        numeric=[("GamePk", 0.0)],              # HpUmpId may be NaN (data gaps)
+        min_rows=12000, shrink_tol=0.999, season_col="Season"),
     "mlb_odds.csv": dict(                       # append-only store
         required_cols=["Date", "GamePk", "PlayerId", "Market", "Line",
                        "OverPrice", "UnderPrice", "Book", "CapturedAt"],

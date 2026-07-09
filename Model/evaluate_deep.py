@@ -954,6 +954,243 @@ def handle_baseline(summary, year, set_baseline, select=False):
               f"{', '.join(missing)}  (re-run --set-baseline to refresh)")
 
 
+# --------------------------------------------- paired verdict (policy v2)
+# The static-band Section 11 above compares two frozen point estimates; it is
+# a screen. --paired is the VERDICT: a paired day-block bootstrap of the change
+# itself. --set-baseline snapshots the pre-change model's per-row predictions
+# (eval_paired_*.joblib); --paired reloads them, scores the candidate on the
+# same rows, and CIs the per-resample delta. Keep by default; a north-star
+# metric whose delta CI lies entirely on the harmful side is the only bench
+# signal (and only when it corroborates on the other year).
+
+
+def build_binary_results(art, bf_y):
+    """Per-row calibrated probabilities for every binary prop, in serving order
+    (raw pass first so stacked props see their donors) — the `results` dict the
+    print sections and the paired test both consume."""
+    X = prep(bf_y, art["bat_cols"], art["cat_levels"])
+    raw_p = {name: predict_prop(art["props"][name], X)
+             for name in PROPS if name in art["props"]}
+    results = {}
+    for name, (target, _desc) in PROPS.items():
+        if name not in raw_p:  # artifact predates this prop
+            continue
+        p = apply_stack(art["props"][name], raw_p[name], raw_p)
+        y = bf_y[target].to_numpy()
+        base = np.full_like(p, y.mean())
+        results[name] = {
+            "p": p, "y": y, "d": bf_y["Date"].to_numpy(),
+            "g": bf_y["GamePk"].to_numpy(),
+            "pid": bf_y["PlayerId"].to_numpy(),
+            "temp": pd.to_numeric(bf_y["Temp"], errors="coerce").to_numpy(),
+            "auc": roc_auc_score(y, p),
+            "edge": log_loss(y, base) - log_loss(y, p),
+        }
+    return results
+
+
+def build_count_preds(art, bf_y, sf_y, gf_y):
+    """Per-row count means (mu) + outcomes, keyed for the paired MAE test:
+    the batter/starter count heads, the starter-K model, and game totals."""
+    cat = art["cat_levels"]
+    KEY = ["Date", "GamePk", "PlayerId"]
+    out = {}
+    for name, head in art.get("count_models", {}).items():
+        d = bf_y if head["frame"] == "bat" else sf_y
+        df = d[KEY].copy()
+        df["mu"] = head["model"].predict(prep(d, head["cols"], cat))
+        df["y"] = d[head["target"]].to_numpy().astype(float)
+        out[name] = {"df": df.reset_index(drop=True), "keycols": KEY}
+    if art.get("k_model") is not None:
+        df = sf_y[KEY].copy()
+        df["mu"] = art["k_model"].predict(prep(sf_y, art["st_cols"], cat))
+        df["y"] = sf_y["y_so"].to_numpy().astype(float)
+        out["k"] = {"df": df.reset_index(drop=True), "keycols": KEY}
+    if art.get("team_runs_model") is not None:
+        tg = F.build_team_game_frame(gf_y)
+        tp = art["team_runs_model"].predict(prep(tg, art["tg_cols"], cat))
+        n_g = len(gf_y)
+        gk = ["Date", "GamePk"]
+        df = gf_y[gk].copy()
+        df["mu"] = tp[:n_g] + tp[n_g:]
+        df["y"] = (pd.to_numeric(gf_y["AwayScore"], errors="coerce").to_numpy()
+                   + pd.to_numeric(gf_y["HomeScore"], errors="coerce").to_numpy())
+        out["total"] = {"df": df.reset_index(drop=True), "keycols": gk}
+    return out
+
+
+def build_binary_snapshot(results):
+    """Per-row p + y + keys per binary prop, for the paired-baseline file."""
+    return {name: {"df": pd.DataFrame({
+        "Date": r["d"], "GamePk": r["g"], "PlayerId": r["pid"],
+        "p": r["p"], "y": r["y"]}),
+        "keycols": ["Date", "GamePk", "PlayerId"]}
+        for name, r in results.items()}
+
+
+def _all_boosters(art):
+    """(label, LightGBM model) for every booster in an artifact, so feature
+    gain can be summed across the props/heads that share a column."""
+    pairs = [(name, p["gbm"]) for name, p in art.get("props", {}).items()
+             if "gbm" in p]
+    pairs += [(name, h["model"]) for name, h in art.get("count_models", {}).items()]
+    if art.get("k_model") is not None:
+        pairs.append(("k", art["k_model"]))
+    if art.get("team_runs_model") is not None:
+        pairs.append(("total", art["team_runs_model"]))
+    wm = art.get("win_model") or {}
+    if "gbm" in wm:
+        pairs.append(("winner", wm["gbm"]))
+    return pairs
+
+
+def declared_features(art):
+    """Every feature column the artifact's heads DECLARE (bagging-independent —
+    unlike booster introspection, which misses columns used only by bagged
+    heads). The stable basis for 'what columns are new since the baseline'."""
+    feats = (set(art.get("bat_cols", [])) | set(art.get("st_cols", []))
+             | set(art.get("tg_cols", [])))
+    for h in art.get("count_models", {}).values():
+        feats.update(h.get("cols", []))
+    wm = art.get("win_model") or {}
+    feats.update(wm.get("cols", []) or [])
+    feats.update(wm.get("lr_cols", []) or [])
+    return feats
+
+
+def feature_gains(art):
+    """({col: total gain}, {col: heads that split on it}, {all feature cols})
+    across every booster — the (2) usage gate that labels a flat feature inert
+    (gain 0, safe ballast) vs active (used but nets out). Bagged heads
+    (features.MeanBag) are expanded into their seed members with gain averaged,
+    so a bagged prop weighs like a single model."""
+    gains, users, feats = {}, {}, set()
+    for label, model in _all_boosters(art):
+        members = getattr(model, "models", None) or [model]
+        w = 1.0 / len(members)
+        for m in members:
+            b = getattr(m, "booster_", None)
+            if b is None:
+                continue
+            for n, g in zip(b.feature_name(),
+                            b.feature_importance(importance_type="gain")):
+                feats.add(n)
+                gains[n] = gains.get(n, 0.0) + w * float(g)
+                if g > 0:
+                    users.setdefault(n, set()).add(label)
+    return gains, users, feats
+
+
+def paired_verdict(lo, hi):
+    """CI decides (policy v2): entirely good = improved, entirely bad = harm,
+    straddling 0 = no effect (keep). Metrics are oriented so + is always good."""
+    if lo > 0:
+        return "IMPROVED"
+    if hi < 0:
+        return "HARM"
+    return "no effect"
+
+
+def paired_day_bootstrap(dates, y, base_val, cand_val, kind, n_boot, seed=0):
+    """Paired day-block bootstrap of (candidate - baseline), oriented so POSITIVE
+    = candidate better for every kind (auc/edge higher-better; mae lower-better
+    flipped to base-minus-cand). Each draw resamples whole days ONCE and scores
+    both models on the SAME rows, so shared-day noise cancels and the CI is on
+    the CHANGE, not on either level."""
+    rng = np.random.default_rng(seed)
+    dates = np.asarray(dates)
+    uniq = pd.unique(dates)
+    idx_by_day = {d: np.flatnonzero(dates == d) for d in uniq}
+    out = []
+    for _ in range(n_boot):
+        take = rng.choice(uniq, size=len(uniq), replace=True)
+        idx = np.concatenate([idx_by_day[d] for d in take])
+        yy, pb, pc = y[idx], base_val[idx], cand_val[idx]
+        if kind in ("auc", "edge"):
+            if yy.min() == yy.max():
+                continue
+            out.append(roc_auc_score(yy, pc) - roc_auc_score(yy, pb)
+                       if kind == "auc"
+                       else log_loss(yy, pb) - log_loss(yy, pc))
+        else:  # mae
+            out.append(mean_absolute_error(yy, pb) - mean_absolute_error(yy, pc))
+    a = np.asarray(out)
+    if a.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    return (float(a.mean()), float(np.percentile(a, 2.5)),
+            float(np.percentile(a, 97.5)))
+
+
+def run_paired(art, results, count_preds, tag, year, n_boot):
+    """Print the paired keep/bench verdict against the --set-baseline snapshot,
+    plus the ② feature-usage gate for columns added since that snapshot."""
+    path = ART / f"eval_paired_{tag}{year}.joblib"
+    print(f"\n=== 11p. Paired change vs baseline (day-block paired bootstrap, "
+          f"{n_boot} draws; + = candidate better; * = north-star) ===")
+    if not path.exists():
+        pre = "" if tag == "select_" else "--confirm "
+        print(f"  No paired baseline at {path.name}. Snapshot the PRE-change "
+              f"model first:\n    python Model/evaluate_deep.py {pre}--set-baseline"
+              f"\n  (--set-baseline now also writes the per-row paired snapshot.)")
+        return
+    comp = joblib.load(path)
+    rows = []
+    for name, r in results.items():
+        if name not in comp.get("binary", {}):
+            continue
+        m = comp["binary"][name]["df"].merge(
+            pd.DataFrame({"Date": r["d"], "GamePk": r["g"], "PlayerId": r["pid"],
+                          "p": r["p"], "y": r["y"]}),
+            on=["Date", "GamePk", "PlayerId"], suffixes=("_b", "_c"))
+        d, y = m["Date"].to_numpy(), m["y_c"].to_numpy()
+        pb, pc = m["p_b"].to_numpy(), m["p_c"].to_numpy()
+        for metric, kind, star in (("AUC", "auc", True), ("edge", "edge", False)):
+            mean, lo, hi = paired_day_bootstrap(d, y, pb, pc, kind, n_boot)
+            rows.append({"prop": name,
+                         "metric": ("*" if star else " ") + metric,
+                         "delta": f"{mean:+.4f}",
+                         "95% CI": f"[{lo:+.4f}, {hi:+.4f}]", "n": len(m),
+                         "verdict": paired_verdict(lo, hi), "_star": star})
+    for name, cp in count_preds.items():
+        if name not in comp.get("count", {}):
+            continue
+        kc = comp["count"][name]["keycols"]
+        m = comp["count"][name]["df"].merge(cp["df"], on=kc, suffixes=("_b", "_c"))
+        d, y = m["Date"].to_numpy(), m["y_c"].to_numpy()
+        mean, lo, hi = paired_day_bootstrap(
+            d, y, m["mu_b"].to_numpy(), m["mu_c"].to_numpy(), "mae", n_boot)
+        rows.append({"prop": name, "metric": "*MAE", "delta": f"{mean:+.4f}",
+                     "95% CI": f"[{lo:+.4f}, {hi:+.4f}]", "n": len(m),
+                     "verdict": paired_verdict(lo, hi), "_star": True})
+    if not rows:
+        print("  (no props overlap between this model and the snapshot)")
+        return
+    df = pd.DataFrame(rows)
+    print(df.drop(columns="_star").to_string(index=False))
+    star = df[df["_star"]]
+    harm = star.loc[star["verdict"] == "HARM", "prop"].tolist()
+    imp = star.loc[star["verdict"] == "IMPROVED", "prop"].tolist()
+    print(f"\n  north-star (AUC binary / MAE count): {len(imp)} improved "
+          f"{imp or ''}, {len(harm)} harm {harm or ''}, rest no-effect.")
+    if harm:
+        print("  -> HARM = candidate's north-star CI entirely worse. Policy v2: "
+              "bench/route-around ONLY if it corroborates on the other year "
+              "(run the same --paired on the confirm suite).")
+    else:
+        print("  -> no north-star harm: KEEP by default (policy v2).")
+    gains, users, _ = feature_gains(art)
+    added = sorted(declared_features(art) - set(comp.get("features", [])),
+                   key=lambda c: -gains.get(c, 0.0))
+    print("\n--- (2) feature-usage gate: columns added since the paired baseline ---")
+    if not added:
+        print("  (none — candidate uses the same feature columns as the baseline)")
+    for c in added:
+        g = gains.get(c, 0.0)
+        u = ", ".join(sorted(users.get(c, []))) or "-"
+        print(f"  {c:<26} gain {g:>12.1f}  "
+              f"[{'used' if g > 0 else 'INERT ballast'}]  ({u})")
+
+
 # ------------------------------------------------------------------- main
 
 
@@ -977,13 +1214,23 @@ def main():
                     help="score the SHIPPING suite (models.joblib) on the "
                          "confirm-only holdout (the newest season). Use once "
                          "per finished change, not to iterate.")
+    ap.add_argument("--paired", action="store_true",
+                    help="policy-v2 verdict: paired day-block bootstrap CI of "
+                         "(candidate - baseline) per prop vs the snapshot a "
+                         "prior --set-baseline saved, plus the feature-usage "
+                         "gate. Fast (skips the verbose sections).")
     ap.add_argument("--odds", default=str(O.DEFAULT_STORE),
                     help="odds store CSV for the vs-market section "
                          "(Scripts/scrape_odds.py writes it)")
     args = ap.parse_args()
     if args.select and args.confirm:
         sys.exit("--select and --confirm are mutually exclusive")
+    if args.paired and args.set_baseline:
+        sys.exit("--paired reads the snapshot that --set-baseline writes; "
+                 "run them in separate steps (set-baseline before the change, "
+                 "paired after)")
     select = not args.confirm
+    tag = "select_" if select else ""
 
     if select:
         art_path = ART / "models_bt.joblib"
@@ -1028,29 +1275,18 @@ def main():
     bf, sf, gf = frames["bf"], frames["sf"], frames["gf"]
 
     bf_y = bf[(bf["Season"] == args.year) & ~bf["ShortGame"].fillna(False)]
-    X = prep(bf_y, art["bat_cols"], art["cat_levels"])
     print(f"Scoring {len(bf_y):,} batter-games, {args.year}...")
+    # raw pass first, so stacked props (single/double borrow hit/tb2 scores,
+    # predict.apply_stack) see their donors — same order of operations as serving
+    results = build_binary_results(art, bf_y)
 
-    # two passes: raw probabilities first, so stacked props (single/double
-    # borrow hit/tb2 scores, predict.apply_stack) see their donors — same
-    # order of operations as serving
-    raw_p = {name: predict_prop(art["props"][name], X)
-             for name in PROPS if name in art["props"]}
-    results = {}
-    for name, (target, _desc) in PROPS.items():
-        if name not in raw_p:  # artifact predates this prop
-            continue
-        p = apply_stack(art["props"][name], raw_p[name], raw_p)
-        y = bf_y[target].to_numpy()
-        base = np.full_like(p, y.mean())
-        results[name] = {
-            "p": p, "y": y, "d": bf_y["Date"].to_numpy(),
-            "g": bf_y["GamePk"].to_numpy(),
-            "pid": bf_y["PlayerId"].to_numpy(),
-            "temp": pd.to_numeric(bf_y["Temp"], errors="coerce").to_numpy(),
-            "auc": roc_auc_score(y, p),
-            "edge": log_loss(y, base) - log_loss(y, p),
-        }
+    sf_y = sf[(sf["Season"] == args.year) & ~sf["ShortGame"].fillna(False)]
+    gf_y = gf[gf["Season"] == args.year].dropna(subset=["total_runs"])
+
+    if args.paired:
+        count_preds = build_count_preds(art, bf_y, sf_y, gf_y)
+        run_paired(art, results, count_preds, tag, args.year, args.boot)
+        return
 
     section_confidence(results, args.boot)
     section_topn(results)
@@ -1061,11 +1297,8 @@ def main():
 
     summary = prop_summary(results)
 
-    sf_y = sf[(sf["Season"] == args.year) & ~sf["ShortGame"].fillna(False)]
     summary.update(section_strikeouts(sf_y, art))
     summary.update(section_count_heads(bf_y, sf_y, art))
-
-    gf_y = gf[gf["Season"] == args.year].dropna(subset=["total_runs"])
     summary.update(section_games(gf_y, art))
 
     if select:
@@ -1078,6 +1311,14 @@ def main():
     section_inseason(results)
 
     handle_baseline(summary, args.year, args.set_baseline, select=select)
+    if args.set_baseline:
+        comp = {"binary": build_binary_snapshot(results),
+                "count": build_count_preds(art, bf_y, sf_y, gf_y),
+                "features": sorted(declared_features(art))}
+        joblib.dump(comp, ART / f"eval_paired_{tag}{args.year}.joblib", compress=3)
+        print(f"  paired snapshot -> eval_paired_{tag}{args.year}.joblib "
+              f"({len(comp['binary'])} binary props + {len(comp['count'])} "
+              f"count heads, {len(comp['features'])} feature cols)")
 
     print("""
 How to read this:

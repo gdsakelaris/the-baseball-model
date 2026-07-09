@@ -130,6 +130,14 @@ _SB_FEATS = ["c_sb_pa_sh", "s_sb_pa_sh", "r7_sb_pa_sh", "r15_sb_pa_sh",
              "r30_sb_pa_sh", "d_sb_pa_sh", "c_sb_succ", "psb_sb27",
              "psb_stop", "tsb_sb_g", "tsb_stop"]
 _RUNRBI = ["c_r_pa_sh", "s_r_pa_sh", "c_rbi_pa_sh", "s_rbi_pa_sh"]
+# Productive/unproductive outs (features.SHRINK gidp_pa/sf_pa, 2026-07-09):
+# EB-shrunk career+season GIDP/PA and SF/PA rates. GIDP kills rallies -> hurts
+# both the batter's run and RBI, so it reaches run AND rbi; SF is a run-cashing
+# out (RBI without a hit) that says nothing about the batter scoring, so it
+# reaches rbi ONLY (run excludes _SF). Every other prop excludes _PRODOUT.
+_GIDP = ["c_gidp_pa_sh", "s_gidp_pa_sh"]
+_SF = ["c_sf_pa_sh", "s_sf_pa_sh"]
+_PRODOUT = _GIDP + _SF
 # NOTE: own H+R+RBI joint-threshold history (c/s/d_hrr{2,3}_g_sh, routed
 # here as _HRR_HIST to hrr2/hrr3/xhrr only, 2026-07-08) was BENCHED —
 # hrr2_ece 1.5x past band, AUC/edge/top10 flat everywhere; the features
@@ -142,6 +150,12 @@ _RUNRBI = ["c_r_pa_sh", "s_r_pa_sh", "c_rbi_pa_sh", "s_rbi_pa_sh"]
 # they carry ~the same information as the career rates (corr with targets
 # nearly identical). Computed in both paths, out of the superset.
 _CTX = ["ctx_ahead_obp", "ctx_behind_slg"]
+# rbi_opp_obp (full-order / deeper-order OBP of hitters ahead) BENCHED 2026-07-09
+# after three designs (0.5 & 0.7 full-order decay, 3rd-5th-ahead isolation) all
+# came back flat-to-slightly-negative on rbi/run/hrr — the order beyond the 2
+# men on adds nothing the model can't already infer from ctx_ahead_obp + own
+# rates + team offense. Frame + serving still COMPUTE it (features.RBI_OPP_AHEAD,
+# out of the superset); re-add here + to batter_feature_cols to re-enable.
 _OBP = ["c_obp", "s_obp"]
 _PWR = ["hrpt_score", "phrq_n", "phrq_ev_avg", "hrq_angle_avg",
         "bat_goao", "pit_goao"]              # power-quality / fly-ball
@@ -175,47 +189,78 @@ _PLATE = ["bd_wsw_c", "bd_wsw_d", "bd_chase_c", "bd_chase_d"]
 _SPD = ["bat_sprint", "bat_hp1b"]            # raw footspeed: SB + run only
 _DEF = ["opp_oaa"]                           # opponent defense: BABIP props
 _PSW = ["p_swstr_d"]                         # opposing starter whiff form
+_UMP = ["ump_k_pct", "ump_bb_pct"]           # HP-ump zone tendency: K/BB only
+# Multi-dimensional park factors (features._attach_context): as-of per-game
+# R/H/2B/TB rates at the venue — the offensive run-environment the lone HR
+# park factor (park_hr_pg, on every prop) can't carry for doubles/TB/runs.
+# Routed to the OFFENSIVE props only: excluded from bb, sb and the K heads
+# (_BK_EXC) below, where park scoring says nothing about a batter's whiffs.
+_PARK_OFF = ["park_r_pg", "park_h_pg", "park_2b_pg", "park_tb_pg"]
+# Statcast bat tracking = swing quality, a fundamental skill that touches
+# essentially every offensive outcome (power, contact/BABIP, whiff, and even
+# walk/steal propensity indirectly). Deliberately routed to ALL batter props
+# (no PROP_EXCLUDE entry) rather than pre-guessing which it helps: it is
+# INERT until ~2027 (2023+ coverage vs the <=2023 selection training window),
+# so broad routing costs nothing now and confounds nothing, and once it
+# activates the standard eval + strictly-not-worse rule prunes any prop it
+# actually dilutes (sb/bb the likeliest candidates) — empirically, not by
+# prior. Kept as a named group so that pruning is a one-line exclude later.
+_BAT = list(F.BAT_TRACK_COLS)
 
 # batter strikeouts: keep only K-flavored signal (k rates, plate discipline,
 # starter/bullpen whiff, arsenal) — everything else is dilution risk
 _BK_EXC = (_SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR + _HBF
-           + _PEN2 + _TLOC + _BIP_PWR + _BIP_HIT + _SPD + _DEF)
+           + _PEN2 + _TLOC + _BIP_PWR + _BIP_HIT + _SPD + _DEF + _PARK_OFF
+           + _PRODOUT)
 
 # Routing flips (2026-07-08), kept under the strictly-not-worse standard
 # (tsb precedent): hit+footspeed (4/4 metrics tilted positive on 2025),
 # run+plate-discipline (ece -.0022, top10 +.0109), rbi+Statcast-power
 # (auc +.0015, ece -.0027) — all within noise but principled and harmless.
 # tb2+footspeed REVERTED (ece +.0029, 0.97x band, for nothing).
+# _UMP (HP-ump zone tendency) reaches ONLY the K/BB props (bb, bk, bk2, and
+# the xbk head via bk's routing); every other batter prop excludes it.
+# _BAT (bat tracking) appears in NO exclude list -> it reaches every batter
+# prop (see the _BAT note above; inert until ~2027, pruned empirically then).
 PROP_EXCLUDE = {
-    "hr":    _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _SPD + _DEF,
-    # hit keeps footspeed (beat-out grounders, like single); hits2 stays
-    # speed-free (a 2-hit game is contact quality, not legs)
+    "hr":    _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _SPD + _DEF + _UMP
+             + _PRODOUT,
+    # hit keeps footspeed (beat-out grounders, like single). hits2 stays speed-
+    # free (2-hit game is contact, not legs — SPD tested 2026-07-09, flat).
+    # tb2 GAINED footspeed 2026-07-09 (KEPT: tb2 AUC +0.0009, xtb MAE +0.0012 —
+    # legs stretch singles / turn outs into extra total bases).
     "hit":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
-             + _BIP_PWR,
+             + _BIP_PWR + _UMP + _PRODOUT,
     "hits2": _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
-             + _BIP_PWR + _SPD,
-    "tb2":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _SPD,
-    # run keeps plate discipline (chase feeds OBP -> runs)
-    "run":   _SB_FEATS + _PWR + _XBH + _IBB + _BIP_PWR,
-    # rbi keeps Statcast power (own HR = automatic RBI; hard contact
-    # cashes runners) — box-score ISO alone lags it
-    "rbi":   _SB_FEATS + _PWR + _SPD + _PLATE,
+             + _BIP_PWR + _SPD + _UMP + _PRODOUT,
+    "tb2":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _UMP + _PRODOUT,
+    # run keeps plate discipline (chase feeds OBP -> runs); GIDP suppresses
+    # runs (batter erased), but SF cashes OTHERS' runs, not his -> exclude _SF
+    "run":   _SB_FEATS + _PWR + _XBH + _IBB + _BIP_PWR + _UMP + _SF,
+    # rbi keeps Statcast power (own HR = automatic RBI; hard contact cashes
+    # runners) — box-score ISO alone lags it. (_PWR + _PLATE tested 2026-07-09,
+    # both flat — reverted.) KEEPS _PRODOUT (GIDP kills RBI, SF is an RBI).
+    "rbi":   _SB_FEATS + _PWR + _SPD + _PLATE + _UMP,
+    # bb KEEPS _UMP (a tight zone drives walks)
     "bb":    _SB_FEATS + _RUNRBI + _CTX + _PWR + _XBH + _HBF + _PEN2 + _TLOC
-             + _BIP_PWR + _BIP_HIT + _SPD + _DEF,
+             + _BIP_PWR + _BIP_HIT + _SPD + _DEF + _PARK_OFF + _PRODOUT,
     "sb":    _VSH + _RUNRBI + _CTX + _OBP + _PWR + _XBH + _IBB + _PEN2
              + _TLOC + _HBF + _VLOC + _POS + _BIP_PWR + _BIP_HIT + _DEF
-             + _PLATE + _PSW,
+             + _PLATE + _PSW + _UMP + _PARK_OFF + _PRODOUT,
     # singles = contact + footspeed (beat-out grounders), no power groups
     "single": _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
-              + _BIP_PWR,
+              + _BIP_PWR + _UMP + _PRODOUT,
     # doubles = gap power + speed (stretching); HR-log quality stays out
-    "double": _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _PWR,
+    # (_PWR tested 2026-07-09, FAILED: double AUC -0.0017 — BIP_PWR already
+    # carries double's power, HR-log just diluted the weakest prop).
+    "double": _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _PWR + _UMP + _PRODOUT,
+    # bk/bk2 KEEP _UMP (a generous zone drives strikeouts)
     "bk":    _BK_EXC,
     "bk2":   _BK_EXC,
     # H+R+RBI is a broad, high-base-rate target (tb2-like robustness):
-    # only the steal columns clearly don't speak to it
-    "hrr2":  _SB_FEATS,
-    "hrr3":  _SB_FEATS,
+    # only the steal columns clearly don't speak to it; ump is zone-only
+    "hrr2":  _SB_FEATS + _UMP + _PRODOUT,
+    "hrr3":  _SB_FEATS + _UMP + _PRODOUT,
 }
 
 # batter prop -> (target column, description)
@@ -255,22 +300,32 @@ STACK_DONORS = {}
 # calibrators fit on the calibration year (predict.count_over). Batter heads
 # exist for the MEANS (xSO, xHRR) — their half-point lines are priced by the
 # calibrated binary heads above; starter heads price their own lines.
-# `exclude` names the PROP_EXCLUDE entry supplying the column routing.
+# `exclude` names the PROP_EXCLUDE entry supplying the column routing (batter
+# heads); `st_exclude` drops columns from the shared starts col set (starter
+# heads) — used to keep the HP-ump zone tendency on K/walks but off the
+# outs/hits/earned-run heads it doesn't speak to.
 COUNT_HEADS = {
     "xbk":  dict(frame="bat", target="bk_count", exclude="bk",
                  lines=[0.5, 1.5, 2.5], desc="batter strikeouts"),
+    # xhrr/xtb run ~2x Poisson variance (over-dispersed); a Tweedie objective
+    # (power 1.3) models that heavier tail in the mean instead of only in the
+    # post-hoc dispersion. The other heads stay Poisson (outs/xbk are UNDER
+    # Poisson variance — Tweedie would push the wrong way).
     "xhrr": dict(frame="bat", target="hrr_count", exclude="hrr2",
-                 lines=[1.5, 2.5, 3.5], desc="hits+runs+RBIs"),
+                 tweedie=1.3, lines=[1.5, 2.5, 3.5], desc="hits+runs+RBIs"),
     "xtb":  dict(frame="bat", target="tb_count", exclude="tb2",
-                 lines=[1.5, 2.5, 3.5], desc="total bases"),
+                 tweedie=1.3, lines=[1.5, 2.5, 3.5], desc="total bases"),
     "outs": dict(frame="starts", target="y_outs", exclude=None,
+                 st_exclude=_UMP,
                  lines=[14.5, 15.5, 16.5, 17.5, 18.5],
                  desc="starter outs recorded"),
     "pbb":  dict(frame="starts", target="y_pbb", exclude=None,
                  lines=[0.5, 1.5, 2.5], desc="starter walks allowed"),
     "pha":  dict(frame="starts", target="y_pha", exclude=None,
+                 st_exclude=_UMP,
                  lines=[3.5, 4.5, 5.5, 6.5], desc="starter hits allowed"),
     "per":  dict(frame="starts", target="y_per", exclude=None,
+                 st_exclude=_UMP,
                  lines=[1.5, 2.5, 3.5, 4.5], desc="starter earned runs"),
 }
 
@@ -448,18 +503,28 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
 
 
 def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
-                n_bags=1):
+                n_bags=1, tweedie_power=None):
+    """Poisson (default) count regression, or Tweedie when tweedie_power is set
+    (a compound Poisson-Gamma objective, variance power in (1,2)). Tweedie lets
+    the MEAN model an over-dispersed right tail directly — total bases / H+R+RBI
+    run ~2x Poisson variance — instead of leaning entirely on the post-hoc
+    cal-year dispersion. Serving is unchanged: .predict() still returns E[y]."""
     tr = df[df["Season"].isin(train_yrs)]
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr].copy()
+    tweedie = tweedie_power is not None
     models = []
     for b in range(n_bags):
         p = dict(LGB_POIS)
+        if tweedie:
+            p = dict(p, objective="tweedie",
+                     tweedie_variance_power=tweedie_power)
         if b:                       # bag 0 = the incumbent default seed
             p["random_state"] = b
         m = lgb.LGBMRegressor(**p)
         m.fit(tr[cols], tr[target],
-              eval_set=[(ca[cols], ca[target])], eval_metric="poisson",
+              eval_set=[(ca[cols], ca[target])],
+              eval_metric=("tweedie" if tweedie else "poisson"),
               callbacks=[lgb.early_stopping(150, verbose=False)])
         models.append(m)
     model = F.MeanBag(models) if n_bags > 1 else models[0]
@@ -569,7 +634,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         frame = bf if ch["frame"] == "bat" else sf
         cols = ([c for c in bat_cols
                  if c not in PROP_EXCLUDE.get(ch["exclude"], ())]
-                if ch["frame"] == "bat" else st_cols)
+                if ch["frame"] == "bat"
+                else [c for c in st_cols if c not in ch.get("st_exclude", ())])
         tr_mean = frame.loc[frame["Season"].isin(train_yrs),
                             ch["target"]].mean()
 
@@ -592,7 +658,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
 
         model, m = fit_poisson(frame, cols, ch["target"], train_yrs, cal_yr,
                                test_yr, cname.upper(), cbase,
-                               n_bags=COUNT_BAGS.get(cname, 1))
+                               n_bags=COUNT_BAGS.get(cname, 1),
+                               tweedie_power=ch.get("tweedie"))
         ca = frame[frame["Season"] == cal_yr]
         mu_cal = model.predict(ca[cols])
         y_cal = ca[ch["target"]].to_numpy()
@@ -687,6 +754,73 @@ def suite_years(bf, min_rows=2000):
     return seasons[:-2], seasons[-2], seasons[-1]
 
 
+# --------- routing audit: features a prop's siblings get but it doesn't --------
+# The batter frame is a superset; PROP_EXCLUDE drops groups from each prop. This
+# audit prints the group x prop routing and flags "sibling gaps" — a group most
+# of a prop-family receives but some members exclude — so Agenda-A candidates
+# surface automatically instead of by hand. It changes nothing; it just
+# generates a list to run through evaluate_deep.py --paired.
+FEATURE_GROUPS = {
+    "SB": _SB_FEATS, "RUNRBI": _RUNRBI, "CTX": _CTX, "OBP": _OBP, "PWR": _PWR,
+    "XBH": _XBH, "IBB": _IBB, "VSH": _VSH, "VLOC": _VLOC, "POS": _POS,
+    "PEN2": _PEN2, "TLOC": _TLOC, "HBF": _HBF, "BIP_PWR": _BIP_PWR,
+    "BIP_HIT": _BIP_HIT, "PLATE": _PLATE, "SPD": _SPD, "DEF": _DEF,
+    "PSW": _PSW, "UMP": _UMP, "PARK_OFF": _PARK_OFF, "BAT": _BAT,
+}
+
+# Semantic clusters of batter props. A group some members get and others exclude
+# is flagged as a testable gap. Props may sit in several families (tb2 is both a
+# contact and an extra-base prop) — each family is judged on its own.
+PROP_FAMILIES = {
+    "contact/hits":   ["hit", "hits2", "single", "tb2", "double"],
+    "extra-base":     ["hr", "tb2", "double"],
+    "run-production": ["run", "rbi", "hrr2", "hrr3"],
+    "K/discipline":   ["bb", "bk", "bk2"],
+}
+
+# Deliberately minimal props (dilution-sensitive — see the _SB_FEATS/_BK_EXC
+# notes): a gap whose only missing members are these is by design, so the audit
+# suppresses it to keep the candidate list about genuinely under-fed props.
+LEAN_PROPS = {"sb", "bk", "bk2"}
+
+
+def _group_status(prop, cols):
+    """incl (prop trains on the whole group) / excl (none) / part (some)."""
+    ex = set(PROP_EXCLUDE.get(prop, ()))
+    kept = sum(c not in ex for c in cols)
+    return "incl" if kept == len(cols) else "excl" if kept == 0 else "part"
+
+
+def audit_routing():
+    props = list(PROPS)
+    print("=== Feature-group routing (batter props): ok = trains on it, "
+          ". = excluded, ~ = partial ===\n")
+    print("  " + "group".ljust(9) + "".join(p[:4].rjust(6) for p in props))
+    mark = {"incl": "ok", "excl": ".", "part": "~"}
+    for g, cols in FEATURE_GROUPS.items():
+        print("  " + g.ljust(9)
+              + "".join(mark[_group_status(p, cols)].rjust(6) for p in props))
+
+    print("\n=== Sibling routing gaps: a group most of a family gets, but "
+          "some members exclude ===")
+    print("  (candidates to test via evaluate_deep.py --paired; nothing is "
+          "applied here)\n")
+    found = 0
+    for fam, members in PROP_FAMILIES.items():
+        for g, cols in FEATURE_GROUPS.items():
+            got = [p for p in members if _group_status(p, cols) == "incl"]
+            missing = [p for p in members if _group_status(p, cols) == "excl"
+                       and p not in LEAN_PROPS]
+            if got and missing:
+                found += 1
+                print(f"  [{fam:<14}] {g:<8} has: {', '.join(got):<26} "
+                      f"GAP: {', '.join(missing)}")
+    if not found:
+        print("  (no sibling gaps — every group is all-in or all-out per family)")
+    print("\n  Count heads inherit their base prop's routing (xtb<-tb2, "
+          "xhrr<-hrr2, xbk<-bk), so a base-prop gap propagates to its head.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true",
@@ -696,7 +830,15 @@ def main():
                          "back from shipping) — the fast iteration loop. "
                          "The default run trains it too, then the shipping "
                          "models on top.")
+    ap.add_argument("--audit-routing", action="store_true",
+                    help="print the feature-group x prop routing matrix and "
+                         "flag sibling gaps (Agenda-A candidates), then exit; "
+                         "trains nothing")
     args = ap.parse_args()
+
+    if args.audit_routing:
+        audit_routing()
+        return
 
     cache = ART / "frames.joblib"
     if cache.exists() and not args.rebuild:

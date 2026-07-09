@@ -71,6 +71,8 @@ JOB_FILES = {
                           "mlb_pitch_daily_batters.csv"],
     "scrape_sprint_speed.py": ["mlb_sprint_speed.csv"],
     "scrape_oaa.py": ["mlb_oaa.csv"],
+    "scrape_umpires.py": ["mlb_umpires.csv"],
+    "scrape_bat_tracking.py": ["mlb_bat_tracking.csv"],
 }
 
 

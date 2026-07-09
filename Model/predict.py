@@ -208,6 +208,9 @@ class Predictor:
         park = s.park(spec["venue"], date)
         env = s.league_env(date)
 
+        # HP-umpire tendency: one game-level value shared by every batter
+        ump = s.ump_feats(spec.get("hp_ump_id"), date)
+
         rows, meta = [], []
         sides = [("away", spec["away_team"], spec["home_team"],
                   spec["away_lineup"], spec["home_starter"], 0),
@@ -238,7 +241,7 @@ class Predictor:
                 bio = s.bio(pid)
                 row = {"slot": slot, "Home": home, "Season": season,
                        "month": date.month,
-                       "xpa_slot": s.xpa_slot(slot, date),
+                       "xpa_slot": s.xpa_slot(slot, date), **ump,
                        **b, **st_feats, **toff,
                        **toff_loc, **pen, **pen_hl, **pen_fat, **tsb, **phrq,
                        **pbip, **s.bip_batter(pid, date),
@@ -298,6 +301,11 @@ class Predictor:
                     r[feat] = _nmean(
                         [vmap.get(((r["slot"] + off - 1) % 9) + 1)
                          for off in offs])
+            # rbi opportunity: full-order decayed OBP of the hitters ahead
+            # (mirrors the vectorized rbi_opp_obp; features.RBI_OPP_AHEAD)
+            obp_by_slot = {r["slot"]: r.get("_obpp") for r in side_rows}
+            for r in side_rows:
+                r["rbi_opp_obp"] = F.rbi_opp_from_slots(obp_by_slot, r["slot"])
             rows.extend(side_rows)
         df = pd.DataFrame(rows)
         mdf = pd.DataFrame(meta)
@@ -322,6 +330,7 @@ class Predictor:
         wx = self._weather(spec)
         park = s.park(spec["venue"], date)
         env = s.league_env(date)
+        ump = s.ump_feats(spec.get("hp_ump_id"), date)
         rows, meta = [], []
         for pid, team, opp, home in [
                 (spec["away_starter"], spec["away_team"], spec["home_team"], 0),
@@ -332,7 +341,7 @@ class Predictor:
             f = s.starter_feats(pid, date, season)
             vs = s.team_offense(opp, season, date, prefix="vs")
             row = {"Season": season, "month": date.month, "Home": home,
-                   **f, **vs, **park, **wx, **env,
+                   **f, **vs, **park, **wx, **env, **ump,
                    **s.pd_pitcher_feats(pid, date)}
             F.add_pit_trends(row)
             # the starter's own arsenal, K-model view (same helper as training)
@@ -1386,6 +1395,13 @@ def spec_from_game(stores, gamepk):
         m = gp[gp["Team"] == team]
         return int(m["PlayerId"].iloc[0]) if len(m) else None
 
+    hp_ump = None                     # real HP ump, so replay/selftest match
+    um = r.get("umps")
+    if um is not None:
+        mu = um[um["GamePk"] == gamepk]
+        if len(mu) and pd.notna(mu["HpUmpId"].iloc[0]):
+            hp_ump = int(mu["HpUmpId"].iloc[0])
+
     return {
         "date": str(g["Date"].date()), "away_team": g["AwayTeam"],
         "home_team": g["HomeTeam"], "venue": g["Venue"],
@@ -1396,6 +1412,7 @@ def spec_from_game(stores, gamepk):
         "home_starter": starter(g["HomeTeam"]),
         "away_lineup": lineup(g["AwayTeam"]),
         "home_lineup": lineup(g["HomeTeam"]),
+        "hp_ump_id": hp_ump,
     }
 
 

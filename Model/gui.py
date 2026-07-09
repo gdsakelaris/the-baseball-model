@@ -150,6 +150,14 @@ class App(tk.Tk):
                              set(games.loc[games["Season"] == season, "Venue"]))
         self.wind_dirs = sorted(games["WindDir"].dropna().unique())
         self.conditions = sorted(games["Condition"].dropna().unique())
+        # HP-umpire name -> HpUmpId, for the form's editable umpire field.
+        umps = self.pred.stores.raw.get("umps")
+        self.ump_name_to_id = {}
+        if umps is not None:
+            u = umps.dropna(subset=["HpUmp", "HpUmpId"])
+            self.ump_name_to_id = {n: int(i) for n, i in
+                                   zip(u["HpUmp"], u["HpUmpId"])}
+        self.ump_names = sorted(self.ump_name_to_id)
         # home team -> default venue
         self.team_park = {full_abbrev.get(t): b for b, t in
                           zip(parks["Ballpark"], parks["Team"]) if full_abbrev.get(t)}
@@ -159,6 +167,7 @@ class App(tk.Tk):
         self.cb_venue["values"] = self.venues
         self.cb_wdir["values"] = self.wind_dirs
         self.cb_cond["values"] = self.conditions
+        self.cb_ump["values"] = self.ump_names
         self.btn_predict["state"] = "normal"
         self.status.set("Ready. Pick teams, fill lineups (or auto-fill), Predict.")
         self._load_todays_file(silent=True)
@@ -352,6 +361,9 @@ class App(tk.Tk):
         self.sp_wind.set(6)
         self.cb_wdir = add(7, "Wind dir", ttk.Combobox(top, width=14))
         self.cb_cond = add(8, "Condition", ttk.Combobox(top, width=14))
+        # Editable; leave blank for a neutral-ump prediction. Known names
+        # resolve to an HpUmpId in _collect_spec; an unknown name -> no id.
+        self.cb_ump = add(9, "HP Umpire", ttk.Combobox(top, width=18))
 
         self.cb_away.bind("<<ComboboxSelected>>", lambda e: self._team_changed("away"))
         self.cb_home.bind("<<ComboboxSelected>>", lambda e: self._team_changed("home"))
@@ -510,6 +522,7 @@ class App(tk.Tk):
             widget.set("" if v is None else v)
         self.cb_wdir.set(spec.get("wind_dir") or "")
         self.cb_cond.set(spec.get("condition") or "")
+        self.cb_ump.set(spec.get("hp_ump") or "")
 
         names = spec.get("names") or {}
         for side in ("away", "home"):
@@ -550,6 +563,9 @@ class App(tk.Tk):
                 "temp": num(self.sp_temp, "temperature"),
                 "wind_speed": num(self.sp_wind, "wind speed"),
                 "wind_dir": self.cb_wdir.get(), "condition": self.cb_cond.get()}
+        ump = self.cb_ump.get().strip()
+        spec["hp_ump"] = ump or None
+        spec["hp_ump_id"] = self.ump_name_to_id.get(ump)   # None if unknown
         for side, team in (("away", away), ("home", home)):
             w = self.side_widgets[side]
             st = w["starter"].get().strip()
