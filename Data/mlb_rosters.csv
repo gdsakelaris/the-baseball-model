@@ -83,21 +83,21 @@
 664991,Grant Wolfram,Baltimore Orioles,Bullpen,L,L,"6' 7""",250,12/12/1996
 666974,Yennier Cano,Baltimore Orioles,Bullpen,R,R,"6' 4""",245,03/09/1994
 552640,Andrew Kittredge,Baltimore Orioles,Bullpen,R,R,"6' 1""",235,03/17/1990
-669211,Keegan Akin,Baltimore Orioles,Bullpen,L,L,"6' 0""",235,04/01/1995
 544150,Albert Suárez,Baltimore Orioles,Bullpen,R,R,"6' 3""",235,10/08/1989
-642585,Félix Bautista,Baltimore Orioles,Bullpen,R,R,"6' 8""",285,06/20/1995
-682274,Yaramil Hiraldo,Baltimore Orioles,Bullpen,R,R,"6' 1""",220,12/31/1995
-681882,Colin Selby,Baltimore Orioles,Bullpen,R,R,"6' 2""",215,10/24/1997
-675919,Nick Raquet,Baltimore Orioles,Bullpen,R,L,"6' 0""",215,12/12/1995
 689296,Anthony Nunez,Baltimore Orioles,Bullpen,S,R,"6' 2""",220,07/10/2001
+675919,Nick Raquet,Baltimore Orioles,Bullpen,R,L,"6' 0""",215,12/12/1995
+682274,Yaramil Hiraldo,Baltimore Orioles,Bullpen,R,R,"6' 1""",220,12/31/1995
+669211,Keegan Akin,Baltimore Orioles,Bullpen,L,L,"6' 0""",235,04/01/1995
+642585,Félix Bautista,Baltimore Orioles,Bullpen,R,R,"6' 8""",285,06/20/1995
+681882,Colin Selby,Baltimore Orioles,Bullpen,R,R,"6' 2""",215,10/24/1997
 668939,Adley Rutschman,Baltimore Orioles,Catcher,S,R,"6' 1""",230,02/06/1998
 694212,Samuel Basallo,Baltimore Orioles,Catcher,L,R,"6' 4""",250,08/13/2004
 624413,Pete Alonso,Baltimore Orioles,First Base,R,R,"6' 3""",245,12/07/1994
 691723,Coby Mayo,Baltimore Orioles,First Base,R,R,"6' 5""",225,12/10/2001
 663624,Ryan Mountcastle,Baltimore Orioles,First Base,R,R,"6' 3""",230,02/18/1997
 702616,Jackson Holliday,Baltimore Orioles,Second Base,L,R,"5' 11""",200,12/04/2003
-677942,Blaze Alexander,Baltimore Orioles,Second Base,R,R,"5' 11""",200,06/11/1999
 669236,Jeremiah Jackson,Baltimore Orioles,Second Base,R,R,"5' 11""",200,03/26/2000
+677942,Blaze Alexander,Baltimore Orioles,Second Base,R,R,"5' 11""",200,06/11/1999
 676059,Jordan Westburg,Baltimore Orioles,Second Base,R,R,"6' 1""",215,02/18/1999
 683002,Gunnar Henderson,Baltimore Orioles,Shortstop,L,R,"6' 3""",230,06/29/2001
 621493,Taylor Ward,Baltimore Orioles,Left Field,R,R,"6' 0""",205,12/14/1993
@@ -410,7 +410,6 @@
 670224,Kameron Misner,Kansas City Royals,Left Field,L,L,"6' 3""",220,01/09/1998
 664728,Kyle Isbel,Kansas City Royals,Center Field,L,R,"5' 10""",190,03/03/1997
 516782,Starling Marte,Kansas City Royals,Right Field,R,R,"6' 0""",195,10/09/1988
-670231,John Rave,Kansas City Royals,Right Field,L,L,"5' 10""",194,12/30/1997
 579328,Yusei Kikuchi,Los Angeles Angels,Rotation,L,L,"6' 0""",210,06/17/1991
 667755,José Soriano,Los Angeles Angels,Rotation,R,R,"6' 3""",220,10/20/1998
 672282,Reid Detmers,Los Angeles Angels,Rotation,L,L,"6' 2""",210,07/08/1999
@@ -434,7 +433,6 @@
 694384,Nolan Schanuel,Los Angeles Angels,First Base,L,R,"6' 2""",220,02/14/2002
 687093,Vaughn Grissom,Los Angeles Angels,First Base,R,R,"6' 2""",210,01/05/2001
 672724,Oswald Peraza,Los Angeles Angels,First Base,R,R,"5' 11""",200,06/15/2000
-622268,Donovan Walton,Los Angeles Angels,Second Base,L,R,"5' 9""",190,05/25/1994
 624428,Adam Frazier,Los Angeles Angels,Second Base,L,R,"5' 10""",190,12/14/1991
 694203,Denzer Guzman,Los Angeles Angels,Third Base,R,R,"6' 1""",190,02/08/2004
 660162,Yoán Moncada,Los Angeles Angels,Third Base,S,R,"6' 0""",220,05/27/1995
@@ -594,7 +592,8 @@
 673540,Kodai Senga,New York Mets,Bullpen,L,R,"6' 1""",202,01/30/1993
 681810,Austin Warren,New York Mets,Bullpen,R,R,"6' 0""",170,02/05/1996
 672335,Cionel Pérez,New York Mets,Bullpen,R,L,"6' 0""",175,04/21/1996
-676910,Matt Seelinger,New York Mets,Bullpen,R,R,"6' 3""",190,04/19/1995
+668964,Tobias Myers,New York Mets,Bullpen,R,R,"6' 1""",223,08/05/1998
+675540,Xzavion Curry,New York Mets,Bullpen,R,R,"6' 0""",195,07/27/1998
 682626,Francisco Alvarez,New York Mets,Catcher,R,R,"5' 10""",233,11/19/2001
 620443,Luis Torrens,New York Mets,Catcher,R,R,"5' 11""",217,05/02/1996
 676724,Jared Young,New York Mets,First Base,L,R,"6' 2""",200,07/09/1995
@@ -680,9 +679,9 @@
 689147,Orion Kerkering,Philadelphia Phillies,Bullpen,R,R,"6' 2""",204,04/04/2001
 642152,Lou Trivino III,Philadelphia Phillies,Bullpen,R,R,"6' 5""",232,10/01/1991
 621383,Tanner Banks,Philadelphia Phillies,Bullpen,R,L,"6' 1""",205,10/24/1991
+660604,Alan Rangel,Philadelphia Phillies,Bullpen,R,R,"6' 2""",170,08/21/1997
 676661,Max Lazar,Philadelphia Phillies,Bullpen,R,R,"6' 1""",200,06/03/1999
 680742,Jonathan Bowlan,Philadelphia Phillies,Bullpen,R,R,"6' 6""",240,12/01/1996
-686751,Seth Johnson,Philadelphia Phillies,Bullpen,R,R,"6' 1""",205,09/19/1998
 592663,J.T. Realmuto,Philadelphia Phillies,Catcher,R,R,"6' 0""",212,03/18/1991
 665561,Rafael Marchán,Philadelphia Phillies,Catcher,S,R,"5' 9""",170,02/25/1999
 596117,Garrett Stubbs,Philadelphia Phillies,Catcher,L,R,"5' 9""",170,05/26/1993
@@ -714,6 +713,7 @@
 676702,Hunter Stratton,Pittsburgh Pirates,Bullpen,R,R,"6' 4""",225,11/17/1996
 680779,Henry Davis,Pittsburgh Pirates,Catcher,R,R,"5' 11""",225,09/21/1999
 682848,Endy Rodríguez,Pittsburgh Pirates,Catcher,S,R,"6' 0""",207,05/26/2000
+804668,Rafael Flores Jr.,Pittsburgh Pirates,Catcher,R,R,"6' 3""",232,11/07/2000
 687462,Spencer Horwitz,Pittsburgh Pirates,First Base,L,R,"5' 10""",204,11/14/1997
 656811,Ryan O'Hearn,Pittsburgh Pirates,First Base,L,L,"6' 2""",220,07/26/1993
 669707,Jared Triolo,Pittsburgh Pirates,First Base,R,R,"6' 3""",212,02/08/1998
@@ -744,10 +744,10 @@
 673513,Yuki Matsui,San Diego Padres,Bullpen,L,L,"5' 8""",165,10/30/1995
 606996,Kyle Hart,San Diego Padres,Bullpen,L,L,"6' 5""",200,11/23/1992
 699134,Bradgley Rodriguez,San Diego Padres,Bullpen,R,R,"6' 1""",160,11/16/2003
+666745,Jhony Brito,San Diego Padres,Bullpen,R,R,"6' 2""",210,02/17/1998
 669093,Jeremiah Estrada,San Diego Padres,Bullpen,S,R,"6' 1""",185,11/01/1998
 688158,David Morgan,San Diego Padres,Bullpen,R,R,"6' 0""",185,10/26/1999
 592094,Jason Adam,San Diego Padres,Bullpen,R,R,"6' 3""",229,08/04/1991
-666745,Jhony Brito,San Diego Padres,Bullpen,R,R,"6' 2""",210,02/17/1998
 669134,Luis Campusano,San Diego Padres,Catcher,R,R,"5' 10""",232,09/29/1998
 660710,Rodolfo Durán,San Diego Padres,Catcher,R,R,"5' 8""",181,02/19/1998
 666023,Freddy Fermin,San Diego Padres,Catcher,R,R,"5' 10""",200,05/16/1995
@@ -756,6 +756,7 @@
 609280,Miguel Andujar,San Diego Padres,First Base,R,R,"6' 0""",211,03/02/1995
 630105,Jake Cronenworth,San Diego Padres,First Base,L,R,"5' 11""",187,01/21/1994
 823550,Sung-Mun Song,San Diego Padres,Second Base,L,R,"6' 0""",194,08/29/1996
+650859,Luis Rengifo,San Diego Padres,Second Base,S,R,"5' 9""",204,02/26/1997
 665487,Fernando Tatis Jr.,San Diego Padres,Second Base,R,R,"6' 3""",217,01/02/1999
 669392,Samad Taylor,San Diego Padres,Second Base,R,R,"5' 8""",160,07/11/1998
 592518,Manny Machado,San Diego Padres,Third Base,R,R,"6' 2""",218,07/06/1992
@@ -784,6 +785,7 @@
 701852,Drew Cavanaugh,San Francisco Giants,Catcher,L,R,"6' 0""",219,01/27/2002
 691740,Daniel Susac,San Francisco Giants,Catcher,R,R,"6' 5""",210,05/14/2001
 606992,Eric Haase,San Francisco Giants,Catcher,R,R,"5' 10""",201,12/18/1992
+683679,Jesus Rodriguez,San Francisco Giants,Catcher,R,R,"5' 10""",201,04/23/2002
 646240,Rafael Devers,San Francisco Giants,First Base,L,R,"6' 0""",235,10/24/1996
 669477,Casey Schmitt,San Francisco Giants,First Base,R,R,"6' 0""",215,03/01/1999
 805811,Bryce Eldridge,San Francisco Giants,First Base,L,R,"6' 7""",251,10/20/2004
@@ -838,10 +840,11 @@
 666277,George Soriano,St. Louis Cardinals,Bullpen,R,R,"6' 2""",210,03/24/1999
 592773,Ryne Stanek,St. Louis Cardinals,Bullpen,R,R,"6' 4""",226,07/26/1991
 677865,Justin Bruihl,St. Louis Cardinals,Bullpen,L,L,"6' 2""",215,06/26/1997
+669145,Bruce Zimmermann,St. Louis Cardinals,Bullpen,L,L,"6' 3""",236,02/09/1995
 691008,Max Rajcic,St. Louis Cardinals,Bullpen,R,R,"6' 0""",240,08/03/2001
 694335,Matt Svanson,St. Louis Cardinals,Bullpen,R,R,"6' 5""",235,01/31/1999
-694363,Jared Shuster,St. Louis Cardinals,Bullpen,L,L,"6' 3""",220,08/03/1998
 700669,Gordon Graceffo,St. Louis Cardinals,Bullpen,R,R,"6' 4""",220,03/17/2000
+703725,Luis Gastelum,St. Louis Cardinals,Bullpen,R,R,"6' 2""",175,09/27/2001
 671056,Iván Herrera,St. Louis Cardinals,Catcher,R,R,"5' 11""",220,06/01/2000
 699625,Jimmy Crooks,St. Louis Cardinals,Catcher,L,R,"6' 0""",230,07/19/2001
 686780,Pedro Pagés,St. Louis Cardinals,Catcher,R,R,"5' 11""",245,09/17/1998

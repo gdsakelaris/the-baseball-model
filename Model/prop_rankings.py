@@ -46,33 +46,33 @@ ART = Path(__file__).resolve().parent / "artifacts"
 # exactly as the workbook names it — nothing is ranked that the Excel does
 # not display, and nothing displayed is missing.
 BIN_NAMES = {  # Batter Props sheet, probability columns
-    "sb":     "Batter Props 'SB': 1+ stolen base",
-    "hr":     "Batter Props 'HR': 1+ home run",
-    "bb":     "Batter Props 'BB': 1+ walk",
-    "bk":     "Batter Props 'K': 1+ strikeout by the batter",
-    "bk2":    "Batter Props '2+ K': 2+ strikeouts by the batter",
-    "hit":    "Batter Props 'Hit': 1+ hit",
-    "hits2":  "Batter Props '2+ Hits'",
-    "single": "Batter Props 'Single': 1+ single",
-    "double": "Batter Props 'Double': 1+ double",
-    "tb2":    "Batter Props '2+ TB': 2+ total bases",
-    "run":    "Batter Props 'Run': scores a run",
-    "rbi":    "Batter Props 'RBI': 1+ run batted in",
-    "hrr2":   "Batter Props 'H+R+RBI 2+'",
-    "hrr3":   "Batter Props 'H+R+RBI 3+'",
+    "sb":     "Batter SB",
+    "hr":     "Batter HR",
+    "bb":     "Batter BB",
+    "bk":     "Batter K",
+    "bk2":    "Batter 2+ K",
+    "hit":    "Batter Hit",
+    "hits2":  "Batter 2+ Hits",
+    "single": "Batter Single",
+    "double": "Batter Double",
+    "tb2":    "Batter 2+ TB",
+    "run":    "Batter Run",
+    "rbi":    "Batter RBI",
+    "hrr2":   "Batter H+R+RBI 2+",
+    "hrr3":   "Batter H+R+RBI 3+",
 }
 # Expected-count columns and their O/U line families, scored across the
 # full calibrated line set each column prices.
 CNT_MARKETS = {
-    "k":     "Pitching Props 'xK' + 'K > x': starter strikeouts O/U",
-    "outs":  "Pitching Props 'xOuts' + 'Outs > x': starter outs O/U",
-    "pha":   "Pitching Props 'xHits' + 'Hits > x': hits allowed O/U",
-    "pbb":   "Pitching Props 'xBB' + 'BB > x': walks allowed O/U",
-    "per":   "Pitching Props 'xER' + 'ER > x': earned runs O/U",
-    "xbk":   "Batter Props 'xSO': expected batter strikeouts",
-    "xtb":   "Batter Props 'xTB': expected total bases",
-    "xhrr":  "Batter Props 'xHRR': expected hits+runs+RBIs",
-    "total": "Games 'Total Runs' + 'Runs > x': game total O/U",
+    "k":     "Pitcher xK + K > x",
+    "outs":  "Pitcher xOuts + Outs > x",
+    "pha":   "Pitcher xHits + Hits > x",
+    "pbb":   "Pitcher xBB + BB > x",
+    "per":   "Pitcher xER + ER > x",
+    "xbk":   "Batter xSO",
+    "xtb":   "Batter xTB",
+    "xhrr":  "Batter xHRR",
+    "total": "Game Total Runs + Runs > x",
 }
 
 

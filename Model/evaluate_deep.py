@@ -1121,6 +1121,34 @@ def paired_day_bootstrap(dates, y, base_val, cand_val, kind, n_boot, seed=0):
             float(np.percentile(a, 97.5)))
 
 
+# The Model sources that define what a train run produces (train imports
+# features + predict + recalibrate; predict imports recalibrate). Their md5s
+# are written to baseline_code_fp.json at --set-baseline so the daily
+# update_all --retrain can tell "shipped code" from "experiment in flight"
+# and stand down rather than re-baseline a candidate as its own reference.
+CODE_FP_FILES = ("features.py", "train.py", "predict.py", "recalibrate.py")
+
+
+def _code_fingerprint():
+    import hashlib
+    here = Path(__file__).resolve().parent
+    return {f: hashlib.md5((here / f).read_bytes()).hexdigest()
+            for f in CODE_FP_FILES if (here / f).exists()}
+
+
+def _data_fingerprint():
+    """(name, size, mtime) for every frame-feeding Data/*.csv — written into
+    the paired snapshot so run_paired can refuse a contaminated read. A daily
+    scrape rewrites the CSVs; scoring a candidate on refreshed data against a
+    baseline snapshotted on the old data conflates data drift with the change
+    under test (every prop moves a little, even ones the change can't reach —
+    2026-07-09 park-factor read). mlb_odds.csv is grading-only, never a frame
+    input, so it can't contaminate a paired read and is exempt."""
+    return sorted((p.name, p.stat().st_size, int(p.stat().st_mtime))
+                  for p in F.DATA_DIR.glob("*.csv")
+                  if p.name != "mlb_odds.csv")
+
+
 def run_paired(art, results, count_preds, tag, year, n_boot):
     """Print the paired keep/bench verdict against the --set-baseline snapshot,
     plus the ② feature-usage gate for columns added since that snapshot."""
@@ -1134,6 +1162,23 @@ def run_paired(art, results, count_preds, tag, year, n_boot):
               f"\n  (--set-baseline now also writes the per-row paired snapshot.)")
         return
     comp = joblib.load(path)
+    if comp.get("data_fp") is not None:
+        base = {x[0]: tuple(x[1:]) for x in comp["data_fp"]}
+        now = {x[0]: tuple(x[1:]) for x in _data_fingerprint()}
+        changed = sorted(k for k in base.keys() | now.keys()
+                         if base.get(k) != now.get(k))
+        if changed:
+            pre = "" if tag == "select_" else "--confirm "
+            print("  !! STALE BASELINE — Data/*.csv changed since the snapshot was")
+            print("  !! written (a scrape ran). This read would conflate data drift")
+            print("  !! with the change under test, so it is SKIPPED. Re-baseline:")
+            print("  !!   1. set the working tree back to the shipped code")
+            print("  !!   2. python Model/train.py")
+            print(f"  !!   3. python Model/evaluate_deep.py {pre}--set-baseline")
+            print("  !!   4. restore the candidate, retrain, re-run --paired")
+            print(f"  !! changed: {', '.join(changed[:8])}"
+                  + (f" (+{len(changed) - 8} more)" if len(changed) > 8 else ""))
+            return
     rows = []
     for name, r in results.items():
         if name not in comp.get("binary", {}):
@@ -1314,11 +1359,14 @@ def main():
     if args.set_baseline:
         comp = {"binary": build_binary_snapshot(results),
                 "count": build_count_preds(art, bf_y, sf_y, gf_y),
-                "features": sorted(declared_features(art))}
+                "features": sorted(declared_features(art)),
+                "data_fp": _data_fingerprint()}
         joblib.dump(comp, ART / f"eval_paired_{tag}{args.year}.joblib", compress=3)
         print(f"  paired snapshot -> eval_paired_{tag}{args.year}.joblib "
               f"({len(comp['binary'])} binary props + {len(comp['count'])} "
               f"count heads, {len(comp['features'])} feature cols)")
+        (ART / "baseline_code_fp.json").write_text(
+            json.dumps(_code_fingerprint(), indent=1))
 
     print("""
 How to read this:

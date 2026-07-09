@@ -149,19 +149,33 @@ def _side(name):
 
 
 def make_resolver(idx, home_abbr, away_abbr):
-    """name -> (PlayerId, team_abbr). An exact (club, name) hit on either team
-    gives the player's REAL team; a globally-unique name still resolves the
-    PlayerId but leaves the team unknown (None) rather than guessing it (the
-    prop outcome doesn't say which club the player is on)."""
-    by_team, by_name = idx
+    """name -> (PlayerId, team_abbr) via the layered build_name_index tiers.
+    A team-scoped hit (exact / collapsed / last-name+first-initial) on either
+    club gives the player's REAL team; a globally-unique name still resolves
+    the PlayerId but leaves the team unknown (None) rather than guessing it
+    (the prop outcome doesn't say which club the player is on). Loose tiers
+    are consulted only when they land on a single pid, same as resolve()."""
     def r(name):
         n = norm_name(name)
+        if not n:
+            return None, None
+        toks = n.split()
+        c = "".join(toks)
         for ab in (home_abbr, away_abbr):
-            if ab and (ab, n) in by_team:
-                return by_team[(ab, n)], ab
-        pids = by_name.get(n)
-        if pids and len(pids) == 1:
-            return next(iter(pids)), None
+            if not ab:
+                continue
+            pid = idx["exact"].get((ab, n))
+            if pid is not None:
+                return pid, ab
+            for m, key in ((idx["team_col"], (ab, c)),
+                           (idx["team_lfi"], (ab, toks[-1], toks[0][0]))):
+                hit = m.get(key)
+                if hit and len(hit) == 1:
+                    return next(iter(hit)), ab
+        for m, key in ((idx["glob"], n), (idx["col"], c)):
+            hit = m.get(key)
+            if hit and len(hit) == 1:
+                return next(iter(hit)), None
         return None, None
     return r
 

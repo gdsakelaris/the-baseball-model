@@ -1315,8 +1315,9 @@ def _attach_context(rows, raw, team_tab, pen_tab, park_tab,
     rows["pen_era"] = rows["pen_cum_ER"] * 27 / rows["pen_cum_Outs"]
     # per-game venue rates over all PRIOR games, gated at 30 games so a new or
     # renamed park (Rate/Daikin) falls back to NaN. park_hr_pg reaches every
-    # batter prop (legacy); R/H/2B/TB route to the offensive props only
-    # (train._PARK_OFF).
+    # batter prop (legacy); R/H/2B/TB route to the offensive batter props
+    # (train._PARK_OFF), the starter run-environment heads (outs/pha/per; the
+    # K/walk heads drop them), and the team-runs model (2026-07-09).
     ok = rows["park_cum_n"] >= 30
     for stat, col in (("HR", "park_hr_pg"), ("R", "park_r_pg"),
                       ("H", "park_h_pg"), ("2B", "park_2b_pg"),
@@ -1952,6 +1953,11 @@ def starts_feature_cols():
             "lu_wsw", "lu_chase",
             "vs_k_pct", "vs_bb_pct", "vs_hr_pa", "vs_r_pg",
             "park_hr_pg", "Elevation_ft", "Temp", "WindSpeed",
+            # multi-dim park factors (as-of venue R/H/2B/TB per game): the
+            # run/hit environment for the outs/hits/earned-run heads; the K
+            # and walk heads drop them (train.py k_cols / st_exclude),
+            # mirroring the batter-side _PARK_OFF routing
+            "park_r_pg", "park_h_pg", "park_2b_pg", "park_tb_pg",
             "lg_k_pa", "lg_r_pa", "lg_hr_pa",
             # HP-umpire zone tendency: the K model uses both; the count
             # heads that don't speak to the zone (outs/pha/per) drop them
@@ -2113,8 +2119,11 @@ def build_game_frame(raw):
     park = park_tab.rename(columns={c: f"park_{c}" for c in park_tab.columns
                                     if c.startswith("cum")})
     g = _asof_merge(g, park, by=["Venue"])
-    g["park_hr_pg"] = np.where(g["park_cum_n"] >= 30,
-                               g["park_cum_HR"] / g["park_cum_n"], np.nan)
+    ok = g["park_cum_n"] >= 30
+    for stat, col in (("HR", "park_hr_pg"), ("R", "park_r_pg"),
+                      ("H", "park_h_pg"), ("2B", "park_2b_pg"),
+                      ("TB", "park_tb_pg")):
+        g[col] = np.where(ok, g[f"park_cum_{stat}"] / g["park_cum_n"], np.nan)
     parks = raw["parks"].rename(columns={"Ballpark": "Venue"})
     g = g.merge(parks[["Venue", "LF", "CF", "RF", "Elevation_ft"]], on="Venue", how="left")
     g = g.merge(_league_env_table(gb), on="Date", how="left")
@@ -2195,7 +2204,10 @@ def build_team_game_frame(gf):
             "opp_ps_gb_d": gf[f"{opp}_ps_gb_d"],
             "opp_pc_era": gf[f"{opp}_pc_era"],
             "opp_pc_hr_bf": gf[f"{opp}_pc_hr_bf"],
-            "park_hr_pg": gf["park_hr_pg"], "LF": gf["LF"], "CF": gf["CF"],
+            "park_hr_pg": gf["park_hr_pg"], "park_r_pg": gf["park_r_pg"],
+            "park_h_pg": gf["park_h_pg"], "park_2b_pg": gf["park_2b_pg"],
+            "park_tb_pg": gf["park_tb_pg"],
+            "LF": gf["LF"], "CF": gf["CF"],
             "RF": gf["RF"], "Elevation_ft": gf["Elevation_ft"],
             "Temp": gf["Temp"], "WindSpeed": gf["WindSpeed"],
             "lg_r_pa": gf["lg_r_pa"], "lg_hr_pa": gf["lg_hr_pa"],
@@ -2217,7 +2229,11 @@ def team_game_feature_cols():
             "opp_def_oaa", "opp_pen_xwcon",
             "opp_ps_era", "opp_ps_k_bf", "opp_ps_hr_bf", "opp_ps_h_bf",
             "opp_ps_xwcon", "opp_ps_xwcon_d", "opp_ps_brl_d", "opp_ps_gb_d",
-            "opp_pc_era", "opp_pc_hr_bf", "park_hr_pg", "LF", "CF", "RF",
+            "opp_pc_era", "opp_pc_hr_bf", "park_hr_pg",
+            # multi-dim park factors: the as-of run environment of the venue,
+            # which the lone HR factor + static dimensions can't carry
+            "park_r_pg", "park_h_pg", "park_2b_pg", "park_tb_pg",
+            "LF", "CF", "RF",
             "Elevation_ft", "Temp", "WindSpeed", "DayNight", "Condition",
             "WindDir"]
 

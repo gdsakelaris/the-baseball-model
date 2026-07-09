@@ -195,6 +195,9 @@ _UMP = ["ump_k_pct", "ump_bb_pct"]           # HP-ump zone tendency: K/BB only
 # park factor (park_hr_pg, on every prop) can't carry for doubles/TB/runs.
 # Routed to the OFFENSIVE props only: excluded from bb, sb and the K heads
 # (_BK_EXC) below, where park scoring says nothing about a batter's whiffs.
+# 2026-07-09: also routed to the starter run-environment heads (outs/pha/per)
+# and the team-runs model — the same whiff/walk exclusion applies there via
+# k_cols (starter K) and pbb's st_exclude.
 _PARK_OFF = ["park_r_pg", "park_h_pg", "park_2b_pg", "park_tb_pg"]
 # Statcast bat tracking = swing quality, a fundamental skill that touches
 # essentially every offensive outcome (power, contact/BABIP, whiff, and even
@@ -319,7 +322,12 @@ COUNT_HEADS = {
                  st_exclude=_UMP,
                  lines=[14.5, 15.5, 16.5, 17.5, 18.5],
                  desc="starter outs recorded"),
+    # pbb keeps _UMP (zone tendency drives walks) but drops the park run
+    # environment (_PARK_OFF says nothing about walks — batter-bb precedent);
+    # outs/pha/per keep _PARK_OFF (venue run/hit environment is directly
+    # on-target for how deep a starter goes and what he allows).
     "pbb":  dict(frame="starts", target="y_pbb", exclude=None,
+                 st_exclude=_PARK_OFF,
                  lines=[0.5, 1.5, 2.5], desc="starter walks allowed"),
     "pha":  dict(frame="starts", target="y_pha", exclude=None,
                  st_exclude=_UMP,
@@ -613,7 +621,12 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         per_start = te["ps_k_bf"] * (te["ps_BF"] / te["p_starts_season"])
         return per_start.fillna(league).clip(0, 15)
 
-    k_model, m = fit_poisson(sf, st_cols, "y_so", train_yrs, cal_yr, test_yr,
+    # the K model keeps its whiff-only diet: the multi-dim park run
+    # environment reaches outs/pha/per + the runs model, but venue scoring
+    # says nothing about strikeouts (same reasoning as _BK_EXC). k_cols is
+    # what the artifact ships as st_cols — the K model's serving contract.
+    k_cols = [c for c in st_cols if c not in _PARK_OFF]
+    k_model, m = fit_poisson(sf, k_cols, "y_so", train_yrs, cal_yr, test_yr,
                              "K", k_baseline)
     metrics[f"k_{test_yr}"] = m
 
@@ -621,7 +634,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     # counts run a touch over Poisson variance, so predict.py prices K P(over)
     # with a negative binomial (nb_over) using this factor.
     sf_cal = sf[sf["Season"] == cal_yr]
-    kp_cal = k_model.predict(sf_cal[st_cols])
+    kp_cal = k_model.predict(sf_cal[k_cols])
     k_disp = float(np.mean((sf_cal["y_so"].to_numpy() - kp_cal) ** 2)
                    / np.mean(kp_cal))
     metrics[f"k_dispersion_{cal_yr}"] = k_disp
@@ -728,7 +741,10 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         "k_model": k_model, "team_runs_model": team_runs_model,
         "win_model": win_model, "total_disp": total_disp, "k_disp": k_disp,
         "count_models": count_models,
-        "bat_cols": bat_cols, "st_cols": st_cols, "tg_cols": tg_cols,
+        # st_cols = the K model's column contract (predict/evaluate feed it
+        # to k_model); the count heads carry their own cols. k_cols drops
+        # _PARK_OFF from the shared starts superset.
+        "bat_cols": bat_cols, "st_cols": k_cols, "tg_cols": tg_cols,
         "cat_levels": cat_levels,
         "metrics": metrics,
         # evaluate_deep reads these instead of hardcoding seasons

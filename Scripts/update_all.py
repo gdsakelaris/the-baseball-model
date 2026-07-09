@@ -139,6 +139,28 @@ def validate_and_restore(files):
     return all_ok
 
 
+def experiment_in_flight():
+    """True when the Model sources differ from the ones the current paired
+    baselines were snapshotted from (evaluate_deep --set-baseline writes
+    baseline_code_fp.json). The daily retrain must train SHIPPED code —
+    quietly retraining and re-baselining an in-flight candidate would make
+    the experiment its own reference — so a mismatch turns the run
+    scrape-only. No fingerprint file (pre-feature snapshots) = proceed."""
+    import hashlib
+    fp_file = MODEL_TRAIN.parent / "artifacts" / "baseline_code_fp.json"
+    if not fp_file.exists():
+        return False
+    try:
+        base = json.loads(fp_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    for name, digest in base.items():
+        p = MODEL_TRAIN.parent / name
+        if not p.exists() or hashlib.md5(p.read_bytes()).hexdigest() != digest:
+            return True
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--retrain", action="store_true",
@@ -159,11 +181,38 @@ def main():
 
     all_ok = all(ok for _, ok, _ in results)
     if args.retrain:
-        if all_ok:
+        if all_ok and experiment_in_flight():
+            print("\n>>> retrain SKIPPED: EXPERIMENT IN FLIGHT — the Model "
+                  "sources differ from the last --set-baseline snapshot "
+                  "(baseline_code_fp.json). Data was still refreshed, so the "
+                  "next --paired read will demand a re-baseline: finish or "
+                  "revert the candidate, then run "
+                  "update_all.py --retrain (or wait for tomorrow's run).",
+                  flush=True)
+            results.append(("retrain models (skipped: experiment in flight)",
+                            True, 0.0))
+        elif all_ok:
             ok, took = run("Model/train.py --rebuild",
                            [str(MODEL_TRAIN), "--rebuild"])
             results.append(("retrain models", ok, took))
             all_ok = all_ok and ok
+            # refresh the paired-eval baselines to match the just-trained
+            # models: the retrain above makes yesterday's snapshots stale
+            # (evaluate_deep --paired refuses a stale read via its data
+            # fingerprint), and a snapshot is only valid when it captures
+            # the CURRENT artifacts on the CURRENT data — which is exactly
+            # the state right here. The experiment_in_flight() gate above
+            # guarantees this only ever snapshots SHIPPED code.
+            if ok:
+                ev = str(MODEL_TRAIN.parent / "evaluate_deep.py")
+                for label, cmd in (
+                        ("evaluate_deep.py --set-baseline",
+                         [ev, "--set-baseline"]),
+                        ("evaluate_deep.py --confirm --set-baseline",
+                         [ev, "--confirm", "--set-baseline"])):
+                    ok, took = run(label, cmd)
+                    results.append((label, ok, took))
+                    all_ok = all_ok and ok
         else:
             print("\nskipping retrain: at least one scraper failed or "
                   "produced invalid data", file=sys.stderr)
