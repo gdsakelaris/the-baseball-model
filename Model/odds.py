@@ -117,6 +117,23 @@ def devig(implied):
     return [v / s for v in vals]
 
 
+# The sharp book: lowest hold, prices widely treated as the market's fair
+# number. When it quotes a line, its de-vigged prob IS the reference; the
+# median across soft books is the fallback. The scraper's DEFAULT_BOOKS keeps
+# pinnacle in every capture (Scripts/scrape_odds.py, added 2026-07-09).
+SHARP_BOOK = "pinnacle"
+
+
+def sharp_fair(g, book_col="Book"):
+    """Consensus fair P(over) for ONE group of same-market/line rows that were
+    already de-vigged into a 'fair' column: the sharp book's quote when it
+    posts the line, else the median across books. Shared by every consensus
+    builder (prop_rankings MktEdge%, evaluate_deep Section 9, predict Bets
+    sheet) so they all grade against the same reference."""
+    s = g.loc[g[book_col].astype(str).str.lower() == SHARP_BOOK, "fair"].dropna()
+    return float(s.median()) if len(s) else float(g["fair"].median())
+
+
 def devig_two_way(over_price, under_price):
     """Return (fair P(over), hold) for a two-sided market. `hold` is the book's
     margin (implied over + implied under - 1). If only one side is present the

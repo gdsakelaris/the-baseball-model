@@ -14,8 +14,10 @@ Then run it near game time to snapshot that day's closing-ish lines:
     python Scripts/scrape_odds.py --markets hr,pk,totals --date 2026-07-04
 
 The default 'all' captures every posted player prop the model predicts plus the
-game markets (totals = over/under runs, h2h = moneyline / winner). Run it twice
-a day and it just works: player-prop markets cost 1 credit PER GAME while the
+game markets (totals = over/under runs, h2h = moneyline / winner), from the
+DEFAULT_BOOKS list: the prop-posting US books plus Pinnacle, the sharp book the
+de-vig consensus prefers as its reference (see odds.sharp_fair) — same credit
+cost as the old regions=us default. Run it twice a day and it just works: player-prop markets cost 1 credit PER GAME while the
 game markets are one flat bulk call, and a rerun near first pitch SKIPS games
 already underway (their pregame line is final), so the second run only pays for
 games not yet started. write_store de-dupes on (Date, PlayerId, Market, Line,
@@ -56,10 +58,26 @@ PROP_APIS = sorted({m["api"] for m in O.PROP_MARKET.values()} |
 GAME_MARKETS = ["totals", "h2h"]           # over/under total runs; moneyline
 
 # US sportsbooks don't post every market the model predicts. Confirmed empty
-# across the whole 2026-07-08 slate: batter strikeouts. 'props'/'all' skip
-# these so a run never requests an always-empty market; an explicit
-# --markets bk still works (e.g. a region that does post it).
+# across the whole 2026-07-08 slate: batter strikeouts (pinnacle probed
+# 2026-07-09: doesn't post it either). 'props'/'all' skip these so a run never
+# requests an always-empty market; an explicit --markets bk still works
+# (e.g. a book that does post it).
 UNPOSTED_APIS = {"batter_strikeouts"}
+
+# Which books to pay for. The Odds API bills the bookmakers param in GROUPS OF
+# TEN (any group = one region-equivalent), so this list of 9 costs exactly what
+# regions=us did while swapping in Pinnacle — the sharp, low-hold book (eu
+# region) that odds.sharp_fair prefers as the de-vig reference. It replaces the
+# whole-region 'us' default: the 8 US books here are the only ones that posted
+# player props across 07-08/07-09; the region's other books (mybookieag,
+# lowvig, betus — soft offshore, game markets only) were dropped to keep the
+# group at 9, leaving ONE free slot before every request doubles in cost.
+# Pinnacle coverage probed 2026-07-09: HR, total bases, pitcher outs/hits/ER
+# pregame — whatever else it posts near first pitch is captured at no extra
+# cost (per-event calls charge on markets RETURNED x book-groups).
+DEFAULT_BOOKS = ",".join((
+    "draftkings", "fanduel", "betmgm", "williamhill_us", "betrivers",
+    "fanatics", "bovada", "betonlineag", "pinnacle"))
 
 # Player-prop markets cost 1 credit PER GAME per region; the game markets
 # (totals, h2h) come from ONE flat bulk call (2 credits total, not per game).
@@ -298,14 +316,34 @@ def _commence(e):
         return None
 
 
+def _slate_date(e):
+    """The LOCAL calendar date an event belongs to (first pitch converted to
+    this machine's timezone), or None if commence_time is unusable. MLB slates
+    are named by US-local date: a 9:40 PM PT game commences after midnight
+    UTC, so bucketing by the raw UTC string put West-Coast night games on
+    TOMORROW's slate — today's --date never fetched them and by tomorrow they
+    were 'already started', i.e. never captured at all (3 of 7 pending games
+    on 2026-07-09). Local-date bucketing matches the slate the model predicts
+    and the Date the store rows carry."""
+    c = _commence(e)
+    return c.astimezone().date().isoformat() if c else None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--date", default=dt.date.today().isoformat(),
-                    help="slate date YYYY-MM-DD (default today)")
+                    help="slate date YYYY-MM-DD, the LOCAL calendar day of "
+                         "first pitch (default today)")
     ap.add_argument("--key", default=None,
                     help="Odds API key; else $ODDS_API_KEY, else the local "
                          ".odds_api_key file (set once, survives forever)")
-    ap.add_argument("--regions", default="us")
+    ap.add_argument("--books", default=DEFAULT_BOOKS,
+                    help="comma-separated Odds API bookmaker keys (billed in "
+                         "groups of 10 = 1 region-equivalent). Default: the 8 "
+                         "prop-posting US books + pinnacle. Pass '' to fall "
+                         "back to whole-region fetching via --regions")
+    ap.add_argument("--regions", default="us",
+                    help="Odds API regions, used only with --books ''")
     ap.add_argument("--out", default=str(O.DEFAULT_STORE))
     ap.add_argument("--markets", default=DEFAULT_MARKETS,
                     help="comma-separated market keys (batter: "
@@ -342,8 +380,15 @@ def main():
     except Exception as e:
         print(f"could not list events: {e}", file=sys.stderr)
         sys.exit(1)
-    events = [e for e in events if str(e.get("commence_time", "")).startswith(day)]
-    n_reg = len(args.regions.split(","))
+    events = [e for e in events if _slate_date(e) == day]
+    # bookmakers overrides regions at the API when both are sent, so exactly
+    # one is used; billing counts each group of 10 books as one region.
+    if args.books:
+        scope = {"bookmakers": args.books}
+        n_reg = (len([b for b in args.books.split(",") if b.strip()]) + 9) // 10
+    else:
+        scope = {"regions": args.regions}
+        n_reg = len(args.regions.split(","))
 
     # Skip games already underway: their pregame prices are final, so a later
     # rerun spends credits only on games not yet started. write_store de-dupes
@@ -362,7 +407,7 @@ def main():
           f"{f' ({n_skip} already started, skipped)' if n_skip else ''} "
           f"(api requests left: {remain})")
     print(f"markets [{', '.join(markets)}]: props x {len(pending)} games"
-          f"{f' x {n_reg} regions' if n_reg > 1 else ''}"
+          f"{f' x {n_reg} region-equivs' if n_reg > 1 else ''}"
           f"{' + totals/h2h (1 bulk call)' if game_markets else ''} "
           f"= ~{est} credits")
 
@@ -377,7 +422,7 @@ def main():
         try:
             slate, remain = fetch(
                 f"{API}/odds",
-                {"apiKey": args.key, "regions": args.regions,
+                {"apiKey": args.key, **scope,
                  "markets": ",".join(game_markets), "oddsFormat": "american"})
         except Exception as ex:
             print(f"  game markets fetch failed ({ex})", file=sys.stderr)
@@ -400,7 +445,7 @@ def main():
         try:
             data, remain = fetch(
                 f"{API}/events/{e['id']}/odds",
-                {"apiKey": args.key, "regions": args.regions,
+                {"apiKey": args.key, **scope,
                  "markets": ",".join(prop_markets), "oddsFormat": "american"})
         except Exception as ex:
             print(f"  {away_abbr}@{home_abbr}: odds fetch failed ({ex})",

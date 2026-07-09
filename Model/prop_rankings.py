@@ -83,7 +83,7 @@ BATTER_X = {
     "xtb":   "Batter xTB",
     "xhrr":  "Batter xHRR",
 }
-GAME_CNT = {"total": "Game Total Runs + Runs > x"}
+GAME_CNT = {"total": "Game Runs > x"}
 CNT_MARKETS = {**PITCHER_CNT, **BATTER_X, **GAME_CNT}
 
 
@@ -245,19 +245,21 @@ _CNT_API = {"k": "pitcher_strikeouts", "outs": "pitcher_outs",
 
 
 def _devig_consensus(store, api, line):
-    """Median de-vigged fair P(over) per (Date, PlayerId) for one market line."""
+    """De-vigged fair P(over) per (Date, PlayerId) for one market line:
+    Pinnacle's quote where it posts the line, else the median across books
+    (odds.sharp_fair — the same reference Section 9 and the Bets sheet use)."""
     m = store[(store["Market"] == api) & ((store["Line"] - line).abs() < 1e-6)]
     recs = []
     for _, r in m.iterrows():
         fair, _hold = O.devig_two_way(r["OverPrice"], r["UnderPrice"])
         if not np.isnan(fair):
-            recs.append((r["Date"], r["PlayerId"], fair))
+            recs.append((r["Date"], r["PlayerId"], fair, r["Book"]))
     if not recs:
         return pd.DataFrame(columns=["Date", "PlayerId", "fair"])
-    md = pd.DataFrame(recs, columns=["Date", "PlayerId", "fair"])
+    md = pd.DataFrame(recs, columns=["Date", "PlayerId", "fair", "Book"])
     md["PlayerId"] = pd.to_numeric(md["PlayerId"], errors="coerce")
-    return (md.groupby(["Date", "PlayerId"], dropna=False)["fair"]
-            .median().reset_index())
+    return (md.groupby(["Date", "PlayerId"], dropna=False)[["fair", "Book"]]
+            .apply(O.sharp_fair).rename("fair").reset_index())
 
 
 def _mkt_edge(y, p, fair, min_n=20):
@@ -431,7 +433,7 @@ def build_table():
         })
     # moneyline: no per-row snapshot and, more to the point, no proven side
     # edge (McNemar vs always-home is not significant) — pinned informational
-    rows.append({"Market": "Games 'Winner' / 'Win Prob' (moneyline)",
+    rows.append({"Market": "Game Winner",
                  "Key": "winner",
                  "Score": 0.0, "S25": np.nan, "S26": np.nan,
                  "AUC": np.nan, "ECE": np.nan, "Bias": np.nan,
@@ -476,11 +478,13 @@ LEGEND = [
     ("Edge%", "How much better the column prices the event than the "
      "base-rate guess (relative log-loss beat; O/U columns averaged "
      "across every line priced). Held-out years only, no scraped odds."),
-    ("MktEdge%", "Model vs the de-vigged sportsbook consensus on the SAME "
+    ("MktEdge%", "Model vs the de-vigged sportsbook reference on the SAME "
      "events, from the scraped odds store (+ = model prices them better "
-     "than the market). Display-only - never part of Score - and pooled "
-     "over every captured line a column owns. Anecdote until ~15+ scraped "
-     "days accrue; '(n=...)' is the graded event count."),
+     "than the market). The reference is Pinnacle's de-vigged quote where "
+     "it posts the line, else the median across books. Display-only - "
+     "never part of Score - and pooled over every captured line a column "
+     "owns. Anecdote until ~15+ scraped days accrue; '(n=...)' is the "
+     "graded event count."),
     ("Tier", "1 ELITE / 2 STRONG: trust and act on these. 3 SOLID: usable "
      "with the noted caveat. 4 MARGINAL / 5 AVOID: the model cannot "
      "separate players well enough to act on."),
@@ -526,7 +530,8 @@ def main():
     print("\n=== Prediction-column performance rankings — held-out test "
           "years 2025 + 2026 averaged ===\n")
     print(out.to_string(index=False))
-    print(f"\n  MktEdge%: model vs de-vigged book consensus on the same "
+    print(f"\n  MktEdge%: model vs the de-vigged book reference (Pinnacle "
+          f"where posted, else median) on the same "
           f"events — {mkt_days} scraped day(s) in the odds store"
           + ("; ANECDOTE until ~15+ days accrue." if mkt_days < 15
              else "."))

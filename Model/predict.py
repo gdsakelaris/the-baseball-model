@@ -906,11 +906,12 @@ def _over_display(col):
 def _consensus(store, api, line, key):
     """Per join `key` ('PlayerId' for player props, 'Team' = home club for game
     markets): de-vig every book's two-sided price for one market/line to a fair
-    P(over), then keep the median fair prob, the median hold, and the best (most
-    generous) over/under price with the book offering it. Mirrors evaluate_deep
-    Section 9's _market_consensus/_game_consensus so live signals use the same
-    math the backtest grades. Returns {key_value: {...}}; empty if nothing
-    prices."""
+    P(over), then keep the reference fair prob (Pinnacle's where it posts the
+    line, else the median — odds.sharp_fair), the median hold, and the best
+    (most generous) over/under price with the book offering it. Mirrors
+    evaluate_deep Section 9's _market_consensus/_game_consensus so live signals
+    use the same math the backtest grades. Returns {key_value: {...}}; empty if
+    nothing prices."""
     m = store[store["Market"] == api]
     if line is not None:
         m = m[(m["Line"] - line).abs() < 1e-6]
@@ -931,7 +932,7 @@ def _consensus(store, api, line, key):
             continue
         over, under = g["over"].dropna(), g["under"].dropna()
         out[_as_int(kval) if key == "PlayerId" else kval] = {
-            "fair": float(g["fair"].median()),
+            "fair": O.sharp_fair(g, book_col="book"),
             "hold": (float(g["hold"].median()) if g["hold"].notna().any()
                      else float("nan")),
             "best_over": float(over.max()) if len(over) else float("nan"),

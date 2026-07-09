@@ -512,8 +512,10 @@ def _dayblock_roi_ci(days, profit, n_boot, seed=0):
 
 def _market_consensus(store, api, line):
     """Per (Date, PlayerId): de-vig each book's two-sided price to a fair
-    P(over), then keep the consensus (median) fair prob plus the best (most
-    generous) over/under price across books for ROI line-shopping."""
+    P(over), then keep the reference fair prob (Pinnacle's where it posts the
+    line, else the median — odds.sharp_fair, shared with MktEdge% and the Bets
+    sheet) plus the best (most generous) over/under price across books for ROI
+    line-shopping."""
     m = store[(store["Market"] == api) & ((store["Line"] - line).abs() < 1e-6)]
     recs = []
     for _, r in m.iterrows():
@@ -521,17 +523,20 @@ def _market_consensus(store, api, line):
         if np.isnan(fo):
             continue
         recs.append((r["Date"], r["PlayerId"], fo, hold,
-                     r["OverPrice"], r["UnderPrice"]))
+                     r["OverPrice"], r["UnderPrice"], r["Book"]))
     cols = ["Date", "PlayerId", "fair", "hold", "best_over", "best_under",
             "n_books"]
     if not recs:
         return pd.DataFrame(columns=cols)
     md = pd.DataFrame(recs, columns=["Date", "PlayerId", "fair", "hold",
-                                     "over", "under"])
-    return md.groupby(["Date", "PlayerId"], dropna=False).agg(
-        fair=("fair", "median"), hold=("hold", "median"),
+                                     "over", "under", "Book"])
+    out = md.groupby(["Date", "PlayerId"], dropna=False).agg(
+        hold=("hold", "median"),
         best_over=("over", "max"), best_under=("under", "max"),
-        n_books=("fair", "size")).reset_index()
+        n_books=("fair", "size"))
+    out["fair"] = md.groupby(["Date", "PlayerId"], dropna=False)[
+        ["fair", "Book"]].apply(O.sharp_fair)
+    return out.reset_index()[cols]
 
 
 def _grade_against_market(name, model, cons, n_boot, key="PlayerId"):
@@ -645,16 +650,19 @@ def _game_consensus(store, api, line):
         if np.isnan(fo):
             continue
         recs.append((r["Date"], r["Team"], fo, hold,
-                     r["OverPrice"], r["UnderPrice"]))
+                     r["OverPrice"], r["UnderPrice"], r["Book"]))
     cols = ["Date", "Team", "fair", "hold", "best_over", "best_under", "n_books"]
     if not recs:
         return pd.DataFrame(columns=cols)
     md = pd.DataFrame(recs, columns=["Date", "Team", "fair", "hold",
-                                     "over", "under"])
-    return md.groupby(["Date", "Team"], dropna=False).agg(
-        fair=("fair", "median"), hold=("hold", "median"),
+                                     "over", "under", "Book"])
+    out = md.groupby(["Date", "Team"], dropna=False).agg(
+        hold=("hold", "median"),
         best_over=("over", "max"), best_under=("under", "max"),
-        n_books=("fair", "size")).reset_index()
+        n_books=("fair", "size"))
+    out["fair"] = md.groupby(["Date", "Team"], dropna=False)[
+        ["fair", "Book"]].apply(O.sharp_fair)
+    return out.reset_index()[cols]
 
 
 def _game_market_rows(gf_y, art, store, n_boot):
