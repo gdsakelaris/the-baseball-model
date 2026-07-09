@@ -280,23 +280,24 @@ class Predictor:
                              "Name": self._name(pid, spec),
                              "BatterId": pid, "PitcherId": opp_starter,
                              "Season": season})
-            # teammate context: career on-base of the two slots ahead,
-            # slugging of the two behind, wrapping the order (mirrors the
-            # vectorized ctx_* computation; missing slots skipna)
-            omap = {r["slot"]: r.get("_obpp") for r in side_rows}
-            smap = {r["slot"]: r.get("_slgp") for r in side_rows}
+            # teammate context: career + decayed on-base of the two slots
+            # ahead, slugging of the two behind, wrapping the order (mirrors
+            # the vectorized ctx_* computation; missing slots skipna)
+            ctx_maps = {"ctx_ahead_obp": ("_obpp", (-2, -1)),
+                        "ctx_behind_slg": ("_slgp", (1, 2)),
+                        "ctx_ahead_obp_d": ("_obpp_d", (-2, -1)),
+                        "ctx_behind_slg_d": ("_slgp_d", (1, 2))}
 
             def _nmean(vals):
                 vals = [v for v in vals if v is not None and pd.notna(v)]
                 return float(np.mean(vals)) if vals else np.nan
 
-            for r in side_rows:
-                r["ctx_ahead_obp"] = _nmean(
-                    [omap.get(((r["slot"] + off - 1) % 9) + 1)
-                     for off in (-2, -1)])
-                r["ctx_behind_slg"] = _nmean(
-                    [smap.get(((r["slot"] + off - 1) % 9) + 1)
-                     for off in (1, 2)])
+            for feat, (src, offs) in ctx_maps.items():
+                vmap = {r["slot"]: r.get(src) for r in side_rows}
+                for r in side_rows:
+                    r[feat] = _nmean(
+                        [vmap.get(((r["slot"] + off - 1) % 9) + 1)
+                         for off in offs])
             rows.extend(side_rows)
         df = pd.DataFrame(rows)
         mdf = pd.DataFrame(meta)

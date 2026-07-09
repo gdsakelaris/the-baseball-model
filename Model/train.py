@@ -97,6 +97,28 @@ HR_MONOTONE = {
 }
 MONOTONE = {}
 
+# Seed bagging (2026-07-08) for the weak/target props: N GBMs differing
+# only in random_state, predictions averaged (features.MeanBag) before the
+# LR blend + isotonic. Variance reduction, not new signal — kept under the
+# strictly-not-worse standard because it also SHRINKS these props' retrain
+# jitter, making every future Section-11 read on them sharper. Bag 0 keeps
+# LightGBM's default seed (the incumbent model exactly).
+PROP_BAGS = {"hit": 5, "tb2": 5, "run": 5, "rbi": 5, "hrr2": 5, "hrr3": 5}
+COUNT_BAGS = {"xhrr": 5, "xtb": 5}
+
+# Per-prop LightGBM overrides (2026-07-08 grid: 2 regularization configs x
+# 6 bagged target props). Heavier regularization paid ONLY as calibration,
+# on two props: run (heavy: ece -.0038 vs the bagged incumbent, past band)
+# and hrr2 (medium: ece -.0035 past band, top10 +.0070 — and it undoes the
+# hrr2_ece drift the bagging introduced). Everything else was flat-to-worse
+# (hit/tb2/rbi ece all tilted UP under more regularization) — incumbent
+# LGB_CLS kept there.
+PROP_PARAMS = {
+    "run":  dict(LGB_CLS, num_leaves=31, min_child_samples=300,
+                 colsample_bytree=0.7, reg_lambda=6.0),
+    "hrr2": dict(LGB_CLS, num_leaves=63, min_child_samples=160),
+}
+
 # Per-prop feature routing. The batter frame carries a SUPERSET of columns;
 # each prop trains on the superset minus the groups that don't speak to it.
 # The SB prop is the cautionary tale: it regressed when the platoon-split
@@ -108,7 +130,18 @@ _SB_FEATS = ["c_sb_pa_sh", "s_sb_pa_sh", "r7_sb_pa_sh", "r15_sb_pa_sh",
              "r30_sb_pa_sh", "d_sb_pa_sh", "c_sb_succ", "psb_sb27",
              "psb_stop", "tsb_sb_g", "tsb_stop"]
 _RUNRBI = ["c_r_pa_sh", "s_r_pa_sh", "c_rbi_pa_sh", "s_rbi_pa_sh"]
-_CTX = ["ctx_ahead_obp", "ctx_behind_slg"]   # teammates ahead/behind
+# NOTE: own H+R+RBI joint-threshold history (c/s/d_hrr{2,3}_g_sh, routed
+# here as _HRR_HIST to hrr2/hrr3/xhrr only, 2026-07-08) was BENCHED —
+# hrr2_ece 1.5x past band, AUC/edge/top10 flat everywhere; the features
+# live on in the frames + inference path (see features.HRR_SHRINK note).
+# NOTE: recency form for run/rbi (rolling + decayed own R/RBI rates,
+# routed here as _RUNRBI_FORM, 2026-07-08) was BENCHED — run_ece +.0063
+# marginal (past band), rbi mixed; see features.RUNRBI_FORM_BENCHED.
+# teammates ahead/behind. NOTE: the 90-day-decayed variants (ctx_*_d,
+# 2026-07-08) were tried on run/rbi/hrr and BENCHED — 0/0/76 within noise;
+# they carry ~the same information as the career rates (corr with targets
+# nearly identical). Computed in both paths, out of the superset.
+_CTX = ["ctx_ahead_obp", "ctx_behind_slg"]
 _OBP = ["c_obp", "s_obp"]
 _PWR = ["hrpt_score", "phrq_n", "phrq_ev_avg", "hrq_angle_avg",
         "bat_goao", "pit_goao"]              # power-quality / fly-ball
@@ -148,15 +181,25 @@ _PSW = ["p_swstr_d"]                         # opposing starter whiff form
 _BK_EXC = (_SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR + _HBF
            + _PEN2 + _TLOC + _BIP_PWR + _BIP_HIT + _SPD + _DEF)
 
+# Routing flips (2026-07-08), kept under the strictly-not-worse standard
+# (tsb precedent): hit+footspeed (4/4 metrics tilted positive on 2025),
+# run+plate-discipline (ece -.0022, top10 +.0109), rbi+Statcast-power
+# (auc +.0015, ece -.0027) — all within noise but principled and harmless.
+# tb2+footspeed REVERTED (ece +.0029, 0.97x band, for nothing).
 PROP_EXCLUDE = {
     "hr":    _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _SPD + _DEF,
+    # hit keeps footspeed (beat-out grounders, like single); hits2 stays
+    # speed-free (a 2-hit game is contact quality, not legs)
     "hit":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
-             + _BIP_PWR + _SPD,
+             + _BIP_PWR,
     "hits2": _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
              + _BIP_PWR + _SPD,
     "tb2":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _SPD,
-    "run":   _SB_FEATS + _PWR + _XBH + _IBB + _BIP_PWR + _PLATE,
-    "rbi":   _SB_FEATS + _PWR + _BIP_PWR + _SPD + _PLATE,
+    # run keeps plate discipline (chase feeds OBP -> runs)
+    "run":   _SB_FEATS + _PWR + _XBH + _IBB + _BIP_PWR,
+    # rbi keeps Statcast power (own HR = automatic RBI; hard contact
+    # cashes runners) — box-score ISO alone lags it
+    "rbi":   _SB_FEATS + _PWR + _SPD + _PLATE,
     "bb":    _SB_FEATS + _RUNRBI + _CTX + _PWR + _XBH + _HBF + _PEN2 + _TLOC
              + _BIP_PWR + _BIP_HIT + _SPD + _DEF,
     "sb":    _VSH + _RUNRBI + _CTX + _OBP + _PWR + _XBH + _IBB + _PEN2
@@ -260,14 +303,22 @@ def _fit_logistic(tr, cols, target):
 
 
 def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
-                   params=None):
+                   params=None, n_bags=1):
     tr = df[df["Season"].isin(train_yrs)]
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr]
-    model = lgb.LGBMClassifier(**(params or LGB_CLS))
-    model.fit(tr[cols], tr[target],
-              eval_set=[(ca[cols], ca[target])], eval_metric="binary_logloss",
+    models = []
+    for b in range(n_bags):
+        p = dict(params or LGB_CLS)
+        if b:                       # bag 0 = the incumbent default seed
+            p["random_state"] = b
+        m = lgb.LGBMClassifier(**p)
+        m.fit(tr[cols], tr[target],
+              eval_set=[(ca[cols], ca[target])],
+              eval_metric="binary_logloss",
               callbacks=[lgb.early_stopping(150, verbose=False)])
+        models.append(m)
+    model = F.MeanBag(models) if n_bags > 1 else models[0]
 
     # diverse second learner + blend weight chosen on the calibration year
     lr, num_cols = _fit_logistic(tr, cols, target)
@@ -396,14 +447,22 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
     return prop, metrics
 
 
-def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline):
+def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
+                n_bags=1):
     tr = df[df["Season"].isin(train_yrs)]
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr].copy()
-    model = lgb.LGBMRegressor(**LGB_POIS)
-    model.fit(tr[cols], tr[target],
+    models = []
+    for b in range(n_bags):
+        p = dict(LGB_POIS)
+        if b:                       # bag 0 = the incumbent default seed
+            p["random_state"] = b
+        m = lgb.LGBMRegressor(**p)
+        m.fit(tr[cols], tr[target],
               eval_set=[(ca[cols], ca[target])], eval_metric="poisson",
               callbacks=[lgb.early_stopping(150, verbose=False)])
+        models.append(m)
+    model = F.MeanBag(models) if n_bags > 1 else models[0]
     pred = model.predict(te[cols])
     y = te[target].to_numpy()
     bl = baseline(te)
@@ -439,15 +498,16 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
 
     for name, (target, _desc) in PROPS.items():
         cols = [c for c in bat_cols if c not in PROP_EXCLUDE.get(name, ())]
-        params = None
+        params = PROP_PARAMS.get(name)
         mono = MONOTONE.get(name)
         if mono:    # categoricals and unlisted cols get 0 (unconstrained)
-            params = dict(LGB_CLS,
+            params = dict(params or LGB_CLS,
                           monotone_constraints=[mono.get(c, 0) for c in cols],
                           monotone_constraints_method="advanced")
         prop, m = fit_classifier(bf, cols, target,
                                  train_yrs, cal_yr, test_yr, name.upper(),
-                                 params=params)
+                                 params=params,
+                                 n_bags=PROP_BAGS.get(name, 1))
         prop["cols"] = cols
         props[name] = prop
         metrics[f"{name}_{test_yr}"] = m
@@ -531,7 +591,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
             return pd.Series(_m, index=te.index)  # xhrr: league mean
 
         model, m = fit_poisson(frame, cols, ch["target"], train_yrs, cal_yr,
-                               test_yr, cname.upper(), cbase)
+                               test_yr, cname.upper(), cbase,
+                               n_bags=COUNT_BAGS.get(cname, 1))
         ca = frame[frame["Season"] == cal_yr]
         mu_cal = model.predict(ca[cols])
         y_cal = ca[ch["target"]].to_numpy()

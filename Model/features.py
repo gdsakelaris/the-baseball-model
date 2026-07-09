@@ -48,8 +48,10 @@ CAT_COLS = ["DayNight", "Condition", "WindDir", "bat_hand", "pit_throws"]
 DECAY_HL_DAYS = 90.0
 DECAY_LAM = np.log(2.0) / DECAY_HL_DAYS
 DECAY_EPOCH = pd.Timestamp("2020-01-01")
-DECAY_STATS = ["PA", "HR", "TB", "SO", "BB", "SB"]
-DECAY_SHRINK = ("hr_pa", "tb_ab", "k_pct", "bb_pct", "sb_pa")
+DECAY_STATS = ["PA", "AB", "H", "HR", "TB", "SO", "BB", "SB", "R", "RBI",
+               "HBP", "HRR2", "HRR3"]
+DECAY_SHRINK = ("hr_pa", "tb_ab", "k_pct", "bb_pct", "sb_pa",
+                "r_pa", "rbi_pa")
 
 # Expected exposure (xPA): every binary prop is really P(gets N plate
 # appearances) x P(event per PA), but the trees only see per-PA rates and
@@ -67,6 +69,23 @@ XPA_PRIOR = 4.3          # league PA per batter-game (shrinkage target)
 XPA_K = 10.0             # games of shrinkage for xpa_bat
 
 # ---------------------------------------------------------------- loading
+
+
+class MeanBag:
+    """Average-prediction ensemble over seed-bagged LightGBM models: quacks
+    like a single model (predict / predict_proba / best_iteration_) so every
+    consumer — predict_prop, count heads, selftest, GUI — works unchanged.
+    Lives here so pickled artifacts resolve it from any entry point."""
+
+    def __init__(self, models):
+        self.models = models
+        self.best_iteration_ = models[0].best_iteration_
+
+    def predict(self, X):
+        return np.mean([m.predict(X) for m in self.models], axis=0)
+
+    def predict_proba(self, X):
+        return np.mean([m.predict_proba(X) for m in self.models], axis=0)
 
 
 def inf_to_nan(X):
@@ -97,6 +116,13 @@ def height_to_inches(ht):
 def load_raw():
     games = _read("mlb_games.csv", parse_dates=["Date"])
     gb = _read("mlb_game_batting.csv", parse_dates=["Date"])
+    # per-game H+R+RBI threshold indicators: own-target history for the hrr
+    # props (share of past games clearing the line — the joint clustering
+    # that the marginal H/R/RBI rates can't express). Lives on gb so the
+    # vectorized and inference paths inherit identical values.
+    _hrr = gb["H"] + gb["R"] + gb["RBI"]
+    gb["HRR2"] = (_hrr >= 2).astype("float64")
+    gb["HRR3"] = (_hrr >= 3).astype("float64")
     gp = _read("mlb_game_pitching.csv", parse_dates=["Date"])
     gp["Outs"] = ip_to_outs(gp["IP"])
     gp["NP"] = pd.to_numeric(gp["NP"], errors="coerce")
@@ -214,11 +240,12 @@ def annotate_opp_hand(gb, gp, hands):
 # ------------------------------------------------- vectorized as-of tables
 
 BAT_STATS = ["PA", "AB", "H", "HR", "TB", "SO", "BB",
-             "SB", "CS", "R", "RBI", "2B", "3B", "HBP", "IBB"]
+             "SB", "CS", "R", "RBI", "2B", "3B", "HBP", "IBB",
+             "HRR2", "HRR3"]
 PIT_STATS = ["BF", "HR", "SO", "BB", "Outs", "ER", "H", "Strikes", "NP"]
 VSH_STATS = ["PA", "HR", "TB", "SO"]  # platoon splits track these
 LOC_STATS = ["PA", "H", "HR", "TB", "SO"]  # home/away venue splits
-ROLL_STATS = ["PA", "HR", "H", "TB", "SO", "SB"]  # rolling-window sums
+ROLL_STATS = ["PA", "HR", "H", "TB", "SO", "SB", "R", "RBI"]  # rolling sums
 
 
 def _snap_to_day_start(df, keys, cols):
@@ -950,7 +977,24 @@ SHRINK = {
     "r_pa":   (0.125, 250, "R",  "PA"),   # runs scored (lineup context)
     "rbi_pa": (0.115, 250, "RBI", "PA"),
 }
-SHRINK_ROLL = ("hr_pa", "tb_ab", "k_pct", "sb_pa")  # rolling: PA denominator
+SHRINK_ROLL = ("hr_pa", "tb_ab", "k_pct", "sb_pa",
+               "r_pa", "rbi_pa")  # rolling: PA denominator
+
+# H+R+RBI per-game threshold shares (own-target history, hrr props only):
+# prior = league share of batter-games clearing the line (full game-batting
+# log, pinch-hit games included — the same population the histories sum
+# over), K in games. hrr2/hrr3 were the only props with no joint target
+# history; the marginals (c_r_pa_sh etc.) miss how a batter's H/R/RBI
+# cluster within games (a cleanup hitter's H and RBI arrive together).
+# BENCHED (2026-07-08, selection run): 0 better / 1 worse (hrr2_ece +.0044,
+# 1.5x band) / 75 within noise — hrr2/hrr3 AUC/edge/top10 all flat, xhrr
+# MAE flat; the same calibration-harm-without-ranking-gain signature that
+# benched xpa_*. The marginals evidently already carry the joint signal.
+# Everything stays in the frames + inference path (coverage 100%, parity
+# 1.7e-16, target corr ~+0.11); re-enable = re-add the six columns to
+# batter_feature_cols and re-route in train.py (a d_-only retry is the
+# cheapest variant if ever revisited).
+HRR_SHRINK = {"hrr2_g": (0.395, 40.0), "hrr3_g": (0.250, 40.0)}
 
 # stolen-base success rate: prior ~ league SB% ; small K (fast to stabilize)
 SB_SUCC_PRIOR, SB_SUCC_K = 0.75, 20.0
@@ -958,6 +1002,16 @@ TSB_STOP_PRIOR = 1.0 - SB_SUCC_PRIOR  # league share of attempts cut down
 PSB_MIN_ATT = 5  # attempts needed before a pitcher's stop-rate means much
 SHRINK_COLS = ([f"c_{n}_sh" for n in SHRINK] + [f"s_{n}_sh" for n in SHRINK]
                + [f"r{w}_{n}_sh" for w in ROLL_WINDOWS for n in SHRINK_ROLL])
+
+# rolling + decayed own R/RBI rates: computed in BOTH paths (parity
+# 5.6e-17) but BENCHED out of the model superset (2026-07-08, routed to
+# run/rbi as _RUNRBI_FORM): run_ece +.0063 marginal (past band) against
+# ~nothing on AUC/edge; rbi mixed (top10 up, auc/ece down vs flips-alone).
+# Same calibration-harm signature as xpa_*/hrr-history. Re-enable = drop
+# this filter from batter_feature_cols and re-route in train.py.
+RUNRBI_FORM_BENCHED = ([f"r{w}_{n}_pa_sh" for w in ROLL_WINDOWS
+                        for n in ("r", "rbi")]
+                       + ["d_r_pa_sh", "d_rbi_pa_sh"])
 
 
 def _shrink(numer, denom, name):
@@ -986,6 +1040,17 @@ def decayed_feats(sums):
     for name in DECAY_SHRINK:
         _, _, num_s, _ = SHRINK[name]
         out[f"d_{name}_sh"] = _shrink(sums[num_s], sums["PA"], name)
+    return out
+
+
+def hrr_hist_feats(sums, den, pre):
+    """Shrunk H+R+RBI threshold shares from {HRR2, HRR3} sums and a game
+    count. Shared by the vectorized (Series) and inference (scalar) paths so
+    both compute identically; zero sums land exactly on the league prior."""
+    out = {}
+    for line in (2, 3):
+        prior, k = HRR_SHRINK[f"hrr{line}_g"]
+        out[f"{pre}_hrr{line}_g_sh"] = (sums[f"HRR{line}"] + k * prior) / (den + k)
     return out
 
 
@@ -1453,6 +1518,9 @@ def build_batter_frame(raw):
         df[f"r{w}_tb_ab_sh"] = _shrink(df[f"r{w}_TB"], df[f"r{w}_PA"], "tb_ab")
         df[f"r{w}_k_pct_sh"] = _shrink(df[f"r{w}_SO"], df[f"r{w}_PA"], "k_pct")
         df[f"r{w}_sb_pa_sh"] = _shrink(df[f"r{w}_SB"], df[f"r{w}_PA"], "sb_pa")
+        df[f"r{w}_r_pa_sh"] = _shrink(df[f"r{w}_R"], df[f"r{w}_PA"], "r_pa")
+        df[f"r{w}_rbi_pa_sh"] = _shrink(df[f"r{w}_RBI"], df[f"r{w}_PA"],
+                                        "rbi_pa")
     # decay-weighted current-form rates + trend deltas (shared helpers)
     for k, v in decayed_feats({s: df[f"_dk_{s}"] for s in DECAY_STATS}).items():
         df[k] = v
@@ -1461,6 +1529,14 @@ def build_batter_frame(raw):
     # risk), shrunk toward the league PA/G; a debut player sits at the prior
     df["xpa_bat"] = ((df["_dk_PA"] + XPA_K * XPA_PRIOR)
                      / (df["_dk_G"] + XPA_K))
+    # H+R+RBI joint-threshold history (hrr props only — train.py _HRR_HIST):
+    # career / season / 90-day-decayed share of games with 2+/3+ H+R+RBI
+    for pre, src, den in (("c", "c", df["g_career"]),
+                          ("s", "s", df["g_season"]),
+                          ("d", "_dk", df["_dk_G"])):
+        sums = {f"HRR{l}": df[f"{src}_HRR{l}"] for l in (2, 3)}
+        for k, v in hrr_hist_feats(sums, den, pre).items():
+            df[k] = v
     # stolen-base success rate (career, shrunk toward the league rate)
     df["c_sb_succ"] = ((df["c_SB"] + SB_SUCC_K * SB_SUCC_PRIOR)
                        / (df["c_SB"] + df["c_CS"] + SB_SUCC_K))
@@ -1495,16 +1571,25 @@ def build_batter_frame(raw):
     # wrapping around the order. Uses each teammate's as-of career rates.
     df["_obpp"] = (df["c_H"] + df["c_BB"] + df["c_HBP"]) / df["c_PA"]
     df["_slgp"] = df["c_TB"] / df["c_AB"]
-    lt = df[["GamePk", "Team", "slot", "_obpp", "_slgp"]].drop_duplicates(
-        ["GamePk", "Team", "slot"])
+    # decayed variants (90-day half-life): the neighbor's CURRENT form —
+    # the career rates miss a mid-season acquisition or a surging/slumping
+    # neighbor entirely
+    df["_obpp_d"] = (df["_dk_H"] + df["_dk_BB"] + df["_dk_HBP"]) / df["_dk_PA"]
+    df["_slgp_d"] = df["_dk_TB"] / df["_dk_AB"]
+    lt = df[["GamePk", "Team", "slot", "_obpp", "_slgp", "_obpp_d",
+             "_slgp_d"]].drop_duplicates(["GamePk", "Team", "slot"])
     for off in (-2, -1, 1, 2):
         nb = lt.rename(columns={"slot": "_nslot", "_obpp": f"_obpp{off}",
-                                "_slgp": f"_slgp{off}"})
+                                "_slgp": f"_slgp{off}",
+                                "_obpp_d": f"_obpp_d{off}",
+                                "_slgp_d": f"_slgp_d{off}"})
         df["_nslot"] = ((df["slot"] + off - 1) % 9) + 1
         df = df.merge(nb, on=["GamePk", "Team", "_nslot"], how="left")
     df = df.drop(columns=["_nslot"])
     df["ctx_ahead_obp"] = df[["_obpp-2", "_obpp-1"]].mean(axis=1)
     df["ctx_behind_slg"] = df[["_slgp1", "_slgp2"]].mean(axis=1)
+    df["ctx_ahead_obp_d"] = df[["_obpp_d-2", "_obpp_d-1"]].mean(axis=1)
+    df["ctx_behind_slg_d"] = df[["_slgp_d1", "_slgp_d2"]].mean(axis=1)
 
     df["month"] = df["Date"].dt.month
     df["y_hr"] = (df["HR"] >= 1).astype(int)
@@ -1564,6 +1649,10 @@ def batter_feature_cols():
              "c_xbh_ab", "s_xbh_ab", "c_obp", "s_obp", "c_ibb_pa",
              "pos_c_share", "pos_dh_share",
              "ctx_ahead_obp", "ctx_behind_slg",
+             # NOTE: decayed teammate ctx (ctx_*_d, 2026-07-08) BENCHED —
+             # 0/0/76 within noise on run/rbi/hrr (corr with targets ~=
+             # the career ctx already in the models: nothing new to add);
+             # stays computed in both paths, out of the superset.
              "d_PA", "d_hr_pa_sh", "d_tb_ab_sh", "d_k_pct_sh",
              "d_bb_pct_sh", "d_sb_pa_sh",
              "tr15_hr", "tr15_tb", "tr15_k", "dev_hr", "dev_tb", "dev_k",
@@ -1585,13 +1674,17 @@ def batter_feature_cols():
              # and pushed tb2 ECE past its band — ECE drifted worse in most
              # props that received it; exposure features (xpa_bat/xpa_slot,
              # 2026-07-07 eve) likewise — rbi/single/bk ECE past band, no
-             # AUC/edge movement (see the XPA_PRIOR note). All stay in the
+             # AUC/edge movement (see the XPA_PRIOR note); own H+R+RBI
+             # threshold-share history (c/s/d_hrr{2,3}_g_sh, 2026-07-08)
+             # likewise — hrr2_ece 1.5x past band, everything else flat
+             # (see the HRR_SHRINK note). All stay in the
              # frames but out of the batter models. Fatigue (p_np_*) and
              # lg_* help the K model and live in starts cols.
              # This is the SUPERSET; per-prop trimming (e.g. SB features
              # only reach the SB model) lives in train.py PROP_EXCLUDE.
              *CAT_COLS]
-    cols += SHRINK_COLS
+    # r{w}_{r,rbi}_pa_sh benched (see the RUNRBI_FORM_BENCHED note)
+    cols += [c for c in SHRINK_COLS if c not in RUNRBI_FORM_BENCHED]
     return cols
 
 
@@ -2129,7 +2222,8 @@ class Stores:
                 out.update(shrunk_from_sums(zero, pre))  # 0 sums -> priors
             out.update(g_career=0, g_season=0, days_rest=np.nan,
                        c_ibb_pa=np.nan, pos_c_share=np.nan,
-                       pos_dh_share=np.nan, _obpp=np.nan, _slgp=np.nan)
+                       pos_dh_share=np.nan, _obpp=np.nan, _slgp=np.nan,
+                       _obpp_d=np.nan, _slgp_d=np.nan)
             out["c_sb_succ"] = SB_SUCC_PRIOR  # shrink of zero sums
             for w in ROLL_WINDOWS:
                 for k in ["PA", "hr_pa", "tb_ab", "k_pct"]:
@@ -2137,6 +2231,8 @@ class Stores:
                 out.update(shrunk_from_sums(zero, f"r{w}", roll=True))
             out.update(decayed_feats({s: 0.0 for s in DECAY_STATS}))
             out["xpa_bat"] = XPA_PRIOR      # zero decayed sums -> the prior
+            for pre in ("c", "s", "d"):     # zero sums -> the league priors
+                out.update(hrr_hist_feats({"HRR2": 0.0, "HRR3": 0.0}, 0.0, pre))
         else:
             hs = h[h["Season"] == season]
             for pre, frame in [("c", h), ("s", hs)]:
@@ -2154,6 +2250,7 @@ class Stores:
                 out[f"{pre}_obp"] = ((sums["H"] + sums["BB"] + sums["HBP"])
                                      / sums["PA"] if sums["PA"] else np.nan)
                 out.update(shrunk_from_sums(sums, pre))
+                out.update(hrr_hist_feats(sums, len(frame), pre))
                 if pre == "c":
                     out["c_ibb_pa"] = (sums["IBB"] / sums["PA"]
                                        if sums["PA"] else np.nan)
@@ -2169,7 +2266,8 @@ class Stores:
             out["pos_c_share"] = float((h["Position"] == "C").sum()) / len(h)
             out["pos_dh_share"] = float((h["Position"] == "DH").sum()) / len(h)
             for w in ROLL_WINDOWS:
-                tail = h.tail(w)[["PA", "HR", "TB", "SO", "SB"]].sum()
+                tail = h.tail(w)[["PA", "HR", "TB", "SO", "SB",
+                                  "R", "RBI"]].sum()
                 out[f"r{w}_PA"] = tail["PA"]
                 out[f"r{w}_hr_pa"] = tail["HR"] / tail["PA"] if tail["PA"] else np.nan
                 out[f"r{w}_tb_ab"] = tail["TB"] / tail["PA"] if tail["PA"] else np.nan
@@ -2185,6 +2283,14 @@ class Stores:
             # decayed PA per game (exposure), same shrink as the frame
             out["xpa_bat"] = ((dks["PA"] + XPA_K * XPA_PRIOR)
                               / (float(wd.sum()) + XPA_K))
+            # decayed H+R+RBI threshold shares (denominator = decayed game
+            # count, matching the frame's _dk_G)
+            out.update(hrr_hist_feats(dks, float(wd.sum()), "d"))
+            # decayed own OBP/SLG: teammate-context inputs (predict.py
+            # assembles ctx_*_d from the lineup's values)
+            out["_obpp_d"] = ((dks["H"] + dks["BB"] + dks["HBP"]) / dks["PA"]
+                              if dks["PA"] else np.nan)
+            out["_slgp_d"] = dks["TB"] / dks["AB"] if dks["AB"] else np.nan
         out["bat_goao"] = self._prior_val(self.bat_prior, pid, season, "bat_goao")
         out["bat_sprint"] = (
             self._prior_val(self.sprint_prior, pid, season, "SprintSpeed")
