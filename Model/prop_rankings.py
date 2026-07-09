@@ -37,9 +37,11 @@ import pandas as pd
 from sklearn.metrics import log_loss, roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import odds as O  # noqa: E402  (load_odds / devig_two_way / PROP_MARKET)
 import predict as P  # noqa: E402  (count_over / nb_over / K_LINES)
 
 ART = Path(__file__).resolve().parent / "artifacts"
+ODDS_STORE = Path(__file__).resolve().parent.parent / "Data" / "mlb_odds.csv"
 
 # ---------------------------------------------------------------- markets
 # One row per prediction COLUMN (family) in the prediction workbook, named
@@ -61,19 +63,28 @@ BIN_NAMES = {  # Batter Props sheet, probability columns
     "hrr2":   "Batter H+R+RBI 2+",
     "hrr3":   "Batter H+R+RBI 3+",
 }
-# Expected-count columns and their O/U line families, scored across the
-# full calibrated line set each column prices.
-CNT_MARKETS = {
-    "k":     "Pitcher xK + K > x",
-    "outs":  "Pitcher xOuts + Outs > x",
-    "pha":   "Pitcher xHits + Hits > x",
-    "pbb":   "Pitcher xBB + BB > x",
-    "per":   "Pitcher xER + ER > x",
+# O/U count columns, split by what the column IS in the workbook:
+#   PITCHER_CNT — standalone O/U markets; the model is the SOLE pricer of
+#     every line the book posts -> AUC/ECE/Edge% grade the FULL line family.
+#   BATTER_X — expected-count context columns; their half-point lines are
+#     priced (better) by the binary rows -> AUC/ECE grade ONLY the deep
+#     lines they uniquely price (3+ K, 3/4+ TB, 4+ HRR); Edge% still
+#     averages every line they quote.
+#   GAME_CNT — game totals (NB-priced, no binary overlap; full family).
+PITCHER_CNT = {
+    "k":     "Pitcher K > x",
+    "outs":  "Pitcher Outs > x",
+    "pha":   "Pitcher Hits > x",
+    "pbb":   "Pitcher BB > x",
+    "per":   "Pitcher ER > x",
+}
+BATTER_X = {
     "xbk":   "Batter xSO",
     "xtb":   "Batter xTB",
     "xhrr":  "Batter xHRR",
-    "total": "Game Total Runs + Runs > x",
 }
+GAME_CNT = {"total": "Game Total Runs + Runs > x"}
+CNT_MARKETS = {**PITCHER_CNT, **BATTER_X, **GAME_CNT}
 
 
 def ece(p, y, bins=10):
@@ -145,8 +156,9 @@ def count_score(m):
 
 def count_lines(name, head, k_disp, total_disp):
     """The lines a count column prices and its P(over) pricer, mirroring
-    serving: per-line calibrators via count_over, NB for starter K and
-    game totals."""
+    serving: per-line calibrators via count_over (which itself prices the
+    NB_PRICED_TARGETS heads, e.g. per, with the negative binomial), NB for
+    starter K and game totals."""
     if name == "k":
         return P.K_LINES, lambda mu, ln: np.array(
             [P.nb_over(m, ln, k_disp) for m in mu])
@@ -166,9 +178,31 @@ def count_year(snap, art):
     for name, blob in snap["count"].items():
         df = blob["df"]
         mu, y = df["mu"].to_numpy(), df["y"].to_numpy()
-        lines, pricer = count_lines(name, heads.get(name), k_disp,
-                                    total_disp)
-        rels = []
+        head = heads.get(name)
+        lines, pricer = count_lines(name, head, k_disp, total_disp)
+        # the dispersion the head's pricer ASSUMES: NB-priced heads bake
+        # their cal-year dispersion into P(over); calibrator heads price
+        # each listed line empirically but extremes beyond extrapolate a
+        # mean-variance view (1.0). play_note warns on observed EXCESS
+        # over this, not over raw Poisson.
+        priced_disp = (k_disp if name == "k" else
+                       total_disp if name == "total" else
+                       head["disp"] if head is not None
+                       and head.get("target") in P.NB_PRICED_TARGETS
+                       else 1.0)
+        # each line is a binary market: AUC/ECE per line through the actual
+        # serving prices, averaged over the family -> directly comparable to
+        # the binary columns (pricers are monotone in mu, so per-line AUC is
+        # pure within-line ranking; pooling lines would inflate it).
+        # BATTER_X rows skip the lines their binary siblings already price
+        # (xbk 0.5/1.5 = bk/bk2, ...): the workbook sells those from the
+        # binaries, so the x-row's AUC/ECE describes only the deep lines it
+        # uniquely prices. PITCHER_CNT/GAME_CNT are the sole pricer of
+        # every line they quote -> full family.
+        owned_ln = ({m["line"] for m in O.PROP_MARKET.values()
+                     if m["api"] == _CNT_API.get(name)}
+                    if name in BATTER_X else set())
+        rels, aucs, eces = [], [], []
         for ln in lines:
             yy = (y > ln).astype(int)
             if yy.mean() in (0.0, 1.0):
@@ -176,16 +210,134 @@ def count_year(snap, art):
             pp = np.clip(pricer(mu, ln), 1e-4, 1 - 1e-4)
             base_ll = log_loss(yy, np.full_like(pp, yy.mean()))
             rels.append(100 * (base_ll - log_loss(yy, pp)) / base_ll)
+            if ln not in owned_ln:
+                aucs.append(roc_auc_score(yy, pp))
+                eces.append(ece(pp, yy))
         out[name] = {
+            "auc": float(np.mean(aucs)) if aucs else np.nan,
+            "ece": float(np.mean(eces)) if eces else np.nan,
             "rel": float(np.mean(rels)) if rels else np.nan,
             "bias": float(mu.mean() - y.mean()),
             "disp": float(np.mean((y - mu) ** 2) / mu.mean()),
+            "priced_disp": float(priced_disp),
             "rho": float(pd.Series(mu).corr(pd.Series(y),
                                             method="spearman")),
             "mean_y": float(y.mean()),
             "n_lines": len(rels),
         }
     return out
+
+
+# ------------------------------------------------- market edge (Section 9 lite)
+# Model vs the de-vigged sportsbook consensus, graded on whatever days the
+# odds store has captured. This is the ONLY column that touches scraped odds;
+# it is display-only (never part of Score) and fills in automatically as the
+# daily scrape accrues — treat it as anecdote until ~15+ days.
+
+# count-head -> Odds API market (starter heads from odds.STARTER_MARKET,
+# batter heads from their binary siblings' apis; total/winner skipped — the
+# store carries no GamePk to join game rows on)
+_CNT_API = {"k": "pitcher_strikeouts", "outs": "pitcher_outs",
+            "pha": "pitcher_hits_allowed", "pbb": "pitcher_walks",
+            "per": "pitcher_earned_runs",
+            "xbk": "batter_strikeouts", "xtb": "batter_total_bases",
+            "xhrr": "batter_hits_runs_rbis"}
+
+
+def _devig_consensus(store, api, line):
+    """Median de-vigged fair P(over) per (Date, PlayerId) for one market line."""
+    m = store[(store["Market"] == api) & ((store["Line"] - line).abs() < 1e-6)]
+    recs = []
+    for _, r in m.iterrows():
+        fair, _hold = O.devig_two_way(r["OverPrice"], r["UnderPrice"])
+        if not np.isnan(fair):
+            recs.append((r["Date"], r["PlayerId"], fair))
+    if not recs:
+        return pd.DataFrame(columns=["Date", "PlayerId", "fair"])
+    md = pd.DataFrame(recs, columns=["Date", "PlayerId", "fair"])
+    md["PlayerId"] = pd.to_numeric(md["PlayerId"], errors="coerce")
+    return (md.groupby(["Date", "PlayerId"], dropna=False)["fair"]
+            .median().reset_index())
+
+
+def _mkt_edge(y, p, fair, min_n=20):
+    """Relative log-loss edge of the model over the de-vigged consensus on
+    the SAME events (+ = model prices them better than the market)."""
+    y = np.asarray(y, dtype=float)
+    if len(y) < min_n or len(np.unique(y)) < 2:
+        return {"mkt": np.nan, "n": int(len(y))}
+    p = np.clip(np.asarray(p, dtype=float), 1e-4, 1 - 1e-4)
+    q = np.clip(np.asarray(fair, dtype=float), 1e-4, 1 - 1e-4)
+    m_ll, k_ll = log_loss(y, p), log_loss(y, q)
+    return {"mkt": 100 * (k_ll - m_ll) / k_ll, "n": int(len(y))}
+
+
+def _snap_rows(blob):
+    df = blob["df"].copy()
+    df["Date"] = pd.to_datetime(df["Date"]).dt.date
+    df["PlayerId"] = pd.to_numeric(df["PlayerId"], errors="coerce")
+    return df
+
+
+def market_year(snap, art, year):
+    """{key: {'mkt': rel%, 'n': events}} per market vs the odds store, plus
+    '_days' = captured days. Binary props grade their single line; count
+    heads grade every captured line not owned by a binary column, priced
+    exactly as serving prices it (count_lines)."""
+    store = O.load_odds(ODDS_STORE, year=year)
+    out = {"_days": int(store["Date"].nunique()) if len(store) else 0}
+    if store.empty:
+        return out
+    heads = art.get("count_models", {})
+    k_disp = float(art.get("k_disp", 1.0))
+    total_disp = float(art.get("total_disp", 1.0))
+    for key in BIN_NAMES:
+        meta, blob = O.PROP_MARKET.get(key), snap["binary"].get(key)
+        if meta is None or blob is None:
+            continue
+        cons = _devig_consensus(store, meta["api"], meta["line"])
+        if cons.empty:
+            continue
+        j = _snap_rows(blob).merge(cons, on=["Date", "PlayerId"], how="inner")
+        if len(j):
+            out[key] = _mkt_edge(j["y"], j["p"], j["fair"])
+    owned = {(m["api"], m["line"]) for m in O.PROP_MARKET.values()}
+    for key, api in _CNT_API.items():
+        blob = snap["count"].get(key)
+        if blob is None:
+            continue
+        lines = sorted(store.loc[store["Market"] == api, "Line"]
+                       .dropna().unique())
+        if not lines:
+            continue
+        df = _snap_rows(blob)
+        _, pricer = count_lines(key, heads.get(key), k_disp, total_disp)
+        ys, ps, fs = [], [], []
+        for ln in lines:
+            if (api, ln) in owned:
+                continue    # that line is graded under its binary column
+            cons = _devig_consensus(store, api, ln)
+            if cons.empty:
+                continue
+            j = df.merge(cons, on=["Date", "PlayerId"], how="inner")
+            if not len(j):
+                continue
+            ys.append((j["y"].to_numpy() > ln).astype(float))
+            ps.append(np.asarray(pricer(j["mu"].to_numpy(), ln), dtype=float))
+            fs.append(j["fair"].to_numpy())
+        if ys:
+            out[key] = _mkt_edge(np.concatenate(ys), np.concatenate(ps),
+                                 np.concatenate(fs))
+    return out
+
+
+def _mkt_cell(mkt, key):
+    m = mkt.get(key)
+    if m is None:
+        return "—"
+    if np.isnan(m["mkt"]):
+        return f"— (n={m['n']})"
+    return f"{m['mkt']:+.1f} (n={m['n']})"
 
 
 def play_note(kind, m25, m26):
@@ -202,10 +354,17 @@ def play_note(kind, m25, m26):
             notes.append(f"under-predicts {bias:.2f} -> lean overs")
         else:
             notes.append("unbiased")
-        if disp > 1.5:
-            notes.append(f"wild tails (disp {disp:.1f}) -> shade extreme lines")
-        elif disp <= 1.05:
-            notes.append("tails priced right")
+        priced = (m25.get("priced_disp", 1.0) + m26.get("priced_disp", 1.0)) / 2
+        excess = disp / max(priced, 1.0)
+        if excess > 1.5:
+            notes.append(f"wild tails (disp {disp:.1f} vs {priced:.1f} priced)"
+                         " -> shade extreme lines")
+        elif excess <= 1.05:
+            notes.append("tails priced right"
+                         + (f" (NB {priced:.1f})" if priced > 1.05 else ""))
+        else:
+            notes.append(f"tails a bit wilder than priced (disp {disp:.1f} "
+                         f"vs {priced:.1f}) -> light shade on extremes")
         _ = rel_scale
     else:
         ec = (m25["ece"] + m26["ece"]) / 2
@@ -233,6 +392,9 @@ def build_table():
     b25, b26 = binary_year(snap25), binary_year(snap26)
     c25 = count_year(snap25, art25)
     c26 = count_year(snap26, art26)
+    # market edge exists only where odds were captured (2026 season store)
+    mkt = market_year(snap26, art26, 2026)
+    mkt_days = mkt.pop("_days", 0)
 
     rows = []
     for key, name in BIN_NAMES.items():
@@ -245,6 +407,7 @@ def build_table():
             "ECE": (m25["ece"] + m26["ece"]) / 2,
             "Bias": np.nan, "Disp": np.nan,
             "Edge%": (m25["rel"] + m26["rel"]) / 2,
+            "MktEdge%": _mkt_cell(mkt, key),
             "Notes": play_note("bin", m25, m26),
         })
     for key, name in CNT_MARKETS.items():
@@ -258,10 +421,12 @@ def build_table():
         rows.append({
             "Market": name, "Key": key, "Score": (s25 + s26) / 2,
             "S25": s25, "S26": s26,
-            "AUC": np.nan, "ECE": np.nan,
+            "AUC": (m25["auc"] + m26["auc"]) / 2,
+            "ECE": (m25["ece"] + m26["ece"]) / 2,
             "Bias": (m25["bias"] + m26["bias"]) / 2,
             "Disp": (m25["disp"] + m26["disp"]) / 2,
             "Edge%": (m25["rel"] + m26["rel"]) / 2,
+            "MktEdge%": _mkt_cell(mkt, key),
             "Notes": note,
         })
     # moneyline: no per-row snapshot and, more to the point, no proven side
@@ -270,7 +435,7 @@ def build_table():
                  "Key": "winner",
                  "Score": 0.0, "S25": np.nan, "S26": np.nan,
                  "AUC": np.nan, "ECE": np.nan, "Bias": np.nan,
-                 "Disp": np.nan, "Edge%": np.nan,
+                 "Disp": np.nan, "Edge%": np.nan, "MktEdge%": "—",
                  "Notes": "no side edge vs always-home (McNemar n.s.) "
                           "-> probability is context, never a bet"})
     df = pd.DataFrame(rows).sort_values("Score", ascending=False)
@@ -281,7 +446,8 @@ def build_table():
         lambda s: next(t for c, t in cuts if s >= c))
     df.insert(0, "#", range(1, len(df) + 1))
     return df[["#", "Market", "Key", "Tier", "Score", "S25", "S26",
-               "AUC", "ECE", "Bias", "Disp", "Edge%", "Notes"]]
+               "AUC", "ECE", "Bias", "Disp", "Edge%", "MktEdge%",
+               "Notes"]], mkt_days
 
 
 LEGEND = [
@@ -292,11 +458,16 @@ LEGEND = [
     ("S25 / S26", "The same score computed on each test year alone - "
      "agreement between them means the ranking is stable, not one-year "
      "noise."),
-    ("AUC", "Ranking skill of a binary column (0.5 = coin flip). Can it "
-     "put the players who DID do it above the ones who didn't?"),
-    ("ECE", "Calibration of a binary column: average gap between stated "
-     "probability and reality. 0 = perfect; above ~0.010 the probability "
-     "level drifts - trust the ranking more than the number."),
+    ("AUC", "Ranking skill (0.5 = coin flip). Can it put the players who "
+     "DID do it above the ones who didn't? O/U columns: computed per line "
+     "through the actual quoted P(over), averaged across the column's line "
+     "family - comparable to the binary rows. Batter x-columns cover ONLY "
+     "the deep lines they uniquely price (their half-point lines belong to "
+     "the binary rows)."),
+    ("ECE", "Calibration: average gap between stated probability and "
+     "reality. 0 = perfect; above ~0.010 the probability level drifts - "
+     "trust the ranking more than the number. O/U columns: per-line ECE of "
+     "the quoted prices, averaged across the same line set as AUC."),
     ("Bias", "O/U columns: predicted count minus actual, on average. "
      "Positive = model over-predicts -> lean unders."),
     ("Disp", "O/U columns: error variance / mean. 1.0 = what the P(over) "
@@ -305,6 +476,11 @@ LEGEND = [
     ("Edge%", "How much better the column prices the event than the "
      "base-rate guess (relative log-loss beat; O/U columns averaged "
      "across every line priced). Held-out years only, no scraped odds."),
+    ("MktEdge%", "Model vs the de-vigged sportsbook consensus on the SAME "
+     "events, from the scraped odds store (+ = model prices them better "
+     "than the market). Display-only - never part of Score - and pooled "
+     "over every captured line a column owns. Anecdote until ~15+ scraped "
+     "days accrue; '(n=...)' is the graded event count."),
     ("Tier", "1 ELITE / 2 STRONG: trust and act on these. 3 SOLID: usable "
      "with the noted caveat. 4 MARGINAL / 5 AVOID: the model cannot "
      "separate players well enough to act on."),
@@ -334,7 +510,7 @@ def main():
                          "(default: Model/PROP_RANKINGS.xlsx)")
     args = ap.parse_args()
 
-    df = build_table()
+    df, mkt_days = build_table()
     out = df.copy()
     for c in ("Score", "S25", "S26"):
         out[c] = out[c].map(lambda v: f"{v:.0f}" if pd.notna(v) else "-")
@@ -350,6 +526,10 @@ def main():
     print("\n=== Prediction-column performance rankings — held-out test "
           "years 2025 + 2026 averaged ===\n")
     print(out.to_string(index=False))
+    print(f"\n  MktEdge%: model vs de-vigged book consensus on the same "
+          f"events — {mkt_days} scraped day(s) in the odds store"
+          + ("; ANECDOTE until ~15+ days accrue." if mkt_days < 15
+             else "."))
     print("\n  Calibration: ECE = mean |predicted % - actual %| (binary "
           "columns; 0 = perfect, >.010 = probability level off).")
     print("               Bias = predicted minus actual count; Disp = "

@@ -1149,17 +1149,29 @@ def _data_fingerprint():
                   if p.name != "mlb_odds.csv")
 
 
-def run_paired(art, results, count_preds, tag, year, n_boot):
+def run_paired(art, results, count_preds, tag, year, n_boot, era=None):
     """Print the paired keep/bench verdict against the --set-baseline snapshot,
-    plus the ② feature-usage gate for columns added since that snapshot."""
-    path = ART / f"eval_paired_{tag}{year}.joblib"
-    print(f"\n=== 11p. Paired change vs baseline (day-block paired bootstrap, "
+    plus the ② feature-usage gate for columns added since that snapshot.
+    `era` names a frozen archive dir under artifacts/ (e.g.
+    era_2026-07-09_queue_closed): the snapshot loads from there instead of
+    the rolling baseline — the CUMULATIVE 'did everything kept since this
+    era sum to harm?' read. Era reads warn on data drift instead of
+    refusing (drift is expected across months; a CI-clear harm on an era
+    read is grounds for the RIGOROUS check — retrain the archived era
+    sources on current data — before pruning anything)."""
+    base_dir = ART / era if era else ART
+    path = base_dir / f"eval_paired_{tag}{year}.joblib"
+    label = f"era '{era}'" if era else "baseline"
+    print(f"\n=== 11p. Paired change vs {label} (day-block paired bootstrap, "
           f"{n_boot} draws; + = candidate better; * = north-star) ===")
     if not path.exists():
         pre = "" if tag == "select_" else "--confirm "
-        print(f"  No paired baseline at {path.name}. Snapshot the PRE-change "
-              f"model first:\n    python Model/evaluate_deep.py {pre}--set-baseline"
-              f"\n  (--set-baseline now also writes the per-row paired snapshot.)")
+        print(f"  No paired snapshot at {path}. "
+              + ("Check the era dir name." if era else
+                 "Snapshot the PRE-change model first:\n    python "
+                 f"Model/evaluate_deep.py {pre}--set-baseline"
+                 "\n  (--set-baseline now also writes the per-row paired "
+                 "snapshot.)"))
         return
     comp = joblib.load(path)
     if comp.get("data_fp") is not None:
@@ -1167,7 +1179,13 @@ def run_paired(art, results, count_preds, tag, year, n_boot):
         now = {x[0]: tuple(x[1:]) for x in _data_fingerprint()}
         changed = sorted(k for k in base.keys() | now.keys()
                          if base.get(k) != now.get(k))
-        if changed:
+        if changed and era:
+            print(f"  NOTE: {len(changed)} data file(s) changed since this era "
+                  "was frozen — deltas below mix\n  code keeps with data "
+                  "drift. Treat CI-clear harm as a signal to run the "
+                  "rigorous\n  check (retrain the era dir's archived sources "
+                  "on current data), not as a verdict.")
+        elif changed:
             pre = "" if tag == "select_" else "--confirm "
             print("  !! STALE BASELINE — Data/*.csv changed since the snapshot was")
             print("  !! written (a scrape ran). This read would conflate data drift")
@@ -1264,6 +1282,13 @@ def main():
                          "(candidate - baseline) per prop vs the snapshot a "
                          "prior --set-baseline saved, plus the feature-usage "
                          "gate. Fast (skips the verbose sections).")
+    ap.add_argument("--era", default=None, metavar="DIR",
+                    help="with --paired: read the snapshot from a frozen "
+                         "archive under artifacts/ (e.g. "
+                         "era_2026-07-09_queue_closed) instead of the rolling "
+                         "baseline — the cumulative 'did everything kept "
+                         "since sum to harm?' check. Warns on data drift "
+                         "instead of refusing.")
     ap.add_argument("--odds", default=str(O.DEFAULT_STORE),
                     help="odds store CSV for the vs-market section "
                          "(Scripts/scrape_odds.py writes it)")
@@ -1330,7 +1355,8 @@ def main():
 
     if args.paired:
         count_preds = build_count_preds(art, bf_y, sf_y, gf_y)
-        run_paired(art, results, count_preds, tag, args.year, args.boot)
+        run_paired(art, results, count_preds, tag, args.year, args.boot,
+                   era=args.era)
         return
 
     section_confidence(results, args.boot)

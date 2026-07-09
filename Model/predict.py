@@ -82,12 +82,27 @@ def nb_over(lam, line, disp=1.0):
     return 1 - cdf
 
 
+# Heads whose lines are priced by the negative binomial even though the
+# artifact carries per-line calibrators. per (earned runs, disp ~1.5) moved
+# here after the 2026-07-09 shoot-out: NB beat the calibrators on BOTH tail
+# lines (3.5/4.5) in BOTH years and on every 2026 line (mean rel-edge
+# +0.11), tying 2025 overall — and a single distribution can't produce
+# crossing line probabilities the way independent per-line logistics can.
+# Under-dispersed heads (outs ~0.8) stay on calibrators: NB can only widen
+# variance. One-line revert: remove the target from this set.
+NB_PRICED_TARGETS = {"y_per"}
+
+
 def count_over(head, mu, line):
     """P(count > line) for a count head: the calibration-year per-line
     logistic when the artifact carries one (under-dispersed counts like
     starter outs misprice under NB, which can only widen variance), else
-    nb_over with the head's dispersion. Returns an array over mu."""
+    nb_over with the head's dispersion. Over-dispersed heads listed in
+    NB_PRICED_TARGETS skip their calibrators and price NB (fat tails).
+    Returns an array over mu."""
     mu = np.atleast_1d(np.asarray(mu, dtype=float))
+    if head.get("target") in NB_PRICED_TARGETS:
+        return np.array([nb_over(m, line, head["disp"]) for m in mu])
     lc = head.get("line_cals", {}).get(line)
     if lc is not None:
         return lc.predict_proba(mu.reshape(-1, 1))[:, 1]

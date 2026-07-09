@@ -1024,14 +1024,11 @@ SHRINK_ROLL = ("hr_pa", "tb_ab", "k_pct", "sb_pa",
 # over), K in games. hrr2/hrr3 were the only props with no joint target
 # history; the marginals (c_r_pa_sh etc.) miss how a batter's H/R/RBI
 # cluster within games (a cleanup hitter's H and RBI arrive together).
-# BENCHED (2026-07-08, selection run): 0 better / 1 worse (hrr2_ece +.0044,
-# 1.5x band) / 75 within noise — hrr2/hrr3 AUC/edge/top10 all flat, xhrr
-# MAE flat; the same calibration-harm-without-ranking-gain signature that
-# benched xpa_*. The marginals evidently already carry the joint signal.
-# Everything stays in the frames + inference path (coverage 100%, parity
-# 1.7e-16, target corr ~+0.11); re-enable = re-add the six columns to
-# batter_feature_cols and re-route in train.py (a d_-only retry is the
-# cheapest variant if ever revisited).
+# Benched 2026-07-08 (hrr2_ece 1.5x band, rest flat), RE-ACCEPTED
+# 2026-07-09 (queue Tier B6, keep-leaning bar) with an hrr2 ROUTE-AROUND:
+# the six columns route via train._HRR_HIST to hrr3 + xhrr only; hrr2
+# (the ece casualty) never sees them. Coverage 100%, parity 1.7e-16,
+# target corr ~+0.11.
 HRR_SHRINK = {"hrr2_g": (0.395, 40.0), "hrr3_g": (0.250, 40.0)}
 
 # Home-plate umpire zone tendency: his career K% and BB% per batter-faced
@@ -1059,14 +1056,13 @@ SHRINK_COLS = ([f"c_{n}_sh" for n in SHRINK] + [f"s_{n}_sh" for n in SHRINK]
                + [f"r{w}_{n}_sh" for w in ROLL_WINDOWS for n in SHRINK_ROLL])
 
 # rolling + decayed own R/RBI rates: computed in BOTH paths (parity
-# 5.6e-17) but BENCHED out of the model superset (2026-07-08, routed to
-# run/rbi as _RUNRBI_FORM): run_ece +.0063 marginal (past band) against
-# ~nothing on AUC/edge; rbi mixed (top10 up, auc/ece down vs flips-alone).
-# Same calibration-harm signature as xpa_*/hrr-history. Re-enable = drop
-# this filter from batter_feature_cols and re-route in train.py.
-RUNRBI_FORM_BENCHED = ([f"r{w}_{n}_pa_sh" for w in ROLL_WINDOWS
-                        for n in ("r", "rbi")]
-                       + ["d_r_pa_sh", "d_rbi_pa_sh"])
+# 5.6e-17). Benched 2026-07-08 (run_ece +.0063 past band, rbi mixed),
+# RE-ACCEPTED 2026-07-09 (queue Tier B5, keep-leaning bar) with a run
+# ROUTE-AROUND — routed with train._RUNRBI_FORM to rbi/hrr2/hrr3/xhrr;
+# run (the ece casualty) never sees them.
+RUNRBI_FORM_COLS = ([f"r{w}_{n}_pa_sh" for w in ROLL_WINDOWS
+                     for n in ("r", "rbi")]
+                    + ["d_r_pa_sh", "d_rbi_pa_sh"])
 
 
 def _shrink(numer, denom, name):
@@ -1797,17 +1793,29 @@ def batter_feature_cols():
              "c_xbh_ab", "s_xbh_ab", "c_obp", "s_obp", "c_ibb_pa",
              "pos_c_share", "pos_dh_share",
              "ctx_ahead_obp", "ctx_behind_slg",
+             # decayed teammate ctx: benched 2026-07-08 (0/0/76 within
+             # noise), RE-ACCEPTED under the keep-leaning bar 2026-07-09
+             # (queue Tier A2) — routed with _CTX in train.py
+             "ctx_ahead_obp_d", "ctx_behind_slg_d",
              # rbi_opp_obp BENCHED 2026-07-09 (train._CTX note): computed in
              # both paths but out of the superset — deeper order added no RBI
              # signal across three designs.
-             # NOTE: decayed teammate ctx (ctx_*_d, 2026-07-08) BENCHED —
-             # 0/0/76 within noise on run/rbi/hrr (corr with targets ~=
-             # the career ctx already in the models: nothing new to add);
-             # stays computed in both paths, out of the superset.
              "d_PA", "d_hr_pa_sh", "d_tb_ab_sh", "d_k_pct_sh",
              "d_bb_pct_sh", "d_sb_pa_sh",
+             # decayed r/rbi form: re-accepted 2026-07-09 with the rolling
+             # variants (RUNRBI_FORM_COLS note; run routed around)
+             "d_r_pa_sh", "d_rbi_pa_sh",
+             # own H+R+RBI threshold-share history: re-accepted 2026-07-09
+             # (HRR_SHRINK note; hrr3/xhrr only, hrr2 routed around)
+             "c_hrr2_g_sh", "s_hrr2_g_sh", "d_hrr2_g_sh",
+             "c_hrr3_g_sh", "s_hrr3_g_sh", "d_hrr3_g_sh",
              "tr15_hr", "tr15_tb", "tr15_k", "dev_hr", "dev_tb", "dev_k",
              "p5_k_trend", "p5_hr_trend", "p_era_trend",
+             # league 30-day environment + opposing-starter fatigue:
+             # benched iteration 4, RE-ACCEPTED 2026-07-09 (queue Tier C)
+             # — routed via train._ENV/_PNP (off the xhrr/xtb mean-heads)
+             "lg_hr_pa", "lg_r_pa", "lg_k_pa", "lg_bb_pa", "lg_sb_pa",
+             "p_np_last", "p_np_l3",
              "bip_n", "bip_ev", "bip_la", "bip_hh", "bip_brl", "bip_xba",
              "bip_xwoba", "bip_gb", "bip_pull", "bip_pullair",
              "bipd_n", "bipd_ev", "bipd_brl", "bipd_xwoba", "bipd_gb",
@@ -1815,6 +1823,11 @@ def batter_feature_cols():
              "pbip_n", "pbip_ev", "pbip_la", "pbip_hh", "pbip_brl",
              "pbip_xba", "pbip_xwoba", "pbip_gb",
              "pbipd_n", "pbipd_ev", "pbipd_brl", "pbipd_xwoba", "pbipd_gb",
+             # hand-split contact quality: benched 2026-07-07 (tb2 ECE),
+             # RE-ACCEPTED 2026-07-09 (queue Tier B4) with a tb2/xtb
+             # route-around — see train._VHB_PWR/_VHB_CON
+             "bvh_xwoba", "bvh_brl", "bvh_n",
+             "pvh_xwoba", "pvh_brl", "pvh_n",
              "bd_wsw_c", "bd_wsw_d", "bd_chase_c", "bd_chase_d",
              "p_swstr_d", "bat_sprint", "bat_hp1b", "opp_oaa",
              # HP-umpire zone tendency — routed to the K/BB props only
@@ -1828,21 +1841,22 @@ def batter_feature_cols():
              # tried (iteration 3) and hurt the batter props on the holdout;
              # the league-environment lg_* columns (iteration 4) were flat
              # to slightly negative for every prop; hand-split contact
-             # quality (bvh_*/pvh_*, 2026-07-07) was within noise everywhere
-             # and pushed tb2 ECE past its band — ECE drifted worse in most
-             # props that received it; exposure features (xpa_bat/xpa_slot,
+             # quality (bvh_*/pvh_*, benched 2026-07-07 on tb2 ECE) was
+             # re-accepted 2026-07-09 with a tb2/xtb route-around (cols
+             # above); exposure features (xpa_bat/xpa_slot,
              # 2026-07-07 eve) likewise — rbi/single/bk ECE past band, no
              # AUC/edge movement (see the XPA_PRIOR note); own H+R+RBI
              # threshold-share history (c/s/d_hrr{2,3}_g_sh, 2026-07-08)
              # likewise — hrr2_ece 1.5x past band, everything else flat
              # (see the HRR_SHRINK note). All stay in the
              # frames but out of the batter models. Fatigue (p_np_*) and
-             # lg_* help the K model and live in starts cols.
+             # lg_* were re-accepted into the batter models 2026-07-09
+             # (cols above); they also live in starts cols for the K model.
              # This is the SUPERSET; per-prop trimming (e.g. SB features
              # only reach the SB model) lives in train.py PROP_EXCLUDE.
              *CAT_COLS]
-    # r{w}_{r,rbi}_pa_sh benched (see the RUNRBI_FORM_BENCHED note)
-    cols += [c for c in SHRINK_COLS if c not in RUNRBI_FORM_BENCHED]
+    # r{w}_{r,rbi}_pa_sh re-accepted 2026-07-09 (RUNRBI_FORM_COLS note)
+    cols += SHRINK_COLS
     return cols
 
 

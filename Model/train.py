@@ -95,7 +95,10 @@ HR_MONOTONE = {
     "c_hr_pa_sh": 1, "s_hr_pa_sh": 1, "d_hr_pa_sh": 1,
     "park_hr_pg": 1, "Temp": 1, "Elevation_ft": 1,
 }
-MONOTONE = {}
+# re-accept test 2026-07-09 (queue Tier A1, keep-leaning bar): flat on
+# accuracy when benched 07-07, but monotonicity is a serving-robustness
+# guarantee on odd GUI inputs; keep unless the paired read shows harm.
+MONOTONE = {"hr": HR_MONOTONE}
 
 # Seed bagging (2026-07-08) for the weak/target props: N GBMs differing
 # only in random_state, predictions averaged (features.MeanBag) before the
@@ -130,6 +133,26 @@ _SB_FEATS = ["c_sb_pa_sh", "s_sb_pa_sh", "r7_sb_pa_sh", "r15_sb_pa_sh",
              "r30_sb_pa_sh", "d_sb_pa_sh", "c_sb_succ", "psb_sb27",
              "psb_stop", "tsb_sb_g", "tsb_stop"]
 _RUNRBI = ["c_r_pa_sh", "s_r_pa_sh", "c_rbi_pa_sh", "s_rbi_pa_sh"]
+# rolling/decayed R+RBI form: benched 2026-07-08 on run_ece, RE-ACCEPTED
+# 2026-07-09 (queue Tier B5) with run routed around — excluded everywhere
+# _RUNRBI is, PLUS run; reaches rbi/hrr2/hrr3/xhrr
+_RUNRBI_FORM = list(F.RUNRBI_FORM_COLS)
+# own H+R+RBI threshold-share history: benched 2026-07-08 on hrr2_ece,
+# RE-ACCEPTED 2026-07-09 (queue Tier B6) with hrr2 routed around —
+# excluded from EVERY prop except hrr3 and the xhrr head
+_HRR_HIST = ["c_hrr2_g_sh", "s_hrr2_g_sh", "d_hrr2_g_sh",
+             "c_hrr3_g_sh", "s_hrr3_g_sh", "d_hrr3_g_sh"]
+# league 30-day environment + opposing-starter fatigue on the BATTER side:
+# benched iteration 4, re-tested 2026-07-09 (queue Tier C) — the re-test
+# CONFIRMED the bench: hits2 AUC -0.0019 CI-clear harm + broad negative
+# tilt (hit/bb/sb edges CI-negative) despite huge usage (lg_sb/bb_pa gain
+# 18-21k = dilution, not signal). Excluded from EVERY batter prop except
+# the xbk head, the one CI-clear WINNER (MAE +0.0004 [+0.0001,+0.0007] —
+# league K environment is on-topic for batter strikeouts, same reason the
+# starter-K model keeps lg_k_pa).
+_ENV = list(F.ENV_COLS)
+_PNP = ["p_np_last", "p_np_l3"]
+_TIERC = _ENV + _PNP
 # Productive/unproductive outs (features.SHRINK gidp_pa/sf_pa, 2026-07-09):
 # EB-shrunk career+season GIDP/PA and SF/PA rates. GIDP kills rallies -> hurts
 # both the batter's run and RBI, so it reaches run AND rbi; SF is a run-cashing
@@ -149,7 +172,11 @@ _PRODOUT = _GIDP + _SF
 # 2026-07-08) were tried on run/rbi/hrr and BENCHED — 0/0/76 within noise;
 # they carry ~the same information as the career rates (corr with targets
 # nearly identical). Computed in both paths, out of the superset.
-_CTX = ["ctx_ahead_obp", "ctx_behind_slg"]
+# ctx_*_d (90-day-decayed variants) re-accept test 2026-07-09 (queue Tier
+# A2, keep-leaning bar): benched 07-08 as 0/0/76 within-noise ballast;
+# keep unless the paired read shows harm.
+_CTX = ["ctx_ahead_obp", "ctx_behind_slg",
+        "ctx_ahead_obp_d", "ctx_behind_slg_d"]
 # rbi_opp_obp (full-order / deeper-order OBP of hitters ahead) BENCHED 2026-07-09
 # after three designs (0.5 & 0.7 full-order decay, 3rd-5th-ahead isolation) all
 # came back flat-to-slightly-negative on rbi/run/hrr — the order beyond the 2
@@ -181,11 +208,14 @@ _BIP_HIT = ["bip_n", "bip_xba", "bip_xwoba", "bip_gb",
             "pbip_n", "pbip_xba", "pbip_xwoba", "pbip_gb",
             "pbipd_n", "pbipd_xwoba", "pbipd_gb"]
 _PLATE = ["bd_wsw_c", "bd_wsw_d", "bd_chase_c", "bd_chase_d"]
-# NOTE: hand-split contact quality (bvh_*/pvh_*) was routed here as
-# _VHB_PWR/_VHB_CON (2026-07-07), came back within noise on every prop and
-# pushed tb2 ECE past its band; it now lives in the frames only (see the
-# NOTE in features.batter_feature_cols). tsb_* (battery SB-allowed, same
-# batch) stays: sb-only routing, positive tilt, no regressions.
+# Hand-split contact quality (bvh_*/pvh_*): benched 2026-07-07 (within
+# noise everywhere, tb2 ECE past band), RE-ACCEPTED under the keep-leaning
+# bar 2026-07-09 (queue Tier B4) with a tb2 ROUTE-AROUND — tb2 (and xtb via
+# its exclude) never sees it; everyone else routes like the _BIP siblings
+# (PWR = barrel share, CON = xwOBA-on-contact + sample size). tsb_*
+# (battery SB-allowed, same 07-07 batch) stays: sb-only routing.
+_VHB_PWR = ["bvh_brl", "pvh_brl"]
+_VHB_CON = ["bvh_xwoba", "pvh_xwoba", "bvh_n", "pvh_n"]
 _SPD = ["bat_sprint", "bat_hp1b"]            # raw footspeed: SB + run only
 _DEF = ["opp_oaa"]                           # opponent defense: BABIP props
 _PSW = ["p_swstr_d"]                         # opposing starter whiff form
@@ -212,9 +242,9 @@ _BAT = list(F.BAT_TRACK_COLS)
 
 # batter strikeouts: keep only K-flavored signal (k rates, plate discipline,
 # starter/bullpen whiff, arsenal) — everything else is dilution risk
-_BK_EXC = (_SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR + _HBF
-           + _PEN2 + _TLOC + _BIP_PWR + _BIP_HIT + _SPD + _DEF + _PARK_OFF
-           + _PRODOUT)
+_BK_EXC = (_SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _IBB + _PWR + _HBF
+           + _PEN2 + _TLOC + _BIP_PWR + _BIP_HIT + _VHB_PWR + _VHB_CON
+           + _SPD + _DEF + _PARK_OFF + _PRODOUT)
 
 # Routing flips (2026-07-08), kept under the strictly-not-worse standard
 # (tsb precedent): hit+footspeed (4/4 metrics tilted positive on 2025),
@@ -225,45 +255,73 @@ _BK_EXC = (_SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR + _HBF
 # the xbk head via bk's routing); every other batter prop excludes it.
 # _BAT (bat tracking) appears in NO exclude list -> it reaches every batter
 # prop (see the _BAT note above; inert until ~2027, pruned empirically then).
+# tb2's list is named so the xtb head can extend it (see the "xtb" key)
+_TB2_EXC = (_SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP
+            + _IBB + _UMP + _PRODOUT + _VHB_PWR + _VHB_CON)
 PROP_EXCLUDE = {
-    "hr":    _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _SPD + _DEF + _UMP
+    "hr":    _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _SPD + _DEF + _UMP
              + _PRODOUT,
     # hit keeps footspeed (beat-out grounders, like single). hits2 stays speed-
     # free (2-hit game is contact, not legs — SPD tested 2026-07-09, flat).
     # tb2 GAINED footspeed 2026-07-09 (KEPT: tb2 AUC +0.0009, xtb MAE +0.0012 —
     # legs stretch singles / turn outs into extra total bases).
-    "hit":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
-             + _BIP_PWR + _UMP + _PRODOUT,
-    "hits2": _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
-             + _BIP_PWR + _SPD + _UMP + _PRODOUT,
-    "tb2":   _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _UMP + _PRODOUT,
+    "hit":   _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _IBB + _PWR
+             + _BIP_PWR + _VHB_PWR + _UMP + _PRODOUT,
+    # hits2+_BIP_PWR tested 2026-07-09 and REVERTED (flat: AUC +0.0002
+    # [-0.0012,+0.0017] — hard contact added nothing hits2's contact
+    # features don't carry; 4th of 5 flat routing gaps)
+    "hits2": _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _IBB + _PWR
+             + _BIP_PWR + _VHB_PWR + _SPD + _UMP + _PRODOUT,
+    # tb2 route-around: the 07-07 hand-split bench was tb2_ece alone
+    "tb2":   _TB2_EXC,
     # run keeps plate discipline (chase feeds OBP -> runs); GIDP suppresses
     # runs (batter erased), but SF cashes OTHERS' runs, not his -> exclude _SF
-    "run":   _SB_FEATS + _PWR + _XBH + _IBB + _BIP_PWR + _UMP + _SF,
+    # run also excludes _VHB_CON (2026-07-09 re-accept read: run AUC -0.0009
+    # CI-clear harm with the contact half in; route-around per policy v2)
+    # and _RUNRBI_FORM (its 07-08 bench was run_ece — same route-around)
+    "run":   _SB_FEATS + _PWR + _XBH + _IBB + _BIP_PWR + _VHB_PWR + _VHB_CON
+             + _RUNRBI_FORM + _HRR_HIST + _TIERC + _UMP + _SF,
     # rbi keeps Statcast power (own HR = automatic RBI; hard contact cashes
     # runners) — box-score ISO alone lags it. (_PWR + _PLATE tested 2026-07-09,
     # both flat — reverted.) KEEPS _PRODOUT (GIDP kills RBI, SF is an RBI).
-    "rbi":   _SB_FEATS + _PWR + _SPD + _PLATE + _UMP,
+    "rbi":   _SB_FEATS + _PWR + _SPD + _PLATE + _UMP + _HRR_HIST + _TIERC,
     # bb KEEPS _UMP (a tight zone drives walks)
-    "bb":    _SB_FEATS + _RUNRBI + _CTX + _PWR + _XBH + _HBF + _PEN2 + _TLOC
-             + _BIP_PWR + _BIP_HIT + _SPD + _DEF + _PARK_OFF + _PRODOUT,
-    "sb":    _VSH + _RUNRBI + _CTX + _OBP + _PWR + _XBH + _IBB + _PEN2
-             + _TLOC + _HBF + _VLOC + _POS + _BIP_PWR + _BIP_HIT + _DEF
-             + _PLATE + _PSW + _UMP + _PARK_OFF + _PRODOUT,
+    "bb":    _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _PWR + _XBH + _HBF + _PEN2 + _TLOC
+             + _BIP_PWR + _BIP_HIT + _VHB_PWR + _VHB_CON + _SPD + _DEF
+             + _PARK_OFF + _PRODOUT,
+    "sb":    _VSH + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _PWR + _XBH + _IBB + _PEN2
+             + _TLOC + _HBF + _VLOC + _POS + _BIP_PWR + _BIP_HIT + _VHB_PWR
+             + _VHB_CON + _DEF + _PLATE + _PSW + _UMP + _PARK_OFF + _PRODOUT,
     # singles = contact + footspeed (beat-out grounders), no power groups
-    "single": _SB_FEATS + _RUNRBI + _CTX + _OBP + _XBH + _IBB + _PWR
-              + _BIP_PWR + _UMP + _PRODOUT,
+    "single": _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _IBB + _PWR
+              + _BIP_PWR + _VHB_PWR + _UMP + _PRODOUT,
     # doubles = gap power + speed (stretching); HR-log quality stays out
     # (_PWR tested 2026-07-09, FAILED: double AUC -0.0017 — BIP_PWR already
     # carries double's power, HR-log just diluted the weakest prop).
-    "double": _SB_FEATS + _RUNRBI + _CTX + _OBP + _IBB + _PWR + _UMP + _PRODOUT,
+    "double": _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _IBB + _PWR + _UMP + _PRODOUT,
     # bk/bk2 KEEP _UMP (a generous zone drives strikeouts)
     "bk":    _BK_EXC,
     "bk2":   _BK_EXC,
     # H+R+RBI is a broad, high-base-rate target (tb2-like robustness):
     # only the steal columns clearly don't speak to it; ump is zone-only
-    "hrr2":  _SB_FEATS + _UMP + _PRODOUT,
-    "hrr3":  _SB_FEATS + _UMP + _PRODOUT,
+    # hrr2 routes around _HRR_HIST (its 07-08 bench was hrr2_ece); hrr3
+    # and the xhrr head keep it
+    "hrr2":  _SB_FEATS + _UMP + _PRODOUT + _HRR_HIST + _TIERC,
+    "hrr3":  _SB_FEATS + _UMP + _PRODOUT + _TIERC,
+    # not a batter prop: COUNT_HEADS routing key for the xhrr head, which
+    # normally inherits hrr2's list. Split 2026-07-09 so re-accepts can stay
+    # ON the binary hrr props but OFF this Tweedie head, whose mean keeps
+    # taking CI-clear MAE harm from hrr-adjacent additions (hand-split
+    # -0.0010, HRR-history -0.0006) the binary thresholds tolerate. The
+    # batter prop training loop iterates PROPS, so this key is ignored there.
+    "xhrr":  _SB_FEATS + _UMP + _PRODOUT + _VHB_PWR + _VHB_CON + _HRR_HIST
+             + _ENV + _PNP,
+    # same lean-diet insurance for the other Tweedie mean-head (see the
+    # xhrr note): xtb = tb2's routing plus the Tier-C groups kept off
+    "xtb":   _TB2_EXC + _ENV + _PNP,
+    # xbk: the ONE Tier-C keep — bk's routing minus the _TIERC exclusion
+    # (league K environment reaches the batter-K count head only)
+    "xbk":   [c for c in _BK_EXC if c not in set(_TIERC)],
 }
 
 # batter prop -> (target column, description)
@@ -308,15 +366,15 @@ STACK_DONORS = {}
 # heads) — used to keep the HP-ump zone tendency on K/walks but off the
 # outs/hits/earned-run heads it doesn't speak to.
 COUNT_HEADS = {
-    "xbk":  dict(frame="bat", target="bk_count", exclude="bk",
+    "xbk":  dict(frame="bat", target="bk_count", exclude="xbk",
                  lines=[0.5, 1.5, 2.5], desc="batter strikeouts"),
     # xhrr/xtb run ~2x Poisson variance (over-dispersed); a Tweedie objective
     # (power 1.3) models that heavier tail in the mean instead of only in the
     # post-hoc dispersion. The other heads stay Poisson (outs/xbk are UNDER
     # Poisson variance — Tweedie would push the wrong way).
-    "xhrr": dict(frame="bat", target="hrr_count", exclude="hrr2",
+    "xhrr": dict(frame="bat", target="hrr_count", exclude="xhrr",
                  tweedie=1.3, lines=[1.5, 2.5, 3.5], desc="hits+runs+RBIs"),
-    "xtb":  dict(frame="bat", target="tb_count", exclude="tb2",
+    "xtb":  dict(frame="bat", target="tb_count", exclude="xtb",
                  tweedie=1.3, lines=[1.5, 2.5, 3.5], desc="total bases"),
     "outs": dict(frame="starts", target="y_outs", exclude=None,
                  st_exclude=_UMP,
