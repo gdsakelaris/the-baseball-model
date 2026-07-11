@@ -45,6 +45,8 @@ from pathlib import Path
 import joblib
 import lightgbm as lgb
 import numpy as np
+import xgboost as xgb_lib
+from catboost import CatBoostClassifier, CatBoostRegressor
 import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.isotonic import IsotonicRegression
@@ -109,17 +111,94 @@ MONOTONE = {"hr": HR_MONOTONE}
 PROP_BAGS = {"hit": 5, "tb2": 5, "run": 5, "rbi": 5, "hrr2": 5, "hrr3": 5}
 COUNT_BAGS = {"xhrr": 5, "xtb": 5}
 
-# Per-prop LightGBM overrides (2026-07-08 grid: 2 regularization configs x
-# 6 bagged target props). Heavier regularization paid ONLY as calibration,
-# on two props: run (heavy: ece -.0038 vs the bagged incumbent, past band)
-# and hrr2 (medium: ece -.0035 past band, top10 +.0070 — and it undoes the
-# hrr2_ece drift the bagging introduced). Everything else was flat-to-worse
-# (hit/tb2/rbi ece all tilted UP under more regularization) — incumbent
-# LGB_CLS kept there.
+# Family bagging (2026-07-10 experiment, FULL BOARD per user): XGBoost
+# members appended to every GBM head's bag — binaries, count heads (k
+# included), team runs, winner. A different split policy and regularization
+# path decorrelates members more than reseeding LightGBM can. Existing LGBM
+# members are untouched (bit-identical to the incumbents); XGB_BAGS members
+# join each mean. Params mirror the matching LGB_* block: hist + lossguide
+# + max_leaves = LightGBM's leaf-wise growth; min_child_weight ~
+# min_child_samples x the objective's per-row hessian scale (~0.2 binary,
+# ~mu Poisson). XGBoost rejects the ±inf the frames carry (LightGBM
+# tolerates them), hence features.InfSafe. Set XGB_BAGS = 0 to revert to
+# pure-LightGBM everywhere.
+XGB_BAGS = 2  # families ON for ship (2026-07-10, exiting the LGBM-only dev regime)
+XGB_CLS = dict(n_estimators=3000, learning_rate=0.03, tree_method="hist",
+               grow_policy="lossguide", max_leaves=127, max_depth=0,
+               min_child_weight=16, subsample=0.8, colsample_bytree=0.8,
+               reg_lambda=3.0, max_bin=255, objective="binary:logistic",
+               eval_metric="logloss", early_stopping_rounds=150,
+               enable_categorical=True, n_jobs=-1, verbosity=0,
+               device="cuda")
+XGB_POIS = dict(n_estimators=2000, learning_rate=0.03, tree_method="hist",
+                grow_policy="lossguide", max_leaves=63, max_depth=0,
+                min_child_weight=30, subsample=0.8, colsample_bytree=0.8,
+                reg_lambda=3.0, max_bin=255, objective="count:poisson",
+                eval_metric="poisson-nloglik", early_stopping_rounds=150,
+                enable_categorical=True, n_jobs=-1, verbosity=0,
+                device="cuda")
+XGB_WIN = dict(n_estimators=3000, learning_rate=0.02, tree_method="hist",
+               grow_policy="lossguide", max_leaves=15, max_depth=0,
+               min_child_weight=30, subsample=0.9, colsample_bytree=0.7,
+               reg_lambda=10.0, max_bin=255, objective="binary:logistic",
+               eval_metric="logloss", early_stopping_rounds=150,
+               enable_categorical=True, n_jobs=-1, verbosity=0,
+               device="cuda")
+# CatBoost members (iteration 2 of the same experiment): symmetric
+# depth-wise trees + ordered target statistics for categoricals — a third
+# split policy in the bag. Depth ~8 approximates the LGBM/XGB capacity;
+# features.CatSafe handles its quirks (no NaN cats, no inf, Poisson/Tweedie
+# predict needs Exponent). Set CB_BAGS = 0 to drop the family. Wired and
+# smoke-tested 2026-07-10 but held at 0 for the XGB confirm (CatBoost fits
+# cost 2-4x XGB — a three-family full train couldn't land before the 06:00
+# job); flip to 2 as the next selection-year iteration.
+CB_BAGS = 2  # families ON for ship (2026-07-10, exiting the LGBM-only dev regime)
+CB_CLS = dict(iterations=3000, learning_rate=0.03, depth=8,
+              l2_leaf_reg=3.0, loss_function="Logloss",
+              eval_metric="Logloss", early_stopping_rounds=150,
+              verbose=0, allow_writing_files=False,
+              task_type="GPU", devices="0")
+CB_POIS = dict(iterations=2000, learning_rate=0.03, depth=7,
+               l2_leaf_reg=3.0, loss_function="Poisson",
+               eval_metric="Poisson", early_stopping_rounds=150,
+               verbose=0, allow_writing_files=False,
+              task_type="GPU", devices="0")
+CB_WIN = dict(iterations=3000, learning_rate=0.02, depth=4,
+              l2_leaf_reg=10.0, loss_function="Logloss",
+              eval_metric="Logloss", early_stopping_rounds=150,
+              verbose=0, allow_writing_files=False,
+              task_type="GPU", devices="0")
+
+# Per-prop LightGBM overrides from the day-block-CV sweep (param_sweep.py,
+# 2026-07-10): 4-fold GroupKFold-by-day on Season<=2024 (2025 stays the
+# untouched paired-eval set), scored by OOF logloss with an AUC gate. Under the
+# CURRENT dev regime (LGBM-only, 268-col superset) 12 of 14 binaries prefer LESS
+# capacity than LGB_CLS (nl=127); run/single and every count head + winner kept
+# default (not listed → LGB_CLS/LGB_POIS/LGB_WIN). CV logloss gains: tb2 -.0017,
+# bb -.0014, hrr2 -.0014, bk2 -.0010, sb -.0009, hr/rbi -.0008, hits2/bk -.0005,
+# double/hit/hrr3 -.0006.
+# SHIP CAVEAT: this is LGBM-ONLY + CV-logloss tuning. The OLD full-ensemble grid
+# found the OPPOSITE for hit/tb2/rbi (more reg tilted their ECE UP), and run took
+# its now-dropped heavy override for ECE not logloss — so RE-CONFIRM these with
+# the XGB/CatBoost families back on + the balanced net-vote (esp. ECE) at ship.
+_REG_MED = dict(num_leaves=63, min_child_samples=160)
+_REG_MED2 = dict(num_leaves=63, min_child_samples=300,
+                 colsample_bytree=0.7, reg_lambda=6.0)
+_REG_HEAVY = dict(num_leaves=31, min_child_samples=300,
+                  colsample_bytree=0.7, reg_lambda=6.0)
 PROP_PARAMS = {
-    "run":  dict(LGB_CLS, num_leaves=31, min_child_samples=300,
-                 colsample_bytree=0.7, reg_lambda=6.0),
-    "hrr2": dict(LGB_CLS, num_leaves=63, min_child_samples=160),
+    "hr":     dict(LGB_CLS, **_REG_HEAVY),
+    "rbi":    dict(LGB_CLS, **_REG_MED2),
+    "hit":    dict(LGB_CLS, **_REG_MED2),
+    "hits2":  dict(LGB_CLS, **_REG_MED),
+    "tb2":    dict(LGB_CLS, **_REG_MED2),
+    "double": dict(LGB_CLS, **_REG_MED2),
+    "bb":     dict(LGB_CLS, **_REG_MED2),
+    "sb":     dict(LGB_CLS, min_child_samples=160),        # reg_light
+    "bk":     dict(LGB_CLS, **_REG_MED),
+    "bk2":    dict(LGB_CLS, **_REG_HEAVY),
+    "hrr2":   dict(LGB_CLS, **_REG_HEAVY),
+    "hrr3":   dict(LGB_CLS, **_REG_MED),
 }
 
 # Per-prop feature routing. The batter frame carries a SUPERSET of columns;
@@ -323,6 +402,39 @@ PROP_EXCLUDE = {
     # (league K environment reaches the batter-K count head only)
     "xbk":   [c for c in _BK_EXC if c not in set(_TIERC)],
 }
+# NUCLEAR PROBE 2026-07-10 (user): routing machinery OFF — every batter
+# prop AND every x-head sees the full superset (benched features are back
+# in via features.batter_feature_cols). The curated table above is kept
+# intact; delete this one line to restore it.
+PROP_EXCLUDE = {}
+
+# Stability-selection include-lists (feature_select.py --write): with
+# SELECT_FEATURES on, EVERY head — batter props, count heads, k, total,
+# winner — trains only on the columns its bags voted stable (applied AFTER
+# PROP_EXCLUDE). Per user 2026-07-10, automated selection is the SOLE
+# decider of which features each head keeps; no manual carve-outs.
+# Inert by default: flag off, or no feature_keep.json -> no restriction.
+# 2026-07-10 SHIP: ON. Keep-list regenerated from the final both-suite
+# superset bags (LGBM+XGB+CB, feature_select --write, all-3-family equal
+# weight) after adding BvP + park-handed-HR (#8). Every head trains on the
+# columns its bags voted stable.
+SELECT_FEATURES = True
+
+
+def _feature_keep():
+    p = ART / "feature_keep.json"
+    if not (SELECT_FEATURES and p.exists()):
+        return {}
+    import json
+    return {k: set(v) for k, v in json.loads(p.read_text()).items()}
+
+
+FEATURE_KEEP = _feature_keep()
+
+
+def _apply_keep(name, cols):
+    keep = FEATURE_KEEP.get(name)
+    return [c for c in cols if c in keep] if keep else cols
 
 # batter prop -> (target column, description)
 PROPS = {
@@ -394,6 +506,13 @@ COUNT_HEADS = {
                  st_exclude=_UMP,
                  lines=[1.5, 2.5, 3.5, 4.5], desc="starter earned runs"),
 }
+# NUCLEAR PROBE 2026-07-10 (user, expanded scope): starter-side routing OFF
+# too — every starter head sees the full starts superset (park run
+# environment back on pbb, HP-ump tendency back on outs/pha/per; the K
+# model's park exclusion is lifted at its k_cols line). Delete this loop
+# to restore the starter diets above.
+for _ch in COUNT_HEADS.values():
+    _ch.pop("st_exclude", None)
 
 
 def log(msg):
@@ -424,7 +543,7 @@ def _fit_logistic(tr, cols, target):
 
 
 def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
-                   params=None, n_bags=1):
+                   params=None, n_bags=1, n_xgb=0, n_cb=0):
     tr = df[df["Season"].isin(train_yrs)]
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr]
@@ -439,7 +558,18 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
               eval_metric="binary_logloss",
               callbacks=[lgb.early_stopping(150, verbose=False)])
         models.append(m)
-    model = F.MeanBag(models) if n_bags > 1 else models[0]
+    for b in range(n_xgb):          # family members join AFTER the LGBM bag
+        m = F.InfSafe(xgb_lib.XGBClassifier(**XGB_CLS, random_state=b))
+        m.fit(tr[cols], tr[target],
+              eval_set=[(ca[cols], ca[target])], verbose=False)
+        models.append(m)
+    cat_here = [c for c in cols if c in F.CAT_COLS]
+    for b in range(n_cb):
+        m = F.CatSafe(CatBoostClassifier(**CB_CLS, random_seed=b,
+                                         cat_features=cat_here), cat_here)
+        m.fit(tr[cols], tr[target], eval_set=[(ca[cols], ca[target])])
+        models.append(m)
+    model = F.MeanBag(models) if len(models) > 1 else models[0]
 
     # diverse second learner + blend weight chosen on the calibration year
     lr, num_cols = _fit_logistic(tr, cols, target)
@@ -507,10 +637,24 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
     tr = wf[wf["Season"].isin(train_yrs)]
     ca = wf[wf["Season"] == cal_yr]
     te = wf[wf["Season"] == test_yr]
-    model = lgb.LGBMClassifier(**LGB_WIN)
-    model.fit(tr[cols], tr[target],
-              eval_set=[(ca[cols], ca[target])], eval_metric="binary_logloss",
-              callbacks=[lgb.early_stopping(150, verbose=False)])
+    members = []
+    m0 = lgb.LGBMClassifier(**LGB_WIN)
+    m0.fit(tr[cols], tr[target],
+           eval_set=[(ca[cols], ca[target])], eval_metric="binary_logloss",
+           callbacks=[lgb.early_stopping(150, verbose=False)])
+    members.append(m0)
+    for b in range(XGB_BAGS):       # family members join AFTER the incumbent
+        m = F.InfSafe(xgb_lib.XGBClassifier(**XGB_WIN, random_state=b))
+        m.fit(tr[cols], tr[target],
+              eval_set=[(ca[cols], ca[target])], verbose=False)
+        members.append(m)
+    cat_here = [c for c in cols if c in F.CAT_COLS]
+    for b in range(CB_BAGS):
+        m = F.CatSafe(CatBoostClassifier(**CB_WIN, random_seed=b,
+                                         cat_features=cat_here), cat_here)
+        m.fit(tr[cols], tr[target], eval_set=[(ca[cols], ca[target])])
+        members.append(m)
+    model = F.MeanBag(members) if len(members) > 1 else members[0]
     lr, num_cols = _fit_logistic(tr, cols, target)
 
     def parts(d):
@@ -569,7 +713,7 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
 
 
 def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
-                n_bags=1, tweedie_power=None):
+                n_bags=1, tweedie_power=None, n_xgb=0, n_cb=0):
     """Poisson (default) count regression, or Tweedie when tweedie_power is set
     (a compound Poisson-Gamma objective, variance power in (1,2)). Tweedie lets
     the MEAN model an over-dispersed right tail directly — total bases / H+R+RBI
@@ -593,7 +737,28 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
               eval_metric=("tweedie" if tweedie else "poisson"),
               callbacks=[lgb.early_stopping(150, verbose=False)])
         models.append(m)
-    model = F.MeanBag(models) if n_bags > 1 else models[0]
+    for b in range(n_xgb):          # family members join AFTER the LGBM bag
+        p = dict(XGB_POIS)
+        if tweedie:
+            p = dict(p, objective="reg:tweedie",
+                     tweedie_variance_power=tweedie_power,
+                     eval_metric=f"tweedie-nloglik@{tweedie_power}")
+        m = F.InfSafe(xgb_lib.XGBRegressor(**p, random_state=b))
+        m.fit(tr[cols], tr[target],
+              eval_set=[(ca[cols], ca[target])], verbose=False)
+        models.append(m)
+    cat_here = [c for c in cols if c in F.CAT_COLS]
+    for b in range(n_cb):
+        p = dict(CB_POIS)
+        if tweedie:
+            tw = f"Tweedie:variance_power={tweedie_power}"
+            p = dict(p, loss_function=tw, eval_metric=tw)
+        m = F.CatSafe(CatBoostRegressor(**p, random_seed=b,
+                                        cat_features=cat_here),
+                      cat_here, exponent=True)
+        m.fit(tr[cols], tr[target], eval_set=[(ca[cols], ca[target])])
+        models.append(m)
+    model = F.MeanBag(models) if len(models) > 1 else models[0]
     pred = model.predict(te[cols])
     y = te[target].to_numpy()
     bl = baseline(te)
@@ -624,11 +789,12 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     shipping suite or the selection suite identically."""
     bat_cols = F.batter_feature_cols()
     st_cols = F.starts_feature_cols()
-    tg_cols = F.team_game_feature_cols()
+    tg_cols = _apply_keep("total", F.team_game_feature_cols())
     metrics, props = {}, {}
 
     for name, (target, _desc) in PROPS.items():
-        cols = [c for c in bat_cols if c not in PROP_EXCLUDE.get(name, ())]
+        cols = _apply_keep(name, [c for c in bat_cols
+                                  if c not in PROP_EXCLUDE.get(name, ())])
         params = PROP_PARAMS.get(name)
         mono = MONOTONE.get(name)
         if mono:    # categoricals and unlisted cols get 0 (unconstrained)
@@ -638,7 +804,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         prop, m = fit_classifier(bf, cols, target,
                                  train_yrs, cal_yr, test_yr, name.upper(),
                                  params=params,
-                                 n_bags=PROP_BAGS.get(name, 1))
+                                 n_bags=PROP_BAGS.get(name, 1),
+                                 n_xgb=XGB_BAGS, n_cb=CB_BAGS)
         prop["cols"] = cols
         props[name] = prop
         metrics[f"{name}_{test_yr}"] = m
@@ -683,9 +850,12 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     # environment reaches outs/pha/per + the runs model, but venue scoring
     # says nothing about strikeouts (same reasoning as _BK_EXC). k_cols is
     # what the artifact ships as st_cols — the K model's serving contract.
-    k_cols = [c for c in st_cols if c not in _PARK_OFF]
+    # NUCLEAR PROBE 2026-07-10: park run-environment back ON the K model
+    # (full starts superset). Restore the exclusion to revert:
+    # k_cols = [c for c in st_cols if c not in _PARK_OFF]
+    k_cols = _apply_keep("k", list(st_cols))
     k_model, m = fit_poisson(sf, k_cols, "y_so", train_yrs, cal_yr, test_yr,
-                             "K", k_baseline)
+                             "K", k_baseline, n_xgb=XGB_BAGS, n_cb=CB_BAGS)
     metrics[f"k_{test_yr}"] = m
 
     # Starter-K dispersion on the CALIBRATION year (never the holdout): real K
@@ -707,6 +877,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
                  if c not in PROP_EXCLUDE.get(ch["exclude"], ())]
                 if ch["frame"] == "bat"
                 else [c for c in st_cols if c not in ch.get("st_exclude", ())])
+        cols = _apply_keep(cname, cols)
         tr_mean = frame.loc[frame["Season"].isin(train_yrs),
                             ch["target"]].mean()
 
@@ -730,7 +901,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         model, m = fit_poisson(frame, cols, ch["target"], train_yrs, cal_yr,
                                test_yr, cname.upper(), cbase,
                                n_bags=COUNT_BAGS.get(cname, 1),
-                               tweedie_power=ch.get("tweedie"))
+                               tweedie_power=ch.get("tweedie"),
+                               n_xgb=XGB_BAGS, n_cb=CB_BAGS)
         ca = frame[frame["Season"] == cal_yr]
         mu_cal = model.predict(ca[cols])
         y_cal = ca[ch["target"]].to_numpy()
@@ -759,7 +931,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         return te["off_r_pg"].fillna(league)
 
     team_runs_model, m = fit_poisson(tg, tg_cols, "y_runs", train_yrs, cal_yr,
-                                     test_yr, "TEAM RUNS", team_baseline)
+                                     test_yr, "TEAM RUNS", team_baseline,
+                                     n_xgb=XGB_BAGS, n_cb=CB_BAGS)
     metrics[f"team_runs_{test_yr}"] = m
 
     # Game-total dispersion, also on the calibration year: real totals ran
@@ -784,7 +957,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
                             "Home": tg["Home"].to_numpy(), "mu": mu_all})
               .pivot_table(index="GamePk", columns="Home", values="mu")
               .rename(columns={0: "mu_away", 1: "mu_home"}))
-    win_cols = F.win_feature_cols()
+    win_cols = _apply_keep("winner", F.win_feature_cols())
     win_model, m = fit_winner(wf, win_cols, "y_home_win", mu_map,
                               train_yrs, cal_yr, test_yr, "WINNER")
     win_model["cols"] = win_cols
@@ -1041,8 +1214,12 @@ def main():
         json.dump(metrics, f, indent=2)
     log(f"saved artifacts to {ART}")
 
-    # feature importances for the HR model (top 25)
-    imp = pd.Series(props["hr"]["gbm"].feature_importances_,
+    # feature importances for the HR model (top 25). Family bags have no
+    # blended importances — read the incumbent LGBM member (bag 0).
+    hr_gbm = props["hr"]["gbm"]
+    if isinstance(hr_gbm, F.MeanBag):
+        hr_gbm = hr_gbm.models[0]
+    imp = pd.Series(hr_gbm.feature_importances_,
                     index=props["hr"]["cols"])
     log("top HR-model features:\n" +
         imp.sort_values(ascending=False).head(25).to_string())

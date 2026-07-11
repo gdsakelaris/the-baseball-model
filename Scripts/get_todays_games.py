@@ -221,6 +221,16 @@ def parse_time_daynight(text):
     return "day" if hour < 17 else "night"
 
 
+def parse_start_et(text):
+    """'7:10 PM ET' -> '19:10' (sortable 24h ET string), None if no time.
+    The GUI slate and every workbook sheet sort games by this."""
+    m = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM)", text or "", re.I)
+    if not m:
+        return None
+    hour = int(m.group(1)) % 12 + (12 if m.group(3).upper() == "PM" else 0)
+    return f"{hour:02d}:{m.group(2)}"
+
+
 # ------------------------------------------------------------------ mlb.com
 
 def scrape_mlb():
@@ -247,7 +257,9 @@ def scrape_mlb():
         venue = loc.get_text(" ", strip=True) if loc else ""
         venue = VENUE_ALIASES.get(venue, venue)
         t = g.find(class_="starting-lineups__game-date-time")
-        day_night = parse_time_daynight(t.get_text(" ", strip=True) if t else "")
+        t_text = t.get_text(" ", strip=True) if t else ""
+        day_night = parse_time_daynight(t_text)
+        start_et = parse_start_et(t_text)
 
         names = {}  # pid -> display name, straight from the page links
 
@@ -280,7 +292,7 @@ def scrape_mlb():
 
         games.append({
             "date": date, "away_team": away, "home_team": home,
-            "venue": venue, "day_night": day_night,
+            "venue": venue, "day_night": day_night, "start_et": start_et,
             "away_starter": pitchers[0], "home_starter": pitchers[1],
             "away_lineup": lineup("away"), "home_lineup": lineup("home"),
             "names": names,
@@ -364,7 +376,9 @@ def scrape_rotowire():
             m = re.search(r"(\d+)\s*°", wx.get_text(" ", strip=True))
             temp = float(m.group(1)) if m else None
         tm = g.select_one(".lineup__time")
-        day_night = parse_time_daynight(tm.get_text(strip=True) if tm else "")
+        tm_text = tm.get_text(strip=True) if tm else ""
+        day_night = parse_time_daynight(tm_text)
+        start_et = parse_start_et(tm_text)
         # home-plate umpire: name is the <a> inside .lineup__umpire (falls
         # back to a regex on the div text: "Umpire: <name> 9.1 R/G ...")
         ump_a = g.select_one(".lineup__umpire a")
@@ -395,7 +409,8 @@ def scrape_rotowire():
             return slugs[:9]
 
         out[(away, home)] = {"temp": temp, "condition": condition,
-                             "day_night": day_night, "umpire": umpire,
+                             "day_night": day_night, "start_et": start_et,
+                             "umpire": umpire,
                              "away_lineup": names_of("is-visit"),
                              "home_lineup": names_of("is-home")}
     return out
@@ -518,6 +533,8 @@ def main():
         g["wind_dir"] = f.get("wind_dir") or ""
         if not g["day_night"]:  # fall back to rotowire's game time
             g["day_night"] = r.get("day_night")
+        if not g.get("start_et"):
+            g["start_et"] = r.get("start_et")
 
         # home-plate umpire (rotowire name -> HpUmpId the model uses); the
         # GUI loads hp_ump_id into the spec so ump_feats has real history
@@ -561,6 +578,8 @@ def main():
             lineup_src["completed"] += completed
         sources.append(src_tags)
 
+    games.sort(key=lambda g: (g.get("start_et") or "99:99",
+                              g["away_team"]))
     payload = {"scraped_at": dt.datetime.now().isoformat(timespec="seconds"),
                "date": games[0]["date"] if games else None,
                "games": games}

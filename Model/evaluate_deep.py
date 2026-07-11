@@ -1036,6 +1036,52 @@ def build_binary_snapshot(results):
         for name, r in results.items()}
 
 
+def score_snapshot(gf_y, art):
+    """Per-TEAM expected runs + actual score for the paired snapshot — the
+    workbook's Away Score / Home Score columns are these means, so
+    prop_rankings grades them like every other displayed column. Two rows
+    per game (Home flag distinguishes them)."""
+    if art.get("team_runs_model") is None:
+        return None
+    tg = F.build_team_game_frame(gf_y)
+    tp = art["team_runs_model"].predict(prep(tg, art["tg_cols"],
+                                             art["cat_levels"]))
+    n_g = len(gf_y)
+    away_y = pd.to_numeric(gf_y["AwayScore"], errors="coerce").to_numpy()
+    home_y = pd.to_numeric(gf_y["HomeScore"], errors="coerce").to_numpy()
+    return {"df": pd.DataFrame({
+        "Date": np.concatenate([gf_y["Date"].to_numpy()] * 2),
+        "GamePk": np.concatenate([gf_y["GamePk"].to_numpy()] * 2),
+        "Home": np.concatenate([np.zeros(n_g, dtype=int),
+                                np.ones(n_g, dtype=int)]),
+        "mu": tp, "y": np.concatenate([away_y, home_y])}),
+        "keycols": ["Date", "GamePk", "Home"]}
+
+
+def winner_snapshot(gf_y, art):
+    """Per-game served home-win probability + outcome for the paired
+    snapshot — lets prop_rankings grade the Win Prob column on the same
+    internal diagnostics as every other probability (it previously had
+    nothing to grade from). None when the artifact predates the dedicated
+    win model. Same computation as section_games."""
+    win_cols = art.get("win_model", {}).get("cols", [])
+    if not win_cols or not all(c in gf_y.columns for c in win_cols):
+        return None
+    tg = F.build_team_game_frame(gf_y)
+    tp = art["team_runs_model"].predict(prep(tg, art["tg_cols"],
+                                             art["cat_levels"]))
+    n_g = len(gf_y)
+    Xw = prep(gf_y, win_cols, art["cat_levels"])
+    p_home = predict_win(art["win_model"], Xw, tp[n_g:], tp[:n_g])
+    away_y = pd.to_numeric(gf_y["AwayScore"], errors="coerce").to_numpy()
+    home_y = pd.to_numeric(gf_y["HomeScore"], errors="coerce").to_numpy()
+    return {"df": pd.DataFrame({
+        "Date": gf_y["Date"].to_numpy(),
+        "GamePk": gf_y["GamePk"].to_numpy(),
+        "p": p_home, "y": (home_y > away_y).astype(int)}),
+        "keycols": ["Date", "GamePk"]}
+
+
 def _all_boosters(art):
     """(label, LightGBM model) for every booster in an artifact, so feature
     gain can be summed across the props/heads that share a column."""
@@ -1089,6 +1135,9 @@ def feature_gains(art):
     return gains, users, feats
 
 
+CALSLOPE_BAND = 0.03   # |slope-1| move to count cal-slope (point est, no CI)
+
+
 def paired_verdict(lo, hi):
     """CI decides (policy v2): entirely good = improved, entirely bad = harm,
     straddling 0 = no effect (keep). Metrics are oriented so + is always good."""
@@ -1101,10 +1150,10 @@ def paired_verdict(lo, hi):
 
 def paired_day_bootstrap(dates, y, base_val, cand_val, kind, n_boot, seed=0):
     """Paired day-block bootstrap of (candidate - baseline), oriented so POSITIVE
-    = candidate better for every kind (auc/edge higher-better; mae lower-better
-    flipped to base-minus-cand). Each draw resamples whole days ONCE and scores
-    both models on the SAME rows, so shared-day noise cancels and the CI is on
-    the CHANGE, not on either level."""
+    = candidate better for every kind (auc/edge higher-better; ece/mae
+    lower-better, flipped to base-minus-cand). Each draw resamples whole days
+    ONCE and scores both models on the SAME rows, so shared-day noise cancels
+    and the CI is on the CHANGE, not on either level."""
     rng = np.random.default_rng(seed)
     dates = np.asarray(dates)
     uniq = pd.unique(dates)
@@ -1120,6 +1169,10 @@ def paired_day_bootstrap(dates, y, base_val, cand_val, kind, n_boot, seed=0):
             out.append(roc_auc_score(yy, pc) - roc_auc_score(yy, pb)
                        if kind == "auc"
                        else log_loss(yy, pb) - log_loss(yy, pc))
+        elif kind == "ece":                     # + = candidate lower ECE
+            if yy.min() == yy.max():
+                continue
+            out.append(ece(pb, yy) - ece(pc, yy))
         else:  # mae
             out.append(mean_absolute_error(yy, pb) - mean_absolute_error(yy, pc))
     a = np.asarray(out)
@@ -1134,7 +1187,12 @@ def paired_day_bootstrap(dates, y, base_val, cand_val, kind, n_boot, seed=0):
 # are written to baseline_code_fp.json at --set-baseline so the daily
 # update_all --retrain can tell "shipped code" from "experiment in flight"
 # and stand down rather than re-baseline a candidate as its own reference.
-CODE_FP_FILES = ("features.py", "train.py", "predict.py", "recalibrate.py")
+CODE_FP_FILES = ("features.py", "train.py", "predict.py", "recalibrate.py",
+                 # Scripts/seasons.py decides which seasons feed the frames
+                 # (FIRST_SEASON); changing it is a modeling change like any
+                 # other, so the daily job must go scrape-only until the
+                 # experiment is confirmed and re-baselined.
+                 "../Scripts/seasons.py")
 
 
 def _code_fingerprint():
@@ -1155,6 +1213,17 @@ def _data_fingerprint():
     return sorted((p.name, p.stat().st_size, int(p.stat().st_mtime))
                   for p in F.DATA_DIR.glob("*.csv")
                   if p.name != "mlb_odds.csv")
+
+
+def _frames_fingerprint():
+    """(size, mtime) of frames.joblib — the input the eval ACTUALLY consumes.
+    The CSV fingerprint above is a conservative proxy: a scrape can rewrite
+    the CSVs without the cached frames changing (train without --rebuild),
+    and that read is still clean. Stored in new snapshots for a direct
+    check; run_paired falls back to an mtime-ordering inference for
+    snapshots written before this existed."""
+    p = ART / "frames.joblib"
+    return (p.stat().st_size, int(p.stat().st_mtime)) if p.exists() else None
 
 
 def run_paired(art, results, count_preds, tag, year, n_boot, era=None):
@@ -1194,17 +1263,36 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None):
                   "rigorous\n  check (retrain the era dir's archived sources "
                   "on current data), not as a verdict.")
         elif changed:
-            pre = "" if tag == "select_" else "--confirm "
-            print("  !! STALE BASELINE — Data/*.csv changed since the snapshot was")
-            print("  !! written (a scrape ran). This read would conflate data drift")
-            print("  !! with the change under test, so it is SKIPPED. Re-baseline:")
-            print("  !!   1. set the working tree back to the shipped code")
-            print("  !!   2. python Model/train.py")
-            print(f"  !!   3. python Model/evaluate_deep.py {pre}--set-baseline")
-            print("  !!   4. restore the candidate, retrain, re-run --paired")
-            print(f"  !! changed: {', '.join(changed[:8])}"
-                  + (f" (+{len(changed) - 8} more)" if len(changed) > 8 else ""))
-            return
+            # The CSVs drifted — but if the cached frames (the only data this
+            # eval consumes) are the ones the snapshot was scored on, the
+            # read is still clean: a scrape after the snapshot can't reach a
+            # model that never re-reads the CSVs. Direct check when the
+            # snapshot stored frames_fp; mtime-ordering inference otherwise
+            # (frames older than the snapshot + never rebuilt since = same
+            # frames both sides).
+            fr = ART / "frames.joblib"
+            if comp.get("frames_fp") is not None:
+                frames_ok = comp["frames_fp"] == _frames_fingerprint()
+            else:
+                frames_ok = (fr.exists()
+                             and fr.stat().st_mtime < path.stat().st_mtime)
+            if frames_ok:
+                print(f"  NOTE: {len(changed)} Data/*.csv rescraped since the "
+                      "snapshot, but frames.joblib is unchanged —\n  baseline "
+                      "and candidate score the same cached frames, so the "
+                      "read is clean.")
+            else:
+                pre = "" if tag == "select_" else "--confirm "
+                print("  !! STALE BASELINE — Data/*.csv changed since the snapshot was")
+                print("  !! written (a scrape ran). This read would conflate data drift")
+                print("  !! with the change under test, so it is SKIPPED. Re-baseline:")
+                print("  !!   1. set the working tree back to the shipped code")
+                print("  !!   2. python Model/train.py")
+                print(f"  !!   3. python Model/evaluate_deep.py {pre}--set-baseline")
+                print("  !!   4. restore the candidate, retrain, re-run --paired")
+                print(f"  !! changed: {', '.join(changed[:8])}"
+                      + (f" (+{len(changed) - 8} more)" if len(changed) > 8 else ""))
+                return
     rows = []
     for name, r in results.items():
         if name not in comp.get("binary", {}):
@@ -1215,13 +1303,24 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None):
             on=["Date", "GamePk", "PlayerId"], suffixes=("_b", "_c"))
         d, y = m["Date"].to_numpy(), m["y_c"].to_numpy()
         pb, pc = m["p_b"].to_numpy(), m["p_c"].to_numpy()
-        for metric, kind, star in (("AUC", "auc", True), ("edge", "edge", False)):
+        for metric, kind in (("AUC", "auc"), ("edge", "edge"), ("ECE", "ece")):
             mean, lo, hi = paired_day_bootstrap(d, y, pb, pc, kind, n_boot)
-            rows.append({"prop": name,
-                         "metric": ("*" if star else " ") + metric,
+            rows.append({"prop": name, "metric": "*" + metric,
                          "delta": f"{mean:+.4f}",
                          "95% CI": f"[{lo:+.4f}, {hi:+.4f}]", "n": len(m),
-                         "verdict": paired_verdict(lo, hi), "_star": star})
+                         "verdict": paired_verdict(lo, hi), "_star": True})
+        # cal-slope: point estimate (a logistic per resample would triple the
+        # run); classified against CALSLOPE_BAND since there's no CI. Counted in
+        # the net vote like the others. delta + = candidate nearer the ideal 1.0.
+        sb, sc = calibration_slope(pb, y), calibration_slope(pc, y)
+        dcs = abs(sb - 1.0) - abs(sc - 1.0)
+        rows.append({"prop": name, "metric": "*cal-slp",
+                     "delta": f"{dcs:+.3f}",
+                     "95% CI": f"{sb:.2f}->{sc:.2f} /1.0", "n": len(m),
+                     "verdict": ("IMPROVED" if dcs >= CALSLOPE_BAND
+                                 else "HARM" if dcs <= -CALSLOPE_BAND
+                                 else "no effect"),
+                     "_star": True})
     for name, cp in count_preds.items():
         if name not in comp.get("count", {}):
             continue
@@ -1239,16 +1338,25 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None):
     df = pd.DataFrame(rows)
     print(df.drop(columns="_star").to_string(index=False))
     star = df[df["_star"]]
-    harm = star.loc[star["verdict"] == "HARM", "prop"].tolist()
-    imp = star.loc[star["verdict"] == "IMPROVED", "prop"].tolist()
-    print(f"\n  north-star (AUC binary / MAE count): {len(imp)} improved "
-          f"{imp or ''}, {len(harm)} harm {harm or ''}, rest no-effect.")
-    if harm:
-        print("  -> HARM = candidate's north-star CI entirely worse. Policy v2: "
-              "bench/route-around ONLY if it corroborates on the other year "
-              "(run the same --paired on the confirm suite).")
-    else:
-        print("  -> no north-star harm: KEEP by default (policy v2).")
+    # Balanced NET VOTE per prop across the gated metrics — AUC (rank), edge
+    # (score), ECE + cal-slope (calibration) for binaries; MAE for counts.
+    # net = #improved - #regressed: net>0 = WIN, net<0 = REGRESSION, net==0
+    # (incl. 2-2) = flat (user's rule, 07-10). Shown with the net in parens.
+    imp, harm = [], []
+    for prop, grp in star.groupby("prop", sort=False):
+        net = int((grp["verdict"] == "IMPROVED").sum()
+                  - (grp["verdict"] == "HARM").sum())
+        if net > 0:
+            imp.append(f"{prop}(+{net})")
+        elif net < 0:
+            harm.append(f"{prop}({net})")
+    print("\n  balanced net vote (AUC rank + edge/ECE/cal-slope probability "
+          "quality; net = #improved - #regressed, ties = flat):")
+    print(f"    net wins:        {imp or '[]'}")
+    print(f"    net regressions: {harm or '[]'}")
+    print("  NOTE: dev phase (superset, no selection) — this read is "
+          "directional; the binding verdict is post-selection + families at "
+          "ship, so don't over-weight dev-phase moves.")
     gains, users, _ = feature_gains(art)
     added = sorted(declared_features(art) - set(comp.get("features", [])),
                    key=lambda c: -gains.get(c, 0.0))
@@ -1394,11 +1502,19 @@ def main():
         comp = {"binary": build_binary_snapshot(results),
                 "count": build_count_preds(art, bf_y, sf_y, gf_y),
                 "features": sorted(declared_features(art)),
-                "data_fp": _data_fingerprint()}
+                "data_fp": _data_fingerprint(),
+                "frames_fp": _frames_fingerprint()}
+        win = winner_snapshot(gf_y, art)
+        if win is not None:
+            comp["winner"] = win
+        sc = score_snapshot(gf_y, art)
+        if sc is not None:
+            comp["score"] = sc
         joblib.dump(comp, ART / f"eval_paired_{tag}{args.year}.joblib", compress=3)
         print(f"  paired snapshot -> eval_paired_{tag}{args.year}.joblib "
               f"({len(comp['binary'])} binary props + {len(comp['count'])} "
-              f"count heads, {len(comp['features'])} feature cols)")
+              f"count heads{' + winner' if win is not None else ''}, "
+              f"{len(comp['features'])} feature cols)")
         (ART / "baseline_code_fp.json").write_text(
             json.dumps(_code_fingerprint(), indent=1))
 

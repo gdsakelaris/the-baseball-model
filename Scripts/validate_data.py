@@ -43,6 +43,11 @@ BACKUP_DIR = DATA_DIR / "backups"
 #   shrink_tol      new_rows >= shrink_tol * old_rows vs the previous copy
 #                   (cumulative multi-season files should only grow; snapshot
 #                   files like rosters may shrink a little)
+#   shrink_abs      also tolerate shrinking by up to this many rows regardless
+#                   of shrink_tol — for small qualifier-gated leaderboards (bat
+#                   tracking, sprint speed) where a handful of players cross the
+#                   min-sample line day to day; on a ~900-row file a 1-row drop
+#                   would otherwise trip the 99.9% ratio (default 0 = ratio only)
 #   season_col      seasons present before must still be present (catches a
 #                   scrape that silently dropped history)
 #   fresh_days      during the unambiguous in-season months (May-September),
@@ -151,7 +156,7 @@ SPECS = {
                        "CompetitiveRuns"],
         key=["Year", "PlayerId"], max_dup_frac=0.0,
         numeric=[("PlayerId", 0.0), ("SprintSpeed", 0.01)],
-        min_rows=3500, shrink_tol=0.999, season_col="Year"),
+        min_rows=3500, shrink_tol=0.999, shrink_abs=20, season_col="Year"),
     "mlb_oaa.csv": dict(
         required_cols=["Year", "Team", "OAA", "OAA_per162"],
         key=["Year", "Team"], max_dup_frac=0.0,
@@ -161,7 +166,7 @@ SPECS = {
         required_cols=["Year", "PlayerId", "BatSpeed", "SwingLength"],
         key=["Year", "PlayerId"], max_dup_frac=0.0,
         numeric=[("PlayerId", 0.0), ("BatSpeed", 0.05)],
-        min_rows=400, shrink_tol=0.999, season_col="Year"),
+        min_rows=400, shrink_tol=0.999, shrink_abs=15, season_col="Year"),
     "mlb_umpires.csv": dict(                    # one row per game, grows daily
         required_cols=["GamePk", "Date", "Season", "HpUmpId", "HpUmp"],
         key=["GamePk"], max_dup_frac=0.0, date_col="Date", fresh_days=6,
@@ -244,10 +249,12 @@ def validate_file(path, prev_path=None, spec=None):
             prev = None                             # bad backup: skip diffs
         if prev is not None and len(prev):
             tol = spec.get("shrink_tol", 0.999)
-            if n < tol * len(prev):
+            abs_tol = spec.get("shrink_abs", 0)
+            if n < tol * len(prev) and (len(prev) - n) > abs_tol:
+                extra = f" or {abs_tol} rows" if abs_tol else ""
                 problems.append(
                     f"{path.name}: shrank {len(prev):,} -> {n:,} rows "
-                    f"(tolerance {tol:.1%} of previous)")
+                    f"(tolerance {tol:.1%} of previous{extra})")
             sc = spec.get("season_col")
             if sc and sc in prev.columns:
                 lost = set(prev[sc].dropna().unique()) - set(

@@ -23,7 +23,11 @@ import csv
 from datetime import date
 from pathlib import Path
 
-FIRST_SEASON = 2020
+# 2015 = first Statcast season. Extended back from 2020 (2026-07-09) to
+# roughly double the training sample; sources that start later (OAA 2016,
+# arsenals ~2017, bat tracking 2023) are simply empty for the early years
+# and the feature pipeline imputes around them.
+FIRST_SEASON = 2015
 
 
 def current_season(today=None):

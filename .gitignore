@@ -7,7 +7,7 @@ todays_games.json
 !Data/GLOSSARY.md
 Logs/
 *.log
-Predictions/
+# Predictions/
 
 # trained model binaries are large and regenerable (Model/train.py);
 # the small JSONs (metrics.json, eval baselines) stay committed as

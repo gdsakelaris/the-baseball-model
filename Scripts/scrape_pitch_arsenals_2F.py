@@ -44,6 +44,12 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "Data"
 
 API_URL = "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
 
+# Savant's pitch-arsenal-stats leaderboard has no data before 2017 (probed
+# 2026-07-09: 2015/2016 return 0 rows, 2017 returns 3,063). Earlier years
+# are legitimately absent, not an outage, so they're skipped rather than
+# treated as a fatal empty fetch.
+SOURCE_FLOOR = 2017
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -113,6 +119,10 @@ def main():
 
     all_rows = []
     for year in YEARS:
+        if year < SOURCE_FLOOR:
+            print(f"{year}: skipped (source leaderboard starts "
+                  f"{SOURCE_FLOOR})")
+            continue
         if year != CURRENT_SEASON and year in stored:
             all_rows.extend(stored[year])
             print(f"{year}: {len(stored[year])} {args.player_type}-pitch "

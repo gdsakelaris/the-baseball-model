@@ -10,6 +10,7 @@ Run:
 """
 
 import datetime as dt
+import re
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -53,7 +54,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("MLB Prediction Engine")
-        self.geometry("1080x820")
+        # wide enough for the full top form row through the HP Umpire box (col 10)
+        self.geometry("1220x820")
         self._apply_style()
         self.pred = None
         self.pools = {}      # abbrev -> dict(batters={label: pid}, pitchers={...})
@@ -228,6 +230,8 @@ class App(tk.Tk):
         if not specs:
             return
         self._clear_slate()
+        # earliest first pitch first — the workbook sheets keep this order
+        specs.sort(key=lambda s: s.get("start_et") or "99:99")
         for spec in specs:
             spec["away_lineup"] = [tuple(x) for x in spec.get("away_lineup", [])]
             spec["home_lineup"] = [tuple(x) for x in spec.get("home_lineup", [])]
@@ -351,19 +355,23 @@ class App(tk.Tk):
         self.cb_home = add(1, "Home team", ttk.Combobox(top, width=6, state="readonly"))
         self.e_date = add(2, "Date (YYYY-MM-DD)", ttk.Entry(top, width=12))
         self.e_date.insert(0, dt.date.today().isoformat())
-        self.cb_venue = add(3, "Stadium", ttk.Combobox(top, width=28))
-        self.cb_dn = add(4, "Day/Night", ttk.Combobox(
+        # Optional — mlb.com drops the time once a game starts, so scraped
+        # slates can arrive without it; sorts and slate order fall back
+        # gracefully when blank. Accepts '7:10 PM' or '19:10'.
+        self.e_start = add(3, "Start ET (opt.)", ttk.Entry(top, width=10))
+        self.cb_venue = add(4, "Stadium", ttk.Combobox(top, width=28))
+        self.cb_dn = add(5, "Day/Night", ttk.Combobox(
             top, width=7, state="readonly", values=["day", "night"]))
         self.cb_dn.set("day")
-        self.sp_temp = add(5, "Temp °F", ttk.Spinbox(top, from_=20, to=115, width=5))
+        self.sp_temp = add(6, "Temp °F", ttk.Spinbox(top, from_=20, to=115, width=5))
         self.sp_temp.set(72)
-        self.sp_wind = add(6, "Wind mph", ttk.Spinbox(top, from_=0, to=45, width=5))
+        self.sp_wind = add(7, "Wind mph", ttk.Spinbox(top, from_=0, to=45, width=5))
         self.sp_wind.set(6)
-        self.cb_wdir = add(7, "Wind dir", ttk.Combobox(top, width=14))
-        self.cb_cond = add(8, "Condition", ttk.Combobox(top, width=14))
+        self.cb_wdir = add(8, "Wind dir", ttk.Combobox(top, width=14))
+        self.cb_cond = add(9, "Condition", ttk.Combobox(top, width=14))
         # Editable; leave blank for a neutral-ump prediction. Known names
         # resolve to an HpUmpId in _collect_spec; an unknown name -> no id.
-        self.cb_ump = add(9, "HP Umpire", ttk.Combobox(top, width=18))
+        self.cb_ump = add(10, "HP Umpire", ttk.Combobox(top, width=18))
 
         self.cb_away.bind("<<ComboboxSelected>>", lambda e: self._team_changed("away"))
         self.cb_home.bind("<<ComboboxSelected>>", lambda e: self._team_changed("home"))
@@ -416,6 +424,10 @@ class App(tk.Tk):
                    command=self._update_selected).pack(fill="x", pady=1)
         ttk.Button(sb, text="Remove selected",
                    command=self._remove_from_slate).pack(fill="x", pady=1)
+        ttk.Button(sb, text="Move up",
+                   command=lambda: self._move_slate(-1)).pack(fill="x", pady=1)
+        ttk.Button(sb, text="Move down",
+                   command=lambda: self._move_slate(1)).pack(fill="x", pady=1)
         ttk.Button(sb, text="Clear slate",
                    command=self._clear_slate).pack(fill="x", pady=1)
         ttk.Button(sb, text="Load today's file",
@@ -515,6 +527,8 @@ class App(tk.Tk):
         self._team_changed("home")            # sets the home park default...
         self.e_date.delete(0, "end")
         self.e_date.insert(0, spec.get("date") or dt.date.today().isoformat())
+        self.e_start.delete(0, "end")
+        self.e_start.insert(0, spec.get("start_et") or "")
         self.cb_venue.set(spec.get("venue") or "")   # ...the spec venue wins
         self.cb_dn.set(spec.get("day_night") or "")
         for widget, v in ((self.sp_temp, spec.get("temp")),
@@ -557,7 +571,20 @@ class App(tk.Tk):
             except ValueError:
                 raise ValueError(f"{label} is not a number: {v!r}")
 
+        start = self.e_start.get().strip()
+        if start:
+            m = re.match(r"^(\d{1,2}):(\d{2})\s*(AM|PM)?$", start, re.I)
+            if not m:
+                raise ValueError(f"start time not understood: {start!r} "
+                                 f"(use 7:10 PM or 19:10)")
+            h = int(m.group(1))
+            if m.group(3):
+                h = h % 12 + (12 if m.group(3).upper() == "PM" else 0)
+            if not 0 <= h <= 23:
+                raise ValueError(f"start time hour out of range: {start!r}")
+            start = f"{h:02d}:{m.group(2)}"
         spec = {"date": date, "away_team": away, "home_team": home,
+                "start_et": start or None,
                 "venue": self.cb_venue.get().strip(),
                 "day_night": self.cb_dn.get(),
                 "temp": num(self.sp_temp, "temperature"),
@@ -586,7 +613,8 @@ class App(tk.Tk):
     @staticmethod
     def _slate_row_text(spec):
         n = len(spec.get("away_lineup", [])) + len(spec.get("home_lineup", []))
-        return (f'{spec["date"]}  {spec["away_team"]} @ '
+        start = spec.get("start_et") or "--:--"
+        return (f'{spec["date"]}  {start} ET  {spec["away_team"]} @ '
                 f'{spec["home_team"]}  ({n} batters)')
 
     def _add_to_slate(self):
@@ -660,6 +688,25 @@ class App(tk.Tk):
         self.lb_slate.delete(0, "end")
         self._loaded_idx = None
 
+    def _move_slate(self, delta):
+        """Shift the selected slate game up/down — the slate order IS the
+        game order of every sheet in the output workbook."""
+        sel = self.lb_slate.curselection()
+        if not sel:
+            return
+        i = sel[0]
+        j = i + delta
+        if not (0 <= j < len(self.slate)):
+            return
+        self.slate[i], self.slate[j] = self.slate[j], self.slate[i]
+        row = self.lb_slate.get(i)
+        self.lb_slate.delete(i)
+        self.lb_slate.insert(j, row)
+        self.lb_slate.selection_clear(0, "end")
+        self.lb_slate.selection_set(j)
+        self.lb_slate.see(j)
+        self._loaded_idx = None
+
     def _predict_clicked(self):
         if self.slate:
             specs = list(self.slate)
@@ -692,176 +739,11 @@ class App(tk.Tk):
         state, payload = self._pred_state
         self.btn_predict["state"] = "normal"
         if state == "ok":
-            specs, out, xlsx = payload
+            _specs, _out, xlsx = payload
             self.status.set(f"Saved: {xlsx}")
-            self._show_results(specs, out, xlsx)
         else:
             self.status.set("Ready.")
             messagebox.showerror("Prediction failed", payload)
-
-    # ---------------------------------------------------------- results
-
-    @staticmethod
-    def _make_sortable(tv, cols, top_iids=()):
-        """Click a column header to sort by it; click again to flip.
-        First click puts the best (highest) values on top. Stripes are
-        re-applied after each sort; rows in top_iids keep their highlight."""
-        state = {}
-
-        def to_num(s):
-            s = str(s).strip().rstrip("%")
-            try:
-                return float(s)
-            except ValueError:
-                return None
-
-        def sort_by(col):
-            desc = not state.get(col, False)  # first click = best on top
-            state.clear()
-            state[col] = desc
-            rows = [(tv.set(iid, col), iid) for iid in tv.get_children("")]
-            nums = {iid: to_num(v) for v, iid in rows}
-            numeric = sum(n is not None for n in nums.values()) >= len(rows) / 2
-            if numeric:  # blanks always sort last
-                rows.sort(key=lambda t: (nums[t[1]] is None,
-                                         (nums[t[1]] or 0)
-                                         * (-1 if desc else 1)))
-            else:
-                rows.sort(key=lambda t: str(t[0]).lower(), reverse=desc)
-            for i, (_, iid) in enumerate(rows):
-                tv.move(iid, "", i)
-                tag = ("top" if iid in top_iids
-                       else ("stripe" if i % 2 else ""))
-                tv.item(iid, tags=(tag,))
-
-        for c in cols:
-            tv.heading(c, text=c, command=lambda c=c: sort_by(c))
-
-    def _show_results(self, specs, out, xlsx=None):
-        multi = len(specs) > 1
-        win = tk.Toplevel(self)
-        if multi:
-            title = f'{specs[0]["date"]} — slate of {len(specs)} games'
-        else:
-            s = specs[0]
-            title = f'{s["date"]} {s["away_team"]} @ {s["home_team"]}'
-        win.title(title)
-        win.geometry("1180x880")
-        win.configure(bg=NAVY)
-
-        head = tk.Frame(win, bg=NAVY)
-        head.pack(fill="x", padx=8, pady=(10, 2))
-        self._result_logo = load_logo(height=44)
-        if self._result_logo is not None:
-            tk.Label(head, image=self._result_logo, bg=NAVY).pack(
-                side="left", padx=(4, 12))
-        ttk.Label(head, style="Title.TLabel", text=title).pack(side="left")
-
-        # Bottom-pinned sections are packed BEFORE the expanding batter board
-        # so they can never be pushed off-screen: export buttons, then the
-        # starter table, then (top) the games table and batter board.
-
-        # --- export buttons (pinned to the very bottom) ---
-        # (no combined-copy button: Predict already writes the combined
-        # workbook automatically — its path shows in the footer label)
-        def export_per_game():
-            folder = filedialog.askdirectory(
-                title="Folder for the per-game Excel files")
-            if folder:
-                from predict import save_excel_per_game
-                paths = save_excel_per_game(specs, out, folder)
-                messagebox.showinfo(
-                    "Exported", f"Wrote {len(paths)} files to {folder}")
-
-        foot = tk.Frame(win, bg=NAVY)
-        foot.pack(side="bottom", fill="x", padx=12, pady=6)
-        if multi:
-            ttk.Button(foot, text="Export one file per game...",
-                       command=export_per_game).pack(side="right", padx=6)
-        if xlsx:
-            ttk.Label(foot, text=f"Saved to: {xlsx}", style="Sub.TLabel").pack(
-                side="left")
-
-        # The three boards below share the space above the buttons equally:
-        # same base row height + fill/expand => identical rendered heights.
-        COMMON_H = 6
-
-        # --- game predictions (top) ---
-        ttk.Label(win, text="GAME PREDICTIONS",
-                  font=("Segoe UI", 11, "bold")).pack(side="top", anchor="w",
-                                                      padx=12, pady=(4, 0))
-        gcols = ["Game", "Venue", "Winner", "Expected score",
-                 "xHR", "xRuns", "P>8.5", "P>9.5"]
-        gframe, gv = self._tree_with_scroll(
-            win, columns=gcols, show="headings", height=COMMON_H)
-        for c, wpx in zip(gcols, [100, 195, 95, 135, 60, 60, 60, 60]):
-            gv.heading(c, text=c)
-            gv.column(c, width=wpx, anchor="center")
-        gv.tag_configure("stripe", background=STRIPE)
-        for i, (_, g) in enumerate(out["games"].iterrows()):
-            away, home = g["Game"].split("@")
-            gv.insert("", "end", tags=("stripe" if i % 2 else "",), values=(
-                g["Game"], g["Venue"] or "—",
-                f'{g["Winner"]} {g["WinProb"]:.0%}',
-                f'{away} {g["exp_away_runs"]:.1f} — '
-                f'{home} {g["exp_home_runs"]:.1f}',
-                g["exp_lineup_HR"], g["exp_total_runs"],
-                *[f'{g[f"P_runs_over_{ln}"]:.0%}' for ln in ["8.5", "9.5"]]))
-        gframe.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 4))
-        self._make_sortable(gv, gcols)
-
-        # --- batter prop board ---
-        ttk.Label(win, text="BATTER PROP BOARD",
-                  font=("Segoe UI", 11, "bold")).pack(side="top", anchor="w",
-                                                      padx=12)
-        cols = (["Game"] if multi else []) + \
-            ["Team", "Slot", "Name", "HR chance", "Fair odds", "Hit",
-             "2+ hits", "2+ bases", "Scores run", "RBI", "Walk", "Steal"]
-        widths = ([95] if multi else []) + \
-            [55, 45, 195, 70, 75, 65, 65, 65, 65, 65, 65, 65]
-        tvframe, tv = self._tree_with_scroll(
-            win, columns=cols, show="headings", height=COMMON_H)
-        for c, wpx in zip(cols, widths):
-            tv.heading(c, text=c)
-            tv.column(c, width=wpx, anchor="center")
-        tv.tag_configure("stripe", background=STRIPE)
-        tv.tag_configure("top", background=TOPPICK,
-                         font=("Segoe UI", 10, "bold"))
-        top_iids = set()
-        for i, (_, r) in enumerate(out["batters"].iterrows()):
-            tag = "top" if i < 3 else ("stripe" if i % 2 else "")
-            name = r["Name"] + (" *" if "CareerG" in r
-                                and r["CareerG"] < 50 else "")
-            vals = ([r["Game"]] if multi else []) + [
-                r["Team"], r["slot"], name, f'{r["P_HR"]:.1%}',
-                r["HR_fair_odds"], f'{r["P_Hit"]:.0%}', f'{r["P_2Hits"]:.0%}',
-                f'{r["P_TB2"]:.0%}', f'{r["P_Run"]:.0%}', f'{r["P_RBI"]:.0%}',
-                f'{r["P_BB"]:.0%}', f'{r["P_SB"]:.0%}']
-            iid = tv.insert("", "end", tags=(tag,), values=vals)
-            if i < 3:
-                top_iids.add(iid)
-        tvframe.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 4))
-        self._make_sortable(tv, cols, top_iids)
-
-        # --- starter strikeouts ---
-        ttk.Label(win, text="STARTER STRIKEOUTS",
-                  font=("Segoe UI", 11, "bold")).pack(side="top", anchor="w",
-                                                      padx=12)
-        scols = (["Game"] if multi else []) + \
-            ["Name", "Team", "xK", "P>3.5", "P>4.5", "P>5.5", "P>6.5", "P>7.5"]
-        svframe, sv = self._tree_with_scroll(
-            win, columns=scols, show="headings", height=COMMON_H)
-        for c in scols:
-            sv.heading(c, text=c)
-            sv.column(c, width=100, anchor="center")
-        sv.tag_configure("stripe", background=STRIPE)
-        for i, (_, r) in enumerate(out["starters"].iterrows()):
-            vals = ([r["Game"]] if multi else []) + [
-                r["Name"], r["Team"], f'{r["xK"]:.1f}',
-                *[f'{r[f"P_over_{ln}"]:.0%}' for ln in [3.5, 4.5, 5.5, 6.5, 7.5]]]
-            sv.insert("", "end", tags=("stripe" if i % 2 else "",), values=vals)
-        svframe.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 4))
-        self._make_sortable(sv, scols)
 
 
 if __name__ == "__main__":

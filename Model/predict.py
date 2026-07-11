@@ -164,11 +164,58 @@ def predict_win(win_art, X, mu_home, mu_away):
     return win_art["iso"].predict(s)
 
 
+def _force_xgb_cpu(obj, _seen=None):
+    """Move every XGBoost bag member to CPU for INFERENCE. train.py fits XGB
+    with device='cuda', and the sklearn wrapper carries that into serving, so
+    predict_proba runs on the GPU — which hard-crashes the whole process (taking
+    the GUI window with it) when the GPU is busy with a training job or absent.
+    Slate inference is a few hundred rows: trivially fast on CPU. This walks the
+    loaded art (MeanBag.models + dict/list/tuple containers) and flips each XGB
+    booster's device. Serving-only: evaluate_deep scores models directly, never
+    through Predictor, so trained baselines are untouched. Returns the count
+    flipped. CatBoost is skipped — it applies models on CPU regardless."""
+    if _seen is None:
+        _seen = set()
+    if id(obj) in _seen:
+        return 0
+    _seen.add(id(obj))
+
+    def _flip(m):
+        try:
+            m.set_params(device="cpu")
+            m.get_booster().set_param({"device": "cpu"})
+            return 1
+        except Exception:
+            return 0
+
+    # InfSafe-wrapped (train.py always wraps XGB) or a bare XGB model
+    inner = getattr(obj, "model", None)
+    if inner is not None and type(inner).__module__.split(".")[0] == "xgboost":
+        return _flip(inner)
+    if type(obj).__module__.split(".")[0] == "xgboost":
+        return _flip(obj)
+
+    n = 0
+    members = getattr(obj, "models", None)   # MeanBag
+    if isinstance(members, (list, tuple)):
+        for m in members:
+            n += _force_xgb_cpu(m, _seen)
+    if isinstance(obj, dict):
+        for v in obj.values():
+            n += _force_xgb_cpu(v, _seen)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            n += _force_xgb_cpu(v, _seen)
+    return n
+
+
 class Predictor:
     def __init__(self, stores=None, progress=None, recal=False):
         tick = progress or (lambda msg: None)
         tick("loading models...")
         self.art = joblib.load(ART / "models.joblib")
+        # serving XGB inference on CPU -> immune to GPU contention/absence
+        _force_xgb_cpu(self.art)
         # opt-in in-season drift correction (evaluate_deep Section 10 is the
         # evidence for turning it on); offsets are refreshed by the daily retrain
         self.recal = recal
@@ -264,6 +311,9 @@ class Predictor:
                        "p_swstr_d": pdo["pd_swstr_d"], "opp_oaa": oaa_opp,
                        **pprior, **park, **wx, **env,
                        "hrpt_score": s.hrpt(pid, opp_starter, season, date),
+                       **s.fatigue(pid, date),
+                       **s.bvp(pid, opp_starter, date),
+                       **s.park_hand_hr(spec["venue"], date),
                        "bat_hand": bio["bat_hand"], "pit_throws": p_bio["pit_throws"],
                        "bat_height": bio["height"], "bat_weight": bio["weight"],
                        "bat_age": ((date - bio["dob"]).days / 365.25
@@ -278,15 +328,12 @@ class Predictor:
                 else:
                     eff = bh
                     row["same_hand"] = float(eff == pt) if pd.notna(pt) else np.nan
-                # pull-porch: the fence on the batter's pull side, and whether
-                # his typical career HR distance clears it
-                if eff == "L":
-                    row["pull_fence"] = park["RF"]
-                elif eff == "R":
-                    row["pull_fence"] = park["LF"]
-                else:
-                    row["pull_fence"] = np.nan
-                row["porch_margin"] = row["hrq_dist_avg"] - row["pull_fence"]
+                # eff_hand feeds add_batter_derived (called on the assembled
+                # frame in predict_game), which computes pull_fence/porch_margin,
+                # park_hand_hr_edge, wind carry, temp x elevation, bip x defense,
+                # hit_luck, the ump interactions and the BvP residuals — the same
+                # shared function the training frame uses, so serving matches it.
+                row["eff_hand"] = eff
                 # hand-split contact quality (needs opp_hand / eff hand)
                 row.update(s.bip_batter_vs_hand(pid, date, opp_hand))
                 row.update(s.bip_pitcher_vs_hand(opp_starter, date, eff))
@@ -330,6 +377,12 @@ class Predictor:
         mdf2 = mdf.merge(mu, on=["BatterId", "PitcherId", "Season"], how="left")
         for c in [*F.ARS_P_METRICS.values(), *F.ARS_B_METRICS.values(), "m_coverage"]:
             df[c] = mdf2[c].to_numpy()
+        # row-wise derived features + interactions, from the SAME shared function
+        # the training frame uses (parity) — pull_fence/porch_margin, wind carry,
+        # carry_air, bip x defense, hit_luck, ump interactions, park_hand_hr_edge,
+        # BvP residuals — off the as-of inputs assembled above. In _batter_rows so
+        # both predict_game and the selftest see them.
+        df = F.add_batter_derived(df)
         return df, mdf
 
     _LU_COLS = {"lu_k_sh": "s_k_pct_sh", "lu_bb_sh": "s_bb_pct_sh",
@@ -771,6 +824,40 @@ GLOSSARY = [
     ("Green cells", "A green cell on the Batter/Pitching/Games sheets is a "
      "flagged bet — the same pick that appears on the Bets sheet, shown where "
      "its number lives so you can see it in context."),
+    ("Blue cells", "A light-blue cell is a rank-quality pick: on the model's "
+     "own held-out diagnostics (the PROP_RANKINGS playbook, computed fresh "
+     "from the current model — never the workbook file), that column earns "
+     "pick depth from its ODDS-RATIO top-pick lift (base-rate-fair, so "
+     "high-base columns like Hit compete on equal footing), passes a "
+     "calibration-slope sanity check, and this row is one of today's top "
+     "picks for it. Marks are OVER-side picks ranked by probability (the "
+     "side the diagnostics validate), each clearing an informedness floor "
+     "above the column's base rate — never trivial-under tail cells. When "
+     "sportsbook lines exist for the exact market, the sharp consensus "
+     "acts as a sanity veto (a pick the sharp books price at less than "
+     "half the model's number is dropped) — odds inform, they never "
+     "select: value selection stays with the green cells. Depth is "
+     "then capped by the column's composite rankings Score — for O/U "
+     "columns a 50/50 blend of the market row and that line's own row, so "
+     "both PROP_RANKINGS tables get a vote: up to 10 cells for STRONG or "
+     "better, 7 for SOLID, 4 for MARGINAL, 2 below that, across the whole "
+     "slate. Even a mid-tier market can carry a strong pick when used the "
+     "way its diagnostics say. A pick that is BOTH a rank-quality pick and "
+     "a +EV bet shows light purple — the strongest signal on the sheet."),
+    ("Graded colors", "After the games, Model/grade_results.py re-colors "
+     "the workbook from the actual box scores (our own scraped data, "
+     "matched by player ID). The grammar: DARK fill + white text = the "
+     "pick HIT (dark blue / dark green / dark purple); GRAYED-OUT = the "
+     "pick missed; YELLOW = the stat occurred where nothing was picked; "
+     "white = nothing picked, nothing happened. Every graded cell answers "
+     "the literal question: did the stat occur — O/U cells light only if "
+     "the OVER hit, the Winner cell only if the named team won. "
+     "Re-running the script repairs and re-grades safely."),
+    ("Bold probabilities", "Any probability above 50% is bold; at or "
+     "below 50% is regular weight — no exceptions, including inside "
+     "pick fills and graded cells (a HIT below 50% shows white regular "
+     "text on its dark fill). Text on a fill (a picked Winner) stays "
+     "bold for contrast. Misses are gray italic, bold only above 50%."),
     ("EV is not a guarantee", "The edge is computed from the model's OWN "
      "probability. Beating a naive base rate is not the same as beating a "
      "sharp book, and until many days of closing lines accrue these edges are "
@@ -854,8 +941,6 @@ PCT_COLS = {"HR", "Hit", "2+ Hits", "Single", "Double", "2+ TB", "Run",
             "Win Prob"}
 # the headline columns get the red highlight: the expected counts, and the
 # Games sheet's predicted winner, win probability, total runs and lineup HRs
-HI_COLS = {"xK", "xOuts", "xBB", "xHits", "xER", "xSO", "xHRR", "xTB",
-           "Winner", "Win Prob", "Total Runs", "Lineup HRs"}
 
 
 # ------------------------------------------------------- betting signals
@@ -1146,6 +1231,200 @@ def _bets_sheet(bets_df, note):
     return pd.DataFrame({"Bets": [note or "No bets to show."]})
 
 
+# ---------------------------------------------------------------------------
+# Quality marks: light-blue highlights on the picks each column's own
+# held-out diagnostics say are its best use — the prop-rankings playbook
+# applied to today's slate. Data-driven, no odds: a column earns pick depth
+# from its ODDS-RATIO top-10 lift, must pass a calibration-slope sanity
+# gate, the depth is capped by the column's composite rankings Score (the
+# same 0-100 both PROP_RANKINGS tables print — the market row's Score for
+# binaries, market and per-line Scores blended 50/50 for O/U columns, so
+# both tables get a vote). Marks take the OVER side only, ranked by
+# P(over) — that is the side the lift diagnostics validate; ranking
+# "confidence" via max(p, 1-p) marked trivial unders on tail lines (a 1%
+# K > 8.5 cell). Each mark clears an informedness floor over the base
+# rate, and the sharp consensus vetoes picks it prices under half the
+# model's number (see the QUALITY_* constants). Odds-ratio lift (top-pick
+# odds / base odds) instead of raw lift because raw lift caps at 1/base —
+# a 61%-base column like Hit can never exceed 1.64x raw, so a uniform raw
+# threshold structurally shuts out every high-base-rate prop no matter how
+# real its selection power is. Metrics are computed LIVE from the paired
+# snapshots + artifacts via prop_rankings — the same numbers the
+# PROP_RANKINGS workbook prints, but never read from that file (it can go
+# stale; the snapshots refresh with every baseline). Hard cap per column:
+# QUALITY_N_DEEP / QUALITY_N_TOP cells per workbook, slate-wide.
+QUALITY_OR_DEEP, QUALITY_OR_TOP = 2.0, 1.55
+QUALITY_N_DEEP, QUALITY_N_TOP = 10, 5
+QUALITY_SLOPE = (0.80, 1.20)
+# a mark must be an INFORMED pick, not just the column's least-bad row:
+# P(over) must clear min(2 x base rate, base + 10pts). Kills the old
+# failure mode of "quality" marks sitting on 1-5% tail cells.
+QUALITY_BASE_MULT, QUALITY_BASE_PAD = 2.0, 0.10
+# where the odds store prices the exact market/line, the sharp consensus
+# is a sanity anchor: a pick the sharp books price at less than half the
+# model's number is dropped. Veto only — value SELECTION stays green/+EV.
+QUALITY_FAIR_VETO = 0.5
+# composite-Score depth caps, keyed to prop_rankings' tier cuts:
+# STRONG-or-better columns may take the full lift-proposed depth, SOLID
+# stops at 7, MARGINAL at 4, AVOID at 2 (still visible — the user wants
+# every column's best picks marked, weak ones just shallower).
+QUALITY_SCORE_CAPS = ((42, 10), (28, 7), (15, 4), (float("-inf"), 2))
+# starter sheet column-prefix -> prop_rankings count-head key
+_QUAL_STARTER_KEY = {"pk": "k", "pouts": "outs", "phits": "pha",
+                     "pbb": "pbb", "per": "per"}
+
+
+def _or_lift(m):
+    """Odds-ratio top-10 lift for one year's metrics: the top picks' hit
+    odds over the base odds. Base-rate-fair where raw lift is not."""
+    lift, base = m.get("lift", np.nan), m.get("base", np.nan)
+    if not (np.isfinite(lift) and np.isfinite(base)) or not 0 < base < 1:
+        return np.nan
+    top = min(lift * base, 1 - 1e-6)
+    return (top / (1 - top)) / (base / (1 - base))
+
+
+def _pick_depth(orl, q):
+    """Depth = what selection power (odds-ratio lift) proposes, capped by
+    the composite rankings Score `q`: lift proves the column's TOP picks
+    are real, the Score keeps depth honest about the column overall."""
+    if not (np.isfinite(orl) and np.isfinite(q)) or orl < QUALITY_OR_TOP:
+        return 0
+    n = QUALITY_N_DEEP if orl >= QUALITY_OR_DEEP else QUALITY_N_TOP
+    cap = next(c for s, c in QUALITY_SCORE_CAPS if q >= s)
+    return min(n, cap)
+
+
+def quality_marks(out, specs=None):
+    """{sheet: [(row_match, display_column), ...]} of rank-quality picks to
+    paint light blue, from the model's own held-out diagnostics (2025+2026
+    averaged). Marks take the OVER side only (the side the lift metrics
+    validate), must clear the informedness floor above the column's base
+    rate, and — when the odds store prices the exact market/line — survive
+    the sharp-consensus sanity veto. Fails soft: any problem returns no
+    marks (or just no veto), never blocks the workbook."""
+    try:
+        import prop_rankings as R
+        snap25 = joblib.load(R.ART / "eval_paired_select_2025.joblib")
+        snap26 = joblib.load(R.ART / "eval_paired_2026.joblib")
+        b25, b26 = R.binary_year(snap25), R.binary_year(snap26)
+        c25 = R.count_year(snap25, joblib.load(R.ART / "models_bt.joblib"))
+        c26 = R.count_year(snap26, joblib.load(R.ART / "models.joblib"))
+    except Exception:
+        return {}
+    # sharp fair probs for the slate, if odds were scraped (else no veto)
+    store, cons_cache = None, {}
+    try:
+        s = O.load_odds(O.DEFAULT_STORE)
+        if specs:
+            dates = {str(sp["date"]) for sp in specs}
+            s = s[s["Date"].astype(str).isin(dates)]
+        if not s.empty:
+            store = s
+    except Exception:
+        pass
+
+    def sharp_fair(api, line, pid):
+        if store is None or api is None or pid is None:
+            return np.nan
+        ck = (api, line)
+        if ck not in cons_cache:
+            try:
+                cons_cache[ck] = _consensus(store, api, line, "PlayerId")
+            except Exception:
+                cons_cache[ck] = {}
+        c = cons_cache[ck].get(pid)
+        return c["fair"] if c else np.nan
+
+    marks = defaultdict(list)
+
+    def slope_ok(*ms):
+        s = np.nanmean([m.get("slope", np.nan) for m in ms])
+        return np.isfinite(s) and QUALITY_SLOPE[0] <= s <= QUALITY_SLOPE[1]
+
+    def collect(frame, pcol, n, base, api, line, sheet, disp, has_game):
+        """Top-n rows by P(over), each clearing the informedness floor and
+        the sharp-line veto; a vetoed row frees its slot for the next."""
+        floor = (min(QUALITY_BASE_MULT * base, base + QUALITY_BASE_PAD)
+                 if np.isfinite(base) and 0 < base < 1 else 0.0)
+        got = 0
+        for _, r in frame.sort_values(pcol, ascending=False).iterrows():
+            if got >= n:
+                break
+            p = float(r[pcol])
+            if not np.isfinite(p) or p < floor:
+                break                        # sorted desc — nothing left
+            pid = _as_int(r.get("PlayerId"))
+            fair = sharp_fair(api, line, pid)
+            if np.isfinite(fair) and fair < QUALITY_FAIR_VETO * p:
+                continue                     # fights the sharp line 2:1
+            match = {"ID": pid}
+            if has_game:
+                match["Game"] = r["Game"]
+            marks[sheet].append((match, disp))
+            got += 1
+
+    # ---- batter binaries: top-N of today's slate by probability ----
+    batters = out["batters"]
+    b_game = "Game" in batters.columns
+    for prop, pcol in PROP_COLS.items():
+        if prop not in b25 or prop not in b26 or pcol not in batters.columns:
+            continue
+        m25, m26 = b25[prop], b26[prop]
+        try:  # a binary IS its own line — market row and Lines row agree
+            q = R.final_score(R.binary_score(m25), R.binary_score(m26))
+        except Exception:
+            q = np.nan
+        n = _pick_depth(np.nanmean([_or_lift(m25), _or_lift(m26)]), q)
+        if not n or not slope_ok(m25, m26):
+            continue
+        meta = O.PROP_MARKET.get(prop)
+        collect(batters, pcol, n,
+                np.nanmean([m25.get("base", np.nan),
+                            m26.get("base", np.nan)]),
+                meta["api"] if meta else None,
+                meta["line"] if meta else None,
+                "Batter Props", BAT_HEADERS.get(pcol, pcol), b_game)
+
+    # ---- pitcher O/U lines: per-line depth, leaning the bias direction ----
+    starters = out["starters"]
+    s_game = "Game" in starters.columns
+    for skey, prefix in STARTER_PREFIX.items():
+        key = _QUAL_STARTER_KEY.get(skey)
+        if key is None or key not in c25 or key not in c26:
+            continue
+        f25, f26 = c25[key], c26[key]
+        try:  # the family's market-table Score, one half of the blend
+            fam_q = R.final_score(R.count_score(f25), R.count_score(f26))
+        except Exception:
+            fam_q = np.nan
+        meta = O.STARTER_MARKET.get(skey)
+        for col in [c for c in starters.columns if c.startswith(prefix)]:
+            try:
+                line = float(col[len(prefix):])
+            except ValueError:
+                continue
+            l25 = f25.get("lines", {}).get(line)
+            l26 = f26.get("lines", {}).get(line)
+            if l25 is None or l26 is None:
+                continue
+            try:  # this line's own Lines-sheet Score, the other half
+                line_q = R.final_score(R.binary_score(l25),
+                                       R.binary_score(l26))
+            except Exception:
+                line_q = np.nan
+            q = np.nanmean([fam_q, line_q])
+            n = _pick_depth(np.nanmean([_or_lift(l25), _or_lift(l26)]), q)
+            if not n or not slope_ok(l25, l26):
+                continue
+            collect(starters, col, n,
+                    np.nanmean([l25.get("base", np.nan),
+                                l26.get("base", np.nan)]),
+                    meta["api"] if meta else None, line,
+                    "Pitching Props", _over_display(col), s_game)
+    return dict(marks)
+
+
 def _cell_eq(cv, mv):
     """Match a written cell value against a highlight key (str Game tag or
     numeric PlayerId)."""
@@ -1155,27 +1434,26 @@ def _cell_eq(cv, mv):
     return ci is not None and ci == _as_int(mv)
 
 
-def _polish(path, highlights=None):
+def _polish(path, highlights=None, quality=None):
     """Make the workbook readable, in MLB colors (navy #041E42, red
     #BF0D3E): frozen bold headers, percent formats, autofit column widths
-    (padded for the filter dropdown arrows), thin borders, a light zebra
-    stripe, a red tint + red header on the headline columns, a red flag on
+    (padded for the filter dropdown arrows), thin borders, white data
+    cells (no column tints), a red flag on
     sub-50-game batters, and filter/sort dropdowns on the data sheets. The
     'Bets' board gets a green header + green rows, and `highlights` (from
-    compute_bets) paints each flagged pick green on its prop sheet."""
+    compute_bets) paints each flagged pick green on its prop sheet.
+    `quality` (from quality_marks) paints rank-quality picks light blue —
+    painted first, so a pick that is also +EV keeps the stronger green."""
     import openpyxl
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     wb = openpyxl.load_workbook(path)
     head_font = Font(bold=True, color="FFFFFF")
     head_fill = PatternFill("solid", fgColor="041E42")     # MLB navy
-    hi_head_fill = PatternFill("solid", fgColor="BF0D3E")  # MLB red
     bet_head_fill = PatternFill("solid", fgColor="1E7B34")  # Bets: green
     bet_row_fill = PatternFill("solid", fgColor="E7F3E2")   # light green board
-    green_fill = PatternFill("solid", fgColor="C6EFCE")     # flagged bet cell
-    green_font = Font(bold=True, color="006100")
-    stripe_fill = PatternFill("solid", fgColor="EAF0F8")
-    hi_fill = PatternFill("solid", fgColor="F5DBE2")       # light MLB red
-    hi_font = Font(bold=True, color="041E42")
+    green_fill = PatternFill("solid", fgColor="92D050")     # flagged bet cell
+    blue_fill = PatternFill("solid", fgColor="00B0F0")      # quality pick cell
+    purple_fill = PatternFill("solid", fgColor="B1A0C7")    # quality AND +EV
     dim_font = Font(color="808B99")                        # ID column
     warn_font = Font(bold=True, color="BF0D3E")            # Career G < 50
     thin = Side(style="thin", color="B7C2D4")
@@ -1200,54 +1478,61 @@ def _polish(path, highlights=None):
         headers = [str(c.value) for c in ws[1]]
         for j, cell in enumerate(ws[1], start=1):
             cell.font = head_font
-            if is_bets:
-                cell.fill = bet_head_fill
-            else:
-                cell.fill = (hi_head_fill if headers[j - 1] in HI_COLS
-                             else head_fill)
+            cell.fill = bet_head_fill if is_bets else head_fill
             cell.alignment = center if headers[j - 1] not in text_cols else left
             cell.border = border
 
         for j, h in enumerate(headers, start=1):
             is_text = h in text_cols or (is_bets and h in BET_TEXT_COLS)
             is_pct = " > " in h or h in PCT_COLS or (is_bets and h in BET_PCT_COLS)
-            hi = (not is_bets) and h in HI_COLS
             for i in range(2, max_row + 1):
                 c = ws.cell(row=i, column=j)
                 c.border = border
                 c.alignment = left if is_text else center
                 if is_pct:
                     c.number_format = "0.0%"
+                    if isinstance(c.value, (int, float)) and c.value > 0.5:
+                        c.font = Font(bold=True)
                 if is_bets and h == "Best Odds":
                     c.number_format = "+0;-0"   # +475 / -150
                 if h == "ID":
                     c.font = dim_font
                 if is_bets:
                     c.fill = bet_row_fill        # the whole board reads "green"
-                elif hi:
-                    c.fill = hi_fill
-                    c.font = hi_font
-                elif i % 2 == 1:
-                    c.fill = stripe_fill
                 # sub-50-game batters are the least reliable picks (Glossary)
                 if (h == "Career G" and isinstance(c.value, (int, float))
                         and c.value < 50):
                     c.font = warn_font
 
-        # paint each flagged pick green on its prop sheet: find the row whose
-        # key columns match, then fill the target column's cell (compute_bets
-        # supplies {header: value} row matches + the display column).
-        for match, colname in (highlights or {}).get(ws.title, []):
-            hidx = {h: k + 1 for k, h in enumerate(headers)}
-            if colname not in hidx or any(m not in hidx for m in match):
-                continue
-            for i in range(2, max_row + 1):
-                if all(_cell_eq(ws.cell(row=i, column=hidx[m]).value, v)
-                       for m, v in match.items()):
-                    cc = ws.cell(row=i, column=hidx[colname])
-                    cc.fill = green_fill
-                    cc.font = green_font
-                    break
+        # paint flagged picks. Resolve every mark to its concrete cell
+        # first so overlaps combine: quality-only = blue, +EV-only = green,
+        # BOTH (a rank-quality pick that is also a priced edge) = light
+        # purple — the strongest signal on the sheet.
+        cell_kind = {}
+        for marks, kind in ((quality, "blue"), (highlights, "green")):
+            for match, colname in (marks or {}).get(ws.title, []):
+                hidx = {h: k + 1 for k, h in enumerate(headers)}
+                if colname not in hidx or any(m not in hidx for m in match):
+                    continue
+                for i in range(2, max_row + 1):
+                    if all(_cell_eq(ws.cell(row=i, column=hidx[m]).value, v)
+                           for m, v in match.items()):
+                        key = (i, hidx[colname])
+                        prev = cell_kind.get(key)
+                        cell_kind[key] = ("purple" if prev and prev != kind
+                                          else kind)
+                        break
+        # pick fills keep their tinted text color, but probabilities inside
+        # them follow the same bold-over-50% rule as plain cells; text
+        # picks (e.g. Winner) stay bold for contrast on the fill
+        paint = {"blue": (blue_fill, "0B2E4F"),
+                 "green": (green_fill, "1E4620"),
+                 "purple": (purple_fill, "3B2151")}
+        for (i, j), kind in cell_kind.items():
+            cc = ws.cell(row=i, column=j)
+            fill, color = paint[kind]
+            bold = not isinstance(cc.value, (int, float)) or cc.value > 0.5
+            cc.fill, cc.font = fill, Font(bold=bold, color=color)
 
         # autofit: widest of header / any cell, clamped; percents count as
         # ~6 chars. The filter dropdown arrow is ~3 chars wide on the RIGHT
@@ -1314,7 +1599,7 @@ def save_excel(spec, out, path=None):
         summary.to_excel(xw, sheet_name="Summary", index=False)
         pd.DataFrame(GLOSSARY, columns=["Term", "Meaning"]).to_excel(
             xw, sheet_name="Glossary", index=False)
-    _polish(path, highlights)
+    _polish(path, highlights, quality=quality_marks(out, [spec]))
     return path
 
 
@@ -1338,11 +1623,23 @@ def save_excel_slate(specs, out, path=None):
         date = min(s["date"] for s in specs)
         path = PRED_DIR / (f'{date}_slate_{len(specs)}games_'
                            f'{_t.strftime("%H%M%S")}.xlsx')
-    batters = _display(out["batters"].sort_values("P_HR", ascending=False),
+    # every sheet in slate order (the GUI slate = earliest first pitch
+    # first, or however the user arranged it with the move buttons), then
+    # the sheet's own metric within each game
+    order = {f'{s["away_team"]}@{s["home_team"]}': i
+             for i, s in enumerate(specs)}
+
+    def by_game(df, metric):
+        go = df["Game"].map(order).fillna(len(order))
+        return (df.assign(_go=go)
+                .sort_values(["_go", metric], ascending=[True, False])
+                .drop(columns="_go"))
+
+    batters = _display(by_game(out["batters"], "P_HR"),
                        BAT_HEADERS, BAT_ORDER, drop=("xHR", "HR_fair_odds"))
-    starters = _display(out["starters"].sort_values("xK", ascending=False),
+    starters = _display(by_game(out["starters"], "xK"),
                         ST_HEADERS, ST_ORDER)
-    games = _display(out["games"].sort_values("WinProb", ascending=False),
+    games = _display(by_game(out["games"], "WinProb"),
                      GAME_HEADERS, GAME_ORDER, drop=("HomeWinProb",))
     bets_df, highlights, note = compute_bets(out, specs)
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
@@ -1353,7 +1650,7 @@ def save_excel_slate(specs, out, path=None):
         summary_frame(specs, out).to_excel(xw, sheet_name="Summary", index=False)
         pd.DataFrame(GLOSSARY, columns=["Term", "Meaning"]).to_excel(
             xw, sheet_name="Glossary", index=False)
-    _polish(path, highlights)
+    _polish(path, highlights, quality=quality_marks(out, specs))
     return Path(path)
 
 
@@ -1466,7 +1763,9 @@ def selftest(pred):
           f"{spec['home_team']} {spec['date']}")
 
     bdf, bmeta = pred._batter_rows(spec)
-    check_cols = [c for c in pred.art["bat_cols"] if c not in F.CAT_COLS]
+    # check the FULL batter superset (not just the shipped model's selected
+    # subset) so every served feature is parity-verified regardless of selection
+    check_cols = [c for c in F.batter_feature_cols() if c not in F.CAT_COLS]
     worst = ("", 0.0)
     n_checked = 0
     for i, m in bmeta.iterrows():

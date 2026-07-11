@@ -49,6 +49,12 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "Data"
 
 API_URL = "https://zuriteapi.com/homers/api/homeruns"
 
+# onlyhomers.com's database begins with the 2020 season; earlier years are
+# legitimately absent, not an outage, so they're skipped rather than treated
+# as a fatal empty fetch (FIRST_SEASON reaches back to 2015 for the sources
+# that cover it).
+SOURCE_FLOOR = 2020
+
 # One canonical name per physical park across all years and all CSVs.
 # Keep in sync with scrape_gamelogs.py and build_ballparks.py.
 VENUE_ALIASES = {
@@ -105,6 +111,9 @@ def main():
 
     all_rows = []
     for year in YEARS:
+        if year < SOURCE_FLOOR:
+            print(f"{year}: skipped (source database starts {SOURCE_FLOOR})")
+            continue
         if year != CURRENT_SEASON and year in stored:
             all_rows.extend(stored[year])
             print(f"{year}: {len(stored[year])} home runs (stored)")

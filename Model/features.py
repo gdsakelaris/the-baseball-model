@@ -88,6 +88,83 @@ class MeanBag:
         return np.mean([m.predict_proba(X) for m in self.models], axis=0)
 
 
+class InfSafe:
+    """Wrap a model whose library rejects ±inf (XGBoost) for use in a MeanBag
+    next to LightGBM members that tolerate them: numeric ±inf -> NaN at
+    fit/predict, categorical dtypes preserved. Lives here so pickled
+    artifacts resolve it from any entry point (MeanBag precedent)."""
+
+    def __init__(self, model):
+        self.model = model
+
+    @staticmethod
+    def _clean(X):
+        X = X.copy()
+        num = X.select_dtypes(include=[np.number]).columns
+        X[num] = X[num].replace([np.inf, -np.inf], np.nan)
+        return X
+
+    def fit(self, X, y, **kw):
+        es = kw.pop("eval_set", None)
+        if es is not None:
+            kw["eval_set"] = [(self._clean(a), b) for a, b in es]
+        self.model.fit(self._clean(X), y, **kw)
+        return self
+
+    @property
+    def best_iteration_(self):
+        return getattr(self.model, "best_iteration", None)
+
+    def predict(self, X):
+        return self.model.predict(self._clean(X))
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(self._clean(X))
+
+
+class CatSafe:
+    """Wrap a CatBoost model for use in a MeanBag next to LightGBM members:
+    numeric ±inf -> NaN (CatBoost tolerates numeric NaN but not inf),
+    categoricals -> plain strings with NaN as its own 'missing' level
+    (CatBoost rejects NaN in cat features). Poisson/Tweedie regressors need
+    prediction_type='Exponent' to return means instead of log-means —
+    `exponent=True` handles it. Lives here so pickles resolve everywhere."""
+
+    def __init__(self, model, cat_cols, exponent=False):
+        self.model = model
+        self.cat_cols = list(cat_cols)
+        self.exponent = exponent
+
+    def _clean(self, X):
+        X = X.copy()
+        num = X.select_dtypes(include=[np.number]).columns
+        X[num] = X[num].replace([np.inf, -np.inf], np.nan)
+        for c in self.cat_cols:
+            if c in X.columns:
+                X[c] = X[c].astype(str).fillna("missing")
+        return X
+
+    def fit(self, X, y, **kw):
+        es = kw.pop("eval_set", None)
+        if es is not None:
+            kw["eval_set"] = [(self._clean(a), b) for a, b in es]
+        self.model.fit(self._clean(X), y, **kw)
+        return self
+
+    @property
+    def best_iteration_(self):
+        return self.model.get_best_iteration()
+
+    def predict(self, X):
+        if self.exponent:
+            return self.model.predict(self._clean(X),
+                                      prediction_type="Exponent")
+        return self.model.predict(self._clean(X))
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(self._clean(X))
+
+
 def inf_to_nan(X):
     """sklearn rejects inf (from divide-by-zero rates); make them missing so
     the imputer handles them. Lives here (not in train's __main__) so a
@@ -276,6 +353,25 @@ def _batter_asof(gb):
             df[f"r{w}_{s}"] = g[s].transform(
                 lambda x: x.shift(1).rolling(w, min_periods=1).sum())
     df["days_rest"] = g["Date"].diff().dt.days
+    # fatigue: games in the trailing 7 / 14 calendar days, strictly prior to
+    # today (day-start convention, like the other as-of features). A dense
+    # stretch tires a bat in ways the game-count windows can't see.
+    def _prior_games(day_idx, win):
+        v = day_idx.to_numpy()
+        out = np.empty(len(v))
+        lo = 0
+        for i in range(len(v)):
+            while v[i] - v[lo] > win:
+                lo += 1
+            hi = i                       # exclude same-day games (day-start)
+            while hi > lo and v[hi - 1] == v[i]:
+                hi -= 1
+            out[i] = hi - lo
+        return pd.Series(out, index=day_idx.index)
+    _gd = ((df["Date"] - DECAY_EPOCH).dt.days).astype("float64").groupby(
+        df["PlayerId"], sort=False)
+    df["g_l7d"] = _gd.transform(lambda s: _prior_games(s, 7))
+    df["g_l14d"] = _gd.transform(lambda s: _prior_games(s, 14))
     # decay-weighted as-of sums: sum_j x_j * exp(-lam*(t_i - t_j)) over prior
     # games j, computed as an exp(lam*t) cumsum discounted back to the row's
     # own date (t spans ~2,400 days -> e^18.5, comfortably inside float64)
@@ -311,7 +407,7 @@ def _batter_asof(gb):
                  + [f"_dk_{s}" for s in DECAY_STATS] + ["_dk_G"]
                  + [f"_vs{h}_{s}" for h in ("L", "R") for s in VSH_STATS]
                  + [f"_loc{f}_{s}" for f in (0, 1) for s in LOC_STATS]
-                 + ["_posC_n", "_posDH_n"])
+                 + ["_posC_n", "_posDH_n", "g_l7d", "g_l14d"])
     df[asof_cols] = _snap_to_day_start(df, ["PlayerId"], asof_cols)
     return df
 
@@ -436,6 +532,35 @@ def _park_table(gb, games):
     gv = games.merge(per_game, on="GamePk", how="left")
     gv[stats] = gv[stats].fillna(0)
     return _daily_cum(gv, ["Venue"], stats)
+
+
+def _park_hand_hr_table(gb, games, hands):
+    """Per (Venue, Date): as-of cumulative HR and PA split by BATTER bats-hand
+    (L/R), wide (phh_{L,R}_{HR,PA}). Feeds the handedness-specific park HR edge
+    that the hand-agnostic park_hr_pg misses — short-RF parks help LHB in a way
+    fence distance and the overall park factor don't capture. Switch hitters are
+    dropped from the build (their effective hand depends on the pitcher);
+    consumers key the edge on eff_hand and merge_asof by Venue (exclusive)."""
+    bats = (hands.dropna(subset=["PlayerId"]).drop_duplicates("PlayerId")
+            .set_index("PlayerId")["Bats"])
+    g = gb[["GamePk", "PlayerId", "Date", "HR", "PA"]].copy()
+    g["bh"] = g["PlayerId"].map(bats)
+    g = g[g["bh"].isin(("L", "R"))]
+    g = g.merge(games[["GamePk", "Venue"]], on="GamePk", how="left")
+    g = g.dropna(subset=["Venue"])
+    day = g.groupby(["Venue", "Date", "bh"], as_index=False)[["HR", "PA"]].sum()
+    wide = day.pivot_table(index=["Venue", "Date"], columns="bh",
+                           values=["HR", "PA"], fill_value=0.0)
+    wide.columns = [f"{h}_{s}" for s, h in wide.columns]   # -> L_HR, R_HR, L_PA, R_PA
+    wide = wide.reset_index().sort_values(["Venue", "Date"])
+    for c in ("L_HR", "L_PA", "R_HR", "R_PA"):
+        if c not in wide.columns:
+            wide[c] = 0.0
+    grp = wide.groupby("Venue", sort=False)
+    out = wide[["Venue", "Date"]].copy()
+    for c in ("L_HR", "L_PA", "R_HR", "R_PA"):
+        out[f"phh_{c}"] = grp[c].cumsum()
+    return out
 
 
 # rbi opportunity, DEEPER-ORDER ISOLATION: mean career OBP of the hitters 3-5
@@ -736,6 +861,43 @@ def _cum_decay_table(day, id_col):
 
 def _bip_table(bip, id_col):
     return _cum_decay_table(_bip_day_sums(bip, id_col), id_col)
+
+
+# Batter-vs-pitcher direct history (BvP): the batter's prior CONTACT outcomes
+# against THIS specific starter, as-of. Statcast BIP is contact-only (no K/BB),
+# so BvP speaks to contact props (hr/hit/tb2/single/double/hrr). It is encoded
+# as a RESIDUAL off the batter's own as-of contact baseline (bip_xwoba), shrunk
+# by pairwise sample size — carrying only the pitcher-specific effect NOT already
+# in handedness/arsenal, and sitting at neutral 0 until enough pairwise history
+# accrues. Priors/K are set by convention like BIP_SHRINK (NOT swept); the
+# residual form is insensitive to K over a broad range. Serving/inference path +
+# parity selftest deferred to ship (dev serving loads models.joblib, unaffected).
+BVP_K_XW = 30.0        # xwOBA-on-contact residual: effective-sample weight
+BVP_K_HR = 50.0        # HR-per-contact residual: effective-sample weight
+BVP_HR_PRIOR = 0.046   # league HR per contacted ball (mlb_statcast_bip)
+
+
+def _bvp_table(bip):
+    """Per (BatterId, PitcherId, day): inclusive career cumsums of the pair's
+    contact outcomes. Consumers merge_asof with allow_exact_matches=False so a
+    game on date D sees pairwise history through D-1 (same-game PAs never leak),
+    exactly like every other BIP table."""
+    b = bip.dropna(subset=["BatterId", "PitcherId"]).copy()
+    b["BatterId"] = b["BatterId"].astype("int64")
+    b["PitcherId"] = b["PitcherId"].astype("int64")
+    day = pd.DataFrame({
+        "BatterId": b["BatterId"], "PitcherId": b["PitcherId"], "Date": b["Date"],
+        "n": 1.0,
+        "xw_n": b["xwOBA"].notna().astype(float),
+        "xw_sum": b["xwOBA"].fillna(0.0),
+        "hr_n": (b["Events"] == "home_run").astype(float),
+    }).groupby(["BatterId", "PitcherId", "Date"], as_index=False).sum()
+    day = day.sort_values(["BatterId", "PitcherId", "Date"])
+    g = day.groupby(["BatterId", "PitcherId"], sort=False)
+    out = day[["BatterId", "PitcherId", "Date"]].copy()
+    for c in ("n", "xw_n", "xw_sum", "hr_n"):
+        out[f"bvp_cum_{c}"] = g[c].cumsum()
+    return out
 
 
 def _bip_team_tables(bip, gb, gp):
@@ -1372,6 +1534,88 @@ def _slot_pa_table(gb):
 BATTER_FEATURES = None  # populated below
 
 
+# ---- wind-carry features (physical HR drivers) --------------------------
+# WindDir in the frames is field-relative and title-cased (games loader
+# .str.title()): "Out To Cf/Lf/Rf", "In From Cf/Lf/Rf", "L To R", "R To L",
+# "Varies", "Calm". Map each to the field it acts on and an out(+)/in(-) sign;
+# crosswinds / calm / varies are neutral for carry over the fence.
+_WIND_FIELD = {"Out To Lf": "L", "In From Lf": "L", "Out To Cf": "C",
+               "In From Cf": "C", "Out To Rf": "R", "In From Rf": "R"}
+_WIND_SIGN = {"Out To Lf": 1.0, "In From Lf": -1.0, "Out To Cf": 1.0,
+              "In From Cf": -1.0, "Out To Rf": 1.0, "In From Rf": -1.0}
+CARRY_CF_W = 0.7   # a center-field wind helps both pull sides at this weight
+
+
+def add_wind_carry(df, pull=False):
+    """Add out/in carry-wind features from the field-relative WindDir + WindSpeed.
+    `wind_carry` = out(+)/in(-) sign x mph (general, helps any fly ball). With
+    `pull=True` (batter frame, needs eff_hand) also `bat_wind_pull` = that carry
+    projected onto the batter's PULL field (LHB pulls RF, RHB pulls LF; a CF wind
+    helps both at CARRY_CF_W). Vectorized over the frame."""
+    wd = df["WindDir"].astype(str)
+    spd = pd.to_numeric(df["WindSpeed"], errors="coerce").fillna(0.0).to_numpy()
+    sign = wd.map(_WIND_SIGN).fillna(0.0).to_numpy()
+    df["wind_carry"] = sign * spd
+    if pull:
+        field = wd.map(_WIND_FIELD).to_numpy()          # "L"/"C"/"R"/NaN
+        eff = df["eff_hand"].to_numpy()
+        pull_field = np.where(eff == "L", "R", np.where(eff == "R", "L", ""))
+        w = np.where(field == pull_field, 1.0,
+                     np.where(field == "C", CARRY_CF_W, 0.0))
+        df["bat_wind_pull"] = sign * spd * w
+    return df
+
+
+def add_batter_derived(df):
+    """Row-wise derived batter features + interactions (2026-07-10 batches),
+    computed IDENTICALLY by the vectorized frame and the serving path — predict.py
+    calls this on the assembled single-row frame, so every derived feature is
+    parity-safe by construction. All inputs are produced upstream: the as-of
+    contact/plate/ump columns, _dk_* decayed sums, opp_oaa, park geometry (RF/LF),
+    game weather (Temp/WindDir/WindSpeed/Elevation_ft), and the two as-of JOINS
+    this function consumes but does not perform — park-hand (phh_*) and
+    batter-vs-pitcher (bvp_cum_*). NaN inputs propagate (LightGBM tolerates NaN)."""
+    # pull-porch geometry: the fence on the batter's pull side + HR clearance
+    df["pull_fence"] = np.where(df["eff_hand"] == "L", df["RF"],
+                                np.where(df["eff_hand"] == "R", df["LF"], np.nan))
+    df["porch_margin"] = df["hrq_dist_avg"] - df["pull_fence"]
+    # realized handed park-HR edge: venue HR/PA for the batter's EFFECTIVE hand
+    # minus the other hand (short-RF parks help LHB) — the handed asymmetry that
+    # park_hr_pg + fence distance miss. Gated 500 PA/hand; switch/unknown -> NaN.
+    _lrate = np.where(df["phh_L_PA"] >= 500, df["phh_L_HR"] / df["phh_L_PA"], np.nan)
+    _rrate = np.where(df["phh_R_PA"] >= 500, df["phh_R_HR"] / df["phh_R_PA"], np.nan)
+    df["park_hand_hr_edge"] = np.where(
+        df["eff_hand"] == "L", _lrate - _rrate,
+        np.where(df["eff_hand"] == "R", _rrate - _lrate, np.nan))
+    # wind carry onto the pull field + general carry; wind x short porch
+    add_wind_carry(df, pull=True)                     # bat_wind_pull, wind_carry
+    df["bat_wind_porch"] = df["bat_wind_pull"] * (330.0 - df["pull_fence"])
+    # hot + high air both add carry (product of centered Temp / Elevation)
+    df["carry_air"] = ((pd.to_numeric(df["Temp"], errors="coerce") - 70.0)
+                       * (pd.to_numeric(df["Elevation_ft"], errors="coerce")
+                          / 1000.0))
+    # batted-ball profile x opponent defense (opp_oaa = defense faced)
+    df["bip_gb_def"] = df["bip_gb"] * df["opp_oaa"]
+    df["bip_air_def"] = df["bip_pullair"] * df["opp_oaa"]
+    # BABIP / luck-regression: recent decayed BA-on-contact minus expected xBA
+    _contact = df["_dk_AB"] - df["_dk_SO"]
+    df["hit_luck"] = (np.where(_contact > 0, df["_dk_H"] / _contact, np.nan)
+                      - df["bip_xba"])
+    # umpire zone tendency x pitcher/batter matchup
+    df["ump_k_x_pk"] = df["ump_k_pct"] * df["pc_k_bf"]
+    df["ump_k_x_bk"] = df["ump_k_pct"] * df["c_k_pct"]
+    df["ump_bb_x_pbb"] = df["ump_bb_pct"] * df["pc_bb_bf"]
+    # BvP shrunk residuals off the batter's own as-of contact baseline (bip_xwoba)
+    _own = df["bip_xwoba"]
+    _bn = df["bvp_cum_n"]
+    df["bvp_n"] = np.log1p(_bn.fillna(0.0))
+    df["bvp_xwoba_resid"] = ((df["bvp_cum_xw_sum"] - df["bvp_cum_xw_n"] * _own)
+                             / (df["bvp_cum_xw_n"] + BVP_K_XW)).fillna(0.0)
+    df["bvp_hr_resid"] = ((df["bvp_cum_hr_n"] - _bn * BVP_HR_PRIOR)
+                          / (_bn + BVP_K_HR)).fillna(0.0)
+    return df
+
+
 def build_batter_frame(raw):
     """Training frame: one row per starting batter per game, with targets."""
     gb, gp = raw["gb"], raw["gp"]
@@ -1480,6 +1724,19 @@ def build_batter_frame(raw):
                 df[f"{tag}d_{name}"] = np.nan
             df[f"{tag}_n"] = np.nan
             df[f"{tag}d_n"] = np.nan
+
+    # batter-vs-pitcher direct history (BvP): as-of pairwise contact sums
+    # (bvp_cum_*). The shrunk residuals off the batter's own baseline (bip_xwoba)
+    # are derived in add_batter_derived (shared with serving). NaN cols when
+    # there is no BIP file so the shared function still resolves.
+    if raw.get("bip") is not None:
+        bvt = _bvp_table(raw["bip"]).rename(
+            columns={"BatterId": "PlayerId", "PitcherId": "StarterId"})
+        bvt["StarterId"] = bvt["StarterId"].astype(df["StarterId"].dtype)
+        df = _asof_merge(df, bvt, by=["PlayerId", "StarterId"])
+    else:
+        for c in ("bvp_cum_n", "bvp_cum_xw_n", "bvp_cum_xw_sum", "bvp_cum_hr_n"):
+            df[c] = np.nan
 
     # plate discipline (pitch-level dailies): the batter's whiff-per-swing
     # and chase rates (career + 90-day decay) and the opposing starter's
@@ -1624,12 +1881,11 @@ def build_batter_frame(raw):
                 df[f"{tag}_{name}"] = np.nan
             df[f"{tag}_n"] = np.nan
 
-    # pull-porch: the fence on the batter's pull side (lefties pull to RF),
-    # and whether his typical career HR clears it
-    df["pull_fence"] = np.where(df["eff_hand"] == "L", df["RF"],
-                                np.where(df["eff_hand"] == "R", df["LF"],
-                                         np.nan))
-    df["porch_margin"] = df["hrq_dist_avg"] - df["pull_fence"]
+    # park handed-HR: as-of venue HR/PA split by batter hand (phh_*). The edge
+    # off eff_hand + pull-porch geometry are derived in add_batter_derived
+    # (shared with the serving path, so both compute them identically).
+    phh = _park_hand_hr_table(raw["gb"], raw["games"], raw["hands"])
+    df = _asof_merge(df, phh, by=["Venue"])
 
     for pre in ["c", "s"]:
         df = pd.concat([df, _bat_rates(df, pre), _bat_rates_shrunk(df, pre)], axis=1)
@@ -1760,6 +2016,13 @@ def build_batter_frame(raw):
     df["bk_count"] = df["SO"]
     df["hrr_count"] = hrr
     df["tb_count"] = df["TB"]   # total bases -> expected-TB head (xTB)
+
+    # ---- row-wise derived features + interactions: one shared function that the
+    # serving path also calls, so the two compute them identically (parity). The
+    # as-of phh_* / bvp_cum_* joins above feed it; drop those intermediates. ----
+    df = add_batter_derived(df)
+    df = df.drop(columns=[c for c in df.columns
+                          if c.startswith(("phh_", "bvp_cum_"))])
     return df
 
 
@@ -1797,9 +2060,11 @@ def batter_feature_cols():
              # noise), RE-ACCEPTED under the keep-leaning bar 2026-07-09
              # (queue Tier A2) — routed with _CTX in train.py
              "ctx_ahead_obp_d", "ctx_behind_slg_d",
-             # rbi_opp_obp BENCHED 2026-07-09 (train._CTX note): computed in
-             # both paths but out of the superset — deeper order added no RBI
-             # signal across three designs.
+             # rbi_opp_obp + exposure (xpa_*) UNBENCHED 2026-07-10 for the
+             # NUCLEAR PROBE (user: unbench everything, no routing) — both
+             # were benched out of the superset 07-07/07-09; serving emits
+             # all three (predict.py builds them per row).
+             "rbi_opp_obp", "xpa_bat", "xpa_slot",
              "d_PA", "d_hr_pa_sh", "d_tb_ab_sh", "d_k_pct_sh",
              "d_bb_pct_sh", "d_sb_pa_sh",
              # decayed r/rbi form: re-accepted 2026-07-09 with the rolling
@@ -1837,6 +2102,25 @@ def batter_feature_cols():
              # (train.py _BAT); INERT until ~2027 (2023+ coverage vs the
              # <=2023 training window), banked+wired to self-activate
              *BAT_TRACK_COLS,
+             # HR-physics + matchup interactions (2026-07-10 dev batch): pull
+             # geometry UNBENCHED (pull_fence/porch_margin), wind projected onto
+             # the pull field + general carry, hot+high air carry, batted-ball x
+             # opponent defense. Superset-dev exposure; selection decides at ship.
+             "pull_fence", "porch_margin", "bat_wind_pull", "bat_wind_porch",
+             "wind_carry", "carry_air", "bip_gb_def", "bip_air_def",
+             # fatigue (games in last 7/14 days), luck-regression (recent actual
+             # BA-on-contact vs expected xBA), and ump-zone x matchup interactions
+             "g_l7d", "g_l14d", "hit_luck",
+             "ump_k_x_pk", "ump_k_x_bk", "ump_bb_x_pbb",
+             # batter-vs-pitcher direct history (2026-07-10): contact-quality +
+             # HR residual off the batter's own baseline vs THIS starter, shrunk
+             # by pairwise sample size (bvp_n). Contact-only (BIP has no K/BB);
+             # selection decides per head, default off the x-heads per policy.
+             "bvp_n", "bvp_xwoba_resid", "bvp_hr_resid",
+             # realized handed park-HR edge (2026-07-10): venue HR/PA for the
+             # batter's effective hand minus the other hand, as-of — the handed
+             # asymmetry park_hr_pg + pull_fence both miss. Targets hr/tb2/hrr.
+             "park_hand_hr_edge",
              # NOTE: pull_fence/porch_margin and batter-side fatigue were
              # tried (iteration 3) and hurt the batter props on the holdout;
              # the league-environment lg_* columns (iteration 4) were flat
@@ -2180,7 +2464,10 @@ def win_feature_cols():
     cols += ["d_win_pct", "d_rd_pg", "d_pyth", "d_ra_pg", "d_r_pg",
              "d_w20", "d_rd20", "d_ps_era", "d_pc_era", "d_pen_era",
              "d_ps_k_bf", "d_ps_kbb", "d_rest",
-             "away_elo", "home_elo", "d_elo", "elo_prob_home"]
+             "away_elo", "home_elo", "d_elo", "elo_prob_home",
+             # unbenched to the winner 2026-07-10 (superset dev — selection +
+             # 2026 confirm decide at ship; the 10k-row overfit caveat stands).
+             "d_ps_xwcon_d"]
     return cols
 
 
@@ -2229,14 +2516,15 @@ def build_team_game_frame(gf):
             "WindDir": gf["WindDir"],
             "y_runs": pd.to_numeric(gf[score], errors="coerce"),
         })
+        add_wind_carry(d)      # general out/in carry wind (wind_carry)
         frames.append(d)
     return pd.concat(frames, ignore_index=True)
 
 
 def team_game_feature_cols():
-    # NOTE: the lg_* environment columns were tried here (iteration 4) and
-    # cost the runs model a little MAE on the holdout; they stay in the
-    # frame but out of this model. They remain in the batter/K models.
+    # NOTE: the lg_* environment columns were benched here (iteration 4, small
+    # MAE cost); UNBENCHED 2026-07-10 (superset dev — selection + 2026 confirm
+    # decide at ship). wind_carry = general out/in carry wind, new this batch.
     return ["Season", "month", "Home", "off_hr_pa", "off_r_pg", "off_k_pct",
             "off_loc_hr_pa", "off_loc_r_pg", "off_xwcon", "off_brl_con",
             "opp_pen_era", "opp_pen_hl_era", "opp_pen_np_l3", "opp_def_uer",
@@ -2249,7 +2537,8 @@ def team_game_feature_cols():
             "park_r_pg", "park_h_pg", "park_2b_pg", "park_tb_pg",
             "LF", "CF", "RF",
             "Elevation_ft", "Temp", "WindSpeed", "DayNight", "Condition",
-            "WindDir"]
+            "WindDir",
+            "wind_carry", "lg_r_pa", "lg_hr_pa"]
 
 
 # --------------------------------------------------------------- inference
@@ -2260,7 +2549,13 @@ class _LazyGroups:
     per-player DataFrames at startup."""
 
     def __init__(self, df, key):
-        self._g = df.sort_values("Date").groupby(key, sort=False)
+        # Date alone under-sorts doubleheaders: the default (unstable) sort
+        # left same-day rows in arbitrary order, so rolling windows could
+        # disagree with the training frames' canonical
+        # (PlayerId, Date, GamePk) order — latent until the 2015 backfill
+        # resized the array and flipped a tie (selftest, 2026-07-09).
+        by = ["Date", "GamePk"] if "GamePk" in df.columns else ["Date"]
+        self._g = df.sort_values(by, kind="stable").groupby(key, sort=False)
 
     def get(self, key):
         try:
@@ -2334,6 +2629,7 @@ class Stores:
         self.def_tab = _team_defense_table(r["gp"])
         self.tsb_tab = _team_sb_allowed_table(r["gb"])
         self.park_tab = _park_table(r["gb"], r["games"])
+        self.phh_tab = _park_hand_hr_table(r["gb"], r["games"], r["hands"])
         self.env_tab = _league_env_table(r["gb"])
         self.slot_pa_tab = _slot_pa_table(r["gb"])
         self.res_rows = _team_results_rows(r["games"])
@@ -2441,6 +2737,7 @@ class Stores:
                     out[f"r{w}_{k}"] = np.nan
                 out.update(shrunk_from_sums(zero, f"r{w}", roll=True))
             out.update(decayed_feats({s: 0.0 for s in DECAY_STATS}))
+            out["_dk_AB"] = out["_dk_H"] = out["_dk_SO"] = 0.0   # hit_luck inputs
             out["xpa_bat"] = XPA_PRIOR      # zero decayed sums -> the prior
             for pre in ("c", "s", "d"):     # zero sums -> the league priors
                 out.update(hrr_hist_feats({"HRR2": 0.0, "HRR3": 0.0}, 0.0, pre))
@@ -2491,6 +2788,8 @@ class Stores:
             dks = {s: float((h[s].to_numpy(dtype="float64") * wd).sum())
                    for s in DECAY_STATS}
             out.update(decayed_feats(dks))
+            out["_dk_AB"], out["_dk_H"], out["_dk_SO"] = (   # hit_luck inputs
+                dks["AB"], dks["H"], dks["SO"])
             # decayed PA per game (exposure), same shrink as the frame
             out["xpa_bat"] = ((dks["PA"] + XPA_K * XPA_PRIOR)
                               / (float(wd.sum()) + XPA_K))
@@ -2576,6 +2875,50 @@ class Stores:
 
     def bip_pitcher(self, pid, date):
         return self._bip_entity(self.bip_by_pitcher, pid, date, "pbip")
+
+    def fatigue(self, pid, date):
+        """Games in the trailing 7 / 14 calendar days strictly before `date`
+        (day-start convention), mirroring the vectorized _prior_games: h is
+        already Date<date, so day-diff is >=1 (same-day excluded) and <=win."""
+        hist = self.gb_by_player.get(pid)
+        h = hist[hist["Date"] < date] if hist is not None else None
+        if h is None or h.empty:
+            return {"g_l7d": 0.0, "g_l14d": 0.0}
+        dd = (date - h["Date"]).dt.days
+        return {"g_l7d": float((dd <= 7).sum()),
+                "g_l14d": float((dd <= 14).sum())}
+
+    def bvp(self, pid, pitcher_id, date):
+        """Batter-vs-pitcher as-of pairwise contact sums (bvp_cum_*), mirroring
+        _bvp_table: the batter's BIP filtered to this PitcherId, strictly before
+        `date`. add_batter_derived turns these into the shrunk residuals."""
+        if self.bip_by_batter is None or pitcher_id is None or pd.isna(pitcher_id):
+            return {"bvp_cum_n": np.nan, "bvp_cum_xw_n": np.nan,
+                    "bvp_cum_xw_sum": np.nan, "bvp_cum_hr_n": np.nan}
+        hist = self.bip_by_batter.get(pid)
+        h = (hist[(hist["Date"] < date) & (hist["PitcherId"] == pitcher_id)]
+             if hist is not None else None)
+        if h is None or h.empty:
+            return {"bvp_cum_n": 0.0, "bvp_cum_xw_n": 0.0,
+                    "bvp_cum_xw_sum": 0.0, "bvp_cum_hr_n": 0.0}
+        return {"bvp_cum_n": float(len(h)),
+                "bvp_cum_xw_n": float(h["xwOBA"].notna().sum()),
+                "bvp_cum_xw_sum": float(h["xwOBA"].fillna(0.0).sum()),
+                "bvp_cum_hr_n": float((h["Events"] == "home_run").sum())}
+
+    def park_hand_hr(self, venue, date):
+        """As-of venue HR/PA split by batter hand (phh_*), mirroring the
+        vectorized _park_hand_hr_table + _asof_merge by Venue (exclusive).
+        add_batter_derived turns these into park_hand_hr_edge off eff_hand."""
+        nan = {"phh_L_HR": np.nan, "phh_L_PA": np.nan,
+               "phh_R_HR": np.nan, "phh_R_PA": np.nan}
+        t = self.phh_tab
+        m = t[(t["Venue"] == venue) & (t["Date"] < date)]
+        if not len(m):
+            return nan
+        last = m.iloc[-1]
+        return {k: float(last[k]) for k in
+                ("phh_L_HR", "phh_L_PA", "phh_R_HR", "phh_R_PA")}
 
     def _bip_hand_entity(self, groups, pid, date, hand, hand_col, tag):
         """Hand-split contact quality vs one hand (career shrunk xwOBA-on-
