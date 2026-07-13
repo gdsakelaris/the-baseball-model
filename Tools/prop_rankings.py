@@ -30,8 +30,8 @@ Inputs (all written by the standard loop — no extra steps):
     dispersions) matching each year's suite
 
 Usage:
-    python Model/prop_rankings.py            # print + write the workbook
-    python Model/prop_rankings.py --out FILE
+    python Tools/prop_rankings.py            # print + write the workbook
+    python Tools/prop_rankings.py --out FILE
 """
 import argparse
 import sys
@@ -43,10 +43,10 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss, roc_auc_score
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Model"))
 import predict as P  # noqa: E402  (count_over / nb_over / K_LINES)
 
-ART = Path(__file__).resolve().parent / "artifacts"
+ART = Path(__file__).resolve().parents[1] / "Model" / "artifacts"
 
 # ---------------------------------------------------------------- markets
 # One row per prediction COLUMN (family) in the prediction workbook, named
@@ -728,7 +728,7 @@ def main():
                     default=str(Path(__file__).resolve().parent
                                 / "PROP_RANKINGS.xlsx"),
                     help="output Excel file "
-                         "(default: Model/PROP_RANKINGS.xlsx)")
+                         "(default: Tools/PROP_RANKINGS.xlsx)")
     args = ap.parse_args()
 
     df, ldf = build_table()

@@ -9,7 +9,7 @@ probability + a real price into expected value and settled profit, so
 evaluate_deep can finally ask the second question.
 
 It also defines the canonical odds-store schema shared by the scraper
-(Scripts/scrape_odds.py, which writes it) and the market evaluation
+(Tools/2_scrape_odds.py, which writes it) and the market evaluation
 (evaluate_deep Section 9, which reads it). Nothing here imports the model.
 """
 
@@ -120,7 +120,7 @@ def devig(implied):
 # The sharp book: lowest hold, prices widely treated as the market's fair
 # number. When it quotes a line, its de-vigged prob IS the reference; the
 # median across soft books is the fallback. The scraper's DEFAULT_BOOKS keeps
-# pinnacle in every capture (Scripts/scrape_odds.py, added 2026-07-09).
+# pinnacle in every capture (Tools/2_scrape_odds.py, added 2026-07-09).
 SHARP_BOOK = "pinnacle"
 
 

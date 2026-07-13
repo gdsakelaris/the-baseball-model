@@ -7,7 +7,7 @@ appearing in the game logs or rosters (~35 batched requests) and writes
 Data/mlb_handedness.csv: PlayerId, Name, Bats, Throws.
 
 Usage:
-    python Scripts/scrape_handedness.py
+    python Scrapers/scrape_handedness.py
 """
 
 import csv

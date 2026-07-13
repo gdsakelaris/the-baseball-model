@@ -9,6 +9,11 @@ posted yet are filled from two fallbacks:
                                 full-name lineups (lineup fallback)
   rotowire.com/baseball/daily-lineups.php   temperature + sky condition,
                                 and full-name lineups (secondary fallback)
+  open-meteo.com forecast       relative humidity (%) and surface pressure
+                                (hPa) at each park for the game-start hour —
+                                the air-density inputs the model's weather
+                                features need; venue coordinates come from
+                                mlb_ballparks.csv via scrape_weather.py
 
 Fallback lineups arrive as player names; they're resolved to MLB player IDs
 via a name index built from the roster and recent game logs, so they slot
@@ -19,7 +24,7 @@ Writes Data/todays_games.json in exactly the format Model/predict.py
 consumes. Anything still unknown is left null; the model tolerates it.
 
 Usage:
-    python Scripts/get_todays_games.py
+    python Tools/1_get_todays_games.py
 """
 
 import csv
@@ -28,6 +33,7 @@ import json
 import re
 import sys
 import unicodedata
+from collections import Counter
 from pathlib import Path
 
 import requests
@@ -35,6 +41,12 @@ from bs4 import BeautifulSoup
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "Data"
 OUT_FILE = DATA_DIR / "todays_games.json"
+
+# venue -> (lat, lon) lives in scrape_weather.py (ballparks CSV + former/
+# special-event venues) so the forecast here and the training-data scrape
+# can never disagree on where a park is
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Scrapers"))
+from scrape_weather import venue_coords  # noqa: E402
 
 HEADERS = {
     "User-Agent": (
@@ -297,14 +309,69 @@ def scrape_mlb():
             "away_lineup": lineup("away"), "home_lineup": lineup("home"),
             "names": names,
             "temp": None, "wind_speed": None, "wind_dir": "", "condition": "",
+            "humidity": None, "pressure": None,
         })
     return games
+
+
+# ------------------------------------------------------------- open-meteo
+
+def forecast_weather(games):
+    """Fill humidity (%) + surface pressure (hPa) at each game's start hour
+    from the Open-Meteo forecast (keyless). One request per venue; arrays are
+    requested in ET so start_et indexes them directly. Real ambient values are
+    reported even for roofed parks — the model neutralizes weather on
+    Condition == Dome itself, same as it does for historical games."""
+    try:
+        coords = venue_coords()
+    except Exception as e:                          # noqa: BLE001
+        print(f"  ballpark coordinates unavailable ({e})", file=sys.stderr)
+        return 0
+    filled = 0
+    by_venue = {}
+    for g in games:
+        by_venue.setdefault(g["venue"], []).append(g)
+    for venue, vg in by_venue.items():
+        ll = coords.get(venue)
+        if not ll:
+            print(f"  no coordinates for venue {venue!r}; humidity left null",
+                  file=sys.stderr)
+            continue
+        try:
+            r = requests.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={"latitude": ll[0], "longitude": ll[1],
+                        "hourly": "relative_humidity_2m,surface_pressure",
+                        "timezone": "America/New_York", "forecast_days": 3},
+                headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            h = r.json()["hourly"]
+            hours = dict(zip(h["time"],
+                             zip(h["relative_humidity_2m"],
+                                 h["surface_pressure"])))
+        except Exception as e:                      # noqa: BLE001
+            print(f"  weather forecast failed for {venue} ({e})",
+                  file=sys.stderr)
+            continue
+        for g in vg:
+            if g.get("start_et"):
+                hh = int(g["start_et"][:2])
+            else:
+                hh = 13 if g.get("day_night") == "day" else 19
+            got = hours.get(f'{g["date"]}T{hh:02d}:00')
+            if got and got[0] is not None:
+                g["humidity"] = float(got[0])
+                g["pressure"] = (round(float(got[1]), 1)
+                                 if got[1] is not None else None)
+                filled += 1
+    return filled
 
 
 # ------------------------------------------------------------- fantasypros
 
 def scrape_fantasypros():
-    """(away, home) -> weather + full-name lineups."""
+    """(away, home) -> [weather + full-name lineups, ...] in page order
+    (one entry per game, so a doubleheader keeps both boxes)."""
     soup = fetch("https://www.fantasypros.com/mlb/lineups/")
     name_map = full_name_to_abbrev()
     out = {}
@@ -352,16 +419,20 @@ def scrape_fantasypros():
         away_l = names_of(lineups[0]) if len(lineups) >= 1 else []
         home_l = names_of(lineups[1]) if len(lineups) >= 2 else []
 
-        out[(away, home)] = {"wind_speed": mph, "wind_dir": wind_dir,
-                             "temp": temp, "away_lineup": away_l,
-                             "home_lineup": home_l}
+        # a doubleheader is two boxes with the same matchup: keep BOTH, in
+        # page order, so main() can pair each mlb.com game with its own box
+        out.setdefault((away, home), []).append(
+            {"wind_speed": mph, "wind_dir": wind_dir,
+             "temp": temp, "away_lineup": away_l,
+             "home_lineup": home_l})
     return out
 
 
 # --------------------------------------------------------------- rotowire
 
 def scrape_rotowire():
-    """(away, home) -> temp, condition, full-name lineups."""
+    """(away, home) -> [temp, condition, time, full-name lineups, ...] in
+    page order (one entry per game, so a doubleheader keeps both boxes)."""
     soup = fetch("https://www.rotowire.com/baseball/daily-lineups.php")
     out = {}
     for g in soup.select(".lineup.is-mlb"):
@@ -408,11 +479,14 @@ def scrape_rotowire():
                     slugs.append(slug)
             return slugs[:9]
 
-        out[(away, home)] = {"temp": temp, "condition": condition,
-                             "day_night": day_night, "start_et": start_et,
-                             "umpire": umpire,
-                             "away_lineup": names_of("is-visit"),
-                             "home_lineup": names_of("is-home")}
+        # doubleheaders: rotowire shows one box per game with its own first
+        # pitch — keep both, in page order (game 1 first)
+        out.setdefault((away, home), []).append(
+            {"temp": temp, "condition": condition,
+             "day_night": day_night, "start_et": start_et,
+             "umpire": umpire,
+             "away_lineup": names_of("is-visit"),
+             "home_lineup": names_of("is-home")})
     return out
 
 
@@ -495,14 +569,14 @@ def main():
     try:
         print("scraping fantasypros (wind, temp fallback, lineup fallback) ...")
         fp = scrape_fantasypros()
-        print(f"  data for {len(fp)} games")
+        print(f"  data for {sum(len(v) for v in fp.values())} games")
     except Exception as e:
         print(f"  fantasypros failed ({e})", file=sys.stderr)
         fp = {}
     try:
         print("scraping rotowire (temp, condition, lineup fallback) ...")
         roto = scrape_rotowire()
-        print(f"  data for {len(roto)} games")
+        print(f"  data for {sum(len(v) for v in roto.values())} games")
     except Exception as e:
         print(f"  rotowire failed ({e})", file=sys.stderr)
         roto = {}
@@ -522,9 +596,19 @@ def main():
     lineup_src = {"contributed": 0, "fully": 0, "topped": 0, "completed": 0}
     sources = []   # per-game {"away": tag, "home": tag}, aligned to `games`
 
+    # doubleheaders: the same matchup appears twice, and every source lists
+    # the games in start-time order — pair the i-th mlb.com game with the
+    # i-th fantasypros/rotowire box (a source that posted only one box just
+    # serves it to both games, the old behavior).
+    pair_n = Counter((g["away_team"], g["home_team"]) for g in games)
+    seen_pairs = Counter()
     for g in games:
         key = (g["away_team"], g["home_team"])
-        f, r = fp.get(key, {}), roto.get(key, {})
+        occ = seen_pairs[key]
+        seen_pairs[key] += 1
+        f_list, r_list = fp.get(key, []), roto.get(key, [])
+        f = f_list[min(occ, len(f_list) - 1)] if f_list else {}
+        r = r_list[min(occ, len(r_list) - 1)] if r_list else {}
 
         # weather: rotowire temp/condition, fantasypros wind; FP temp as backup
         g["temp"] = r.get("temp") or f.get("temp")
@@ -535,6 +619,12 @@ def main():
             g["day_night"] = r.get("day_night")
         if not g.get("start_et"):
             g["start_et"] = r.get("start_et")
+        # mlb.com's per-box time is unreliable on doubleheader days (both
+        # boxes print the same time, and a started game's box drops its own),
+        # so on a DH matchup rotowire's per-game box time wins outright
+        if pair_n[key] > 1 and r.get("start_et"):
+            g["start_et"] = r["start_et"]
+            g["day_night"] = r.get("day_night") or g["day_night"]
 
         # home-plate umpire (rotowire name -> HpUmpId the model uses); the
         # GUI loads hp_ump_id into the spec so ump_feats has real history
@@ -578,6 +668,9 @@ def main():
             lineup_src["completed"] += completed
         sources.append(src_tags)
 
+    print("fetching open-meteo forecast (humidity, pressure) ...")
+    filled["hum"] = forecast_weather(games)
+
     games.sort(key=lambda g: (g.get("start_et") or "99:99",
                               g["away_team"]))
     payload = {"scraped_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -595,12 +688,14 @@ def main():
     print(f"  weather: temp {filled['temp']}/{len(games)}, "
           f"wind {filled['wind']}/{len(games)}, "
           f"condition {filled['cond']}/{len(games)}, "
+          f"humidity {filled['hum']}/{len(games)}, "
           f"dome defaults {filled['dome']}")
     print(f"  home-plate umpire resolved: {filled['ump']}/{len(games)}")
     for g, src in zip(games, sources):
         print(f'  {g["away_team"]:>3} @ {g["home_team"]:<3} {g["venue"]:<28} '
               f'{g["day_night"] or "?":<5} temp {str(g["temp"]) or "?":>5}  '
               f'wind {str(g["wind_speed"]) or "?":>4} {g["wind_dir"] or "-":<10} '
+              f'hum {str(g["humidity"]) or "?":>5} '
               f'{g["condition"] or "-":<14} '
               f'lineups {len(g["away_lineup"])}({src["away"]})+'
               f'{len(g["home_lineup"])}({src["home"]})')

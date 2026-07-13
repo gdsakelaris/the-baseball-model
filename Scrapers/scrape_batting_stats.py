@@ -1,6 +1,6 @@
 """Scrape MLB player batting stats (standard + expanded) from MLB.com.
 
-Pulls season-level hitting stats for every covered season (Scripts/
+Pulls season-level hitting stats for every covered season (Scrapers/
 seasons.py) from the same data service that powers https://www.mlb.com/stats/
 (bdfed.stitch.mlbinfra.com) and writes one combined CSV. Regular season, all
 teams, all positions, all players, no splits. Players who changed teams

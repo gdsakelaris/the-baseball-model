@@ -105,9 +105,16 @@ before building; `SCRAPE` = needs data we don't have.
 
 ### Tier 2 — needs a scrape / new data source
 
-11. **Weather beyond wind** — `SCRAPE` — humidity + barometric pressure (denser air suppresses
-    carry; a real, physical HR driver not captured by Temp alone). Needs a weather source
-    keyed by game/venue/time.
+11. **Weather beyond wind** — **IMPLEMENTED 2026-07-12** (data-gap batch). Open-Meteo
+    (keyless): `Scrapers/scrape_weather.py` → `mlb_weather.csv` (Humidity/Pressure/Precip
+    per GamePk, 2015+ archive backfill + daily incremental; former/special venues have
+    coords in-script; ballparks CSV now carries Lat/Lon/Roof). Features: `hum_eff`
+    (indoor-corrected RH; Dome/Roof Closed → 50%) + `air_dens` (physical air density from
+    Temp+Pressure+Humidity — Mexico City 0.91, Coors 0.99, marine parks 1.21) via shared
+    `add_weather_derived` (batter + starts + team frames + serving). Serving:
+    `1_get_todays_games.py` scrapes the forecast at each park's start hour into
+    `todays_games.json`; GUI has editable Humidity/Pressure fields. Precip is in the file
+    but NOT a feature (no serving-side forecast wired for it).
 
 12. **Batter-vs-pitcher direct history (BvP)** — **IMPLEMENTED 2026-07-10** (vectorized path;
     serving+parity deferred to ship). No scrape needed — `mlb_statcast_bip.csv` already carries
@@ -127,6 +134,79 @@ before building; `SCRAPE` = needs data we don't have.
 ---
 
 ## Log
+- 2026-07-12 (data-gap batch): new external data + features, all through the shared
+  train/serve helpers (parity by construction):
+  * **Weather** (#11 above) — humidity/pressure scrape + `hum_eff`/`air_dens`.
+  * **Zone-split whiffs** — `oz_wh` added to scrape_pitches.py (both files) →
+    `bd_zwsw_c/d` (batter in-zone whiff per swing = 1 − zone contact) and `pd_zwsw_d`
+    (starter in-zone stuff). Full pitch re-backfill 2015+.
+  * **Elite-velo buckets** — `fb95_n/sw/wh` (batter file) → `bd_fb95wh_c/d`, plus
+    `p_fbv_d` (opposing starter decayed FF/SI velo in the batter frame) and the
+    interaction `bat_velo_matchup` = bd_fb95wh_d × (p_fbv_d − league).
+  * **TTO** (old backlog want, no scrape needed) — `_tto_table` from statcast_bip AtBat
+    ranks → `p_tto_decay` (shrunk 3rd-vs-1st xwOBA-on-contact allowed), batter + starts
+    frames + serving `Stores.tto`.
+  * **Player-level OAA** — scrape_oaa.py now also writes `mlb_oaa_players.csv` →
+    `_lineup_oaa_table`: the ACTUAL posted lineup's mean prior-season OAA + IF/OF splits
+    (`opp_def_p_oaa/if/of` batter side, `own_def_p_oaa/if/of` starter side) + profile
+    interactions `bip_gb_def_if`/`bip_air_def_of`.
+  * **Baserunning run value** — new `scrape_baserunning.py` → `bat_brr` (total) +
+    `bat_brr_xb` (extra-base rate/opportunity), prior-season.
+  Second wave (same batch, user asked to maximize the batter six —
+  hit/hits2/rbi/run/tb2/hr — before the one training chain):
+  * `ctx_ahead_brr` — mean prior-season XB-advancement of the two hitters AHEAD
+    (whether the runners he drives in can take the extra base; RBI sibling of
+    ctx_ahead_obp) + `ctx_run_conv` = own bat_brr_xb × ctx_behind_slg (run
+    conversion once aboard).
+  * `bip_ld`/`bipd_ld`/`bip_pu` (+ `pbip_*` starter-allowed) — line-drive and
+    popup shares from the BIP file (BBType was only carved into gb/pullair
+    before); priors measured 0.246/0.071, ld also 90-day decayed.
+  * `air_porch` = (1.165 − air_dens) × (330 − pull_fence), `air_fly` =
+    (1.165 − air_dens) × bip_pullair — thin-air carry pointed at the batters
+    it actually helps.
+  Third wave (same batch, "squeeze everything"):
+  * `bip_flyd`/`bipd_flyd` + `pbip_*` — mean sea-level-adjusted FLY-BALL distance
+    (`DistAdj` col on the BIP frame at load; prior 315 ft K40): the UNCENSORED power
+    measure — hrq_* only sees the HR log (each batter's best contact).
+  * `p_hit_luck` — starter's last-5 hits per contacted PA (p5_h_bf/(1−k−bb); p5_bb_bf
+    added both paths) minus `pbipd_xba` (xba joined BIP_DECAYED): starter BABIP
+    sequencing luck, due to regress. Batter-side hit_luck's pitcher sibling.
+  * `bat_leg_hits` = (bat_sprint − 27) × bip_gb — legs beat out grounders.
+  * `opp_def_uer` in the BATTER frame (was game-frame-only): error-proneness the
+    range-based OAA misses.
+  * `p_zone_d` (starter decayed zone share, from pdo dk_z_n — works pre-backfill) +
+    `zone_whiff_matchup` = centered bd_zwsw_d × centered p_zone_d.
+  All in the supersets; `feature_select --write` + paired CI decide keeps per head.
+  **Post-backfill auto-populating:** bd_zwsw/pd_zwsw, bd_fb95wh, bat_velo_matchup,
+  zone_whiff_matchup.
+- 2026-07-12 (later same day): **scrape-schema v3 IMPLEMENTED** — user chose to
+  restart the backfill rather than defer. Both pitch dailies now carry fb95 (both
+  sides), brk/off pitch-class buckets (n/sw/wh), edge_n (shadow band), fp_n/fp_sw/
+  fp_s (first pitch). Features both paths: bd_{brkwh,offwh,fbwh,fpsw}_{c,d},
+  p_{brk,off,edge,fps}_d (opposing starter), arsenal_whiff (usage-weighted class
+  collision), brk/off/fp_matchup (centered products); starts pd_ mirrors +
+  lu_{brkwh,offwh,fbwh} + lu_ars_whiff. `--backfill` now archives raw pitches to
+  Data/raw_pitches/*.parquet and `--from-raw` re-aggregates from disk — future
+  schema changes are FREE (no more 6-h downloads). Remaining raw-pitch ideas when
+  wanted: per-count leverage splits, pitch-sequencing (tunneling) pairs, velo
+  distribution shape (p95-p5), release-point consistency.
+- 2026-07-12 full-surface pass: batch signals carried to TEAM grain
+  (opp_def_p_oaa/if/of, off_lu_brr/_xb, opp_ps_tto_decay — both paths).
+  Deferred: (a) offense-side arsenal collision at team grain (lineup class-whiff
+  x opp starter usage — needs batter_frame -> game_frame dependency, real
+  plumbing); (b) WINNER widening experiment (win_feature_cols documents real
+  overfit harm from past widenings on the ~10k-row frame — only as a deliberate
+  paired-CI experiment, maybe with heavier regularization).
+- 2026-07-12 later eve: **v4+v5 IMPLEMENTED same day** (user pulled them forward
+  pre-retrain). v4 graded velocity bands (<92 / 92-95 / 95+ FF/SI: bd whiff
+  splits, p/pd banded usage, velo_band_whiff collision). v5 count leverage +
+  dispersion (user picked 3 + added 3-2): two-strike ts_* (bd_tswh, pd_tswh,
+  ts_matchup), full-count f32_* (bd_f32b walk conversion, pd_f32z/f32b), fb_v2
+  → pd/p_fbv_sd (velo spread = fatigue/consistency), rp_* sums → pd/p_rel_sd
+  (release scatter = command/injury proxy). All via ONE `--from-raw` re-agg
+  (~4 min, 12 seasons) — the parquet archive already paid for itself. Remaining
+  raw-pitch ideas: pitch-sequencing (tunneling) pairs, other count states
+  (0-2 waste, ahead/behind splits).
 - 2026-07-10: created. Part 1 inventory verified against tree at commit `3123308`. Part 1
   execution deferred to after the selection-as-curation train verdict + re-baseline.
 - 2026-07-10 (dev batch): IMPLEMENTED in the vectorized path + feature-col lists (serving

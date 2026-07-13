@@ -122,7 +122,7 @@ COUNT_BAGS = {"xhrr": 5, "xtb": 5}
 # ~mu Poisson). XGBoost rejects the ±inf the frames carry (LightGBM
 # tolerates them), hence features.InfSafe. Set XGB_BAGS = 0 to revert to
 # pure-LightGBM everywhere.
-XGB_BAGS = 2  # families ON for ship (2026-07-10, exiting the LGBM-only dev regime)
+XGB_BAGS = 2  # SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
 XGB_CLS = dict(n_estimators=3000, learning_rate=0.03, tree_method="hist",
                grow_policy="lossguide", max_leaves=127, max_depth=0,
                min_child_weight=16, subsample=0.8, colsample_bytree=0.8,
@@ -152,7 +152,7 @@ XGB_WIN = dict(n_estimators=3000, learning_rate=0.02, tree_method="hist",
 # smoke-tested 2026-07-10 but held at 0 for the XGB confirm (CatBoost fits
 # cost 2-4x XGB — a three-family full train couldn't land before the 06:00
 # job); flip to 2 as the next selection-year iteration.
-CB_BAGS = 2  # families ON for ship (2026-07-10, exiting the LGBM-only dev regime)
+CB_BAGS = 2  # SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
 CB_CLS = dict(iterations=3000, learning_rate=0.03, depth=8,
               l2_leaf_reg=3.0, loss_function="Logloss",
               eval_metric="Logloss", early_stopping_rounds=150,

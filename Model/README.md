@@ -34,11 +34,15 @@ once with one combined, cross-game-ranked board):
 | `features.py` | Feature engineering. Everything is **as-of date**: a game on date D only uses data from before D (no leakage). Same definitions serve training (vectorized) and prediction (per-entity); `predict.py --selftest` proves the two paths agree. |
 | `train.py` | Builds frames, trains everything: the model-SELECTION suite (→ `models_bt.joblib`) and then the shipping models (→ `models.joblib`). The train/cal/holdout years are DERIVED from the seasons in the data (`suite_years`), so the annual rollover needs no code edit — currently ≤2023/2024/2025 and ≤2024/2025/2026. The weaker batter props (hit, tb2, run, rbi, hrr2, hrr3 + the xHRR/xTB count heads) are **seed-bagged** — 5 GBMs differing only in seed, predictions averaged (`PROP_BAGS`, `features.MeanBag`) — and run/hrr2 carry heavier-regularization overrides (`PROP_PARAMS`); both changes bought calibration (rbi ECE .0085→.0037 on the 2025 selection year) and shrink retrain jitter on those props. `--rebuild` refreshes cached frames after re-scraping data; `--select` stops after the selection suite (the fast iteration loop). |
 | `predict.py` | `Predictor.predict_game(spec)`; CLI: `--game <GamePk>` replays a historical game, `--selftest` checks train/serve parity. Every run saves a workbook to `Predictions/`. |
-| `gui.py` | Tkinter app: dropdowns for teams, date, stadium, starters, two ordered 9-man lineups, day/night, weather. Auto-fill pulls each team's most recent real lineup. Results are shown and auto-saved to `Predictions/<date>_<away>_at_<home>_<time>.xlsx`. |
-| `odds.py` | Sportsbook-odds utilities: American↔probability, de-vig, EV/ROI, and the canonical odds-store schema. Bridges the model's fair probabilities to the prices books actually post; shared by `Scripts/scrape_odds.py` and evaluate_deep Section 9. |
+| `odds.py` | Sportsbook-odds utilities: American↔probability, de-vig, EV/ROI, and the canonical odds-store schema. Bridges the model's fair probabilities to the prices books actually post; shared by `Tools/2_scrape_odds.py` and evaluate_deep Section 9. |
 | `recalibrate.py` | In-season drift correction: a per-prop log-odds shift fit only on recent in-season games (leakage-free). Stored by `train.py`, backtested in evaluate_deep Section 10, applied at serving with `predict.py --recal`. |
 | `evaluate_deep.py` | Full accuracy + betting workup on a held-out season: bootstrap CIs on AUC and the logloss edge, calibration, daily top-N hit rates, pick-threshold economics, monthly drift, segment reliability, K/totals/winner deep dives, **model-vs-market ROI (Section 9)**, **in-season recalibration backtest (Section 10)**, and `--set-baseline` regression diffing with per-metric noise bands (Section 11). The DEFAULT run scores the selection suite on 2025 (iterate freely); `--confirm` scores the shipping suite on the confirm-only 2026 holdout. |
 | `artifacts/` | Trained models (`models.joblib`), metrics (`metrics.json`), cached feature frames, and the odds store / eval baselines. |
+
+The game-day tools that USE these models live in `Tools/`, numbered in
+run order: `1_get_todays_games.py`, `2_scrape_odds.py`, `3_gui.py` (the
+Tkinter app), `4_grade_results.py`, plus `hit_rate_report.py` and
+`prop_rankings.py`.
 
 ## What the model knows (features, ~100 per batter-game)
 
@@ -156,20 +160,20 @@ closing lines before staking anything, and treat small edges as noise.
 ```
 # one-time: backfill the Statcast histories (batted balls ~10 min, pitch
 # dailies ~30 min; the daily job keeps both current incrementally)
-python Scripts/scrape_statcast.py --backfill
-python Scripts/scrape_pitches.py --backfill
+python Scrapers/scrape_statcast.py --backfill
+python Scrapers/scrape_pitches.py --backfill
 
 # refresh all data AND retrain, one command (scrapers default to Data/).
-# Every scraped file is schema-validated (Scripts/validate_data.py) against
+# Every scraped file is schema-validated (Scrapers/validate_data.py) against
 # the previous copy in Data/backups/; a failing file is restored from backup
 # and blocks the retrain, so a broken scrape can't poison the models.
-python Scripts/update_all.py --retrain
+python Scrapers/update_all.py --retrain
 
 # or just the data
-python Scripts/update_all.py
+python Scrapers/update_all.py
 
 # check the data files by hand (same validation the pipeline runs)
-python Scripts/validate_data.py
+python Scrapers/validate_data.py
 
 # retrain manually — selection suite + shipping models (~2 min total)
 python Model/train.py --rebuild
@@ -177,14 +181,14 @@ python Model/train.py --rebuild
 # game day: scrape today's matchups/lineups/weather into an input file
 # (mlb.com starting lineups + fantasypros wind + rotowire temp/condition);
 # the GUI auto-loads it into the slate on startup
-python Scripts/get_todays_games.py
+python Tools/1_get_todays_games.py
 
 # capture real closing lines near game time (needs a free ODDS_API_KEY);
 # accrues the history that evaluate_deep Section 9 grades the model against
-python Scripts/scrape_odds.py
+python Tools/2_scrape_odds.py
 
 # predict
-python Model/gui.py                     # the GUI (single game or slate)
+python Tools/3_gui.py                   # the GUI (single game or slate)
 python Model/predict.py --game 822716   # replay a historical game
 python Model/predict.py --game 822716 --recal   # + in-season drift correction
 python Model/predict.py --selftest      # verify train/serve parity
@@ -204,7 +208,7 @@ python Model/evaluate_deep.py --confirm
 ## Automated daily refresh (Windows Task Scheduler)
 
 A scheduled task named **"MLB Daily Update"** runs
-`Scripts/run_daily_update.cmd` every morning at **6:00 AM**, which calls
+`Scrapers/run_daily_update.cmd` every morning at **6:00 AM**, which calls
 `update_all.py --retrain` (rescrape all data, then retrain the models) and
 logs each run to `Logs/update_<date>.log`. `-StartWhenAvailable` means a
 missed run (laptop asleep at 6 AM) fires as soon as the machine is next on.

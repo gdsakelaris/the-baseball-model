@@ -260,6 +260,8 @@ class Predictor:
                 "WindSpeed": num(spec.get("wind_speed")),
                 "WindDir": txt(spec.get("wind_dir")),
                 "Condition": txt(spec.get("condition")),
+                "Humidity": num(spec.get("humidity")),
+                "Pressure": num(spec.get("pressure")),
                 "DayNight": spec.get("day_night") or ""}
 
     def _batter_rows(self, spec):
@@ -272,6 +274,13 @@ class Predictor:
 
         # HP-umpire tendency: one game-level value shared by every batter
         ump = s.ump_feats(spec.get("hp_ump_id"), date)
+
+        # the ACTUAL defense each side bats against: player-level prior-season
+        # OAA of the OTHER side's posted lineup (mirrors _lineup_oaa_table)
+        ldef = {"away": s.lineup_oaa([p for p, _ in spec["home_lineup"]],
+                                     season),
+                "home": s.lineup_oaa([p for p, _ in spec["away_lineup"]],
+                                     season)}
 
         rows, meta = [], []
         sides = [("away", spec["away_team"], spec["home_team"],
@@ -292,7 +301,9 @@ class Predictor:
             phrq = s.pitcher_hr_quality(opp_starter, date)
             pbip = s.bip_pitcher(opp_starter, date)
             pdo = s.pd_pitcher_feats(opp_starter, date)
+            tto = s.tto(opp_starter, date)
             oaa_opp = s.team_oaa(opp, season)
+            uer_opp = s.team_defense(opp, season, date)
             pprior = s.pitcher_prior(opp_starter, season)
             p_bio = s.bio(opp_starter)
             opp_hand = p_bio["pit_throws"]
@@ -308,7 +319,24 @@ class Predictor:
                        **toff_loc, **pen, **pen_hl, **pen_fat, **tsb, **phrq,
                        **pbip, **s.bip_batter(pid, date),
                        **s.pd_batter_feats(pid, date),
-                       "p_swstr_d": pdo["pd_swstr_d"], "opp_oaa": oaa_opp,
+                       "p_swstr_d": pdo["pd_swstr_d"],
+                       "p_fbv_d": pdo["pd_fbv_d"],
+                       "p_zone_d": pdo["pd_zone_d"],
+                       "p_chase_d": pdo["pd_chase_d"],
+                       "p_brk_d": pdo["pd_brk_d"],
+                       "p_off_d": pdo["pd_off_d"],
+                       "p_edge_d": pdo["pd_edge_d"],
+                       "p_fps_d": pdo["pd_fps_d"],
+                       "p_fblou_d": pdo["pd_fblou_d"],
+                       "p_fbmidu_d": pdo["pd_fbmidu_d"],
+                       "p_fb95u_d": pdo["pd_fb95u_d"],
+                       "p_tswh_d": pdo["pd_tswh_d"],
+                       "p_f32b_d": pdo["pd_f32b_d"],
+                       "p_fbv_sd": pdo["pd_fbv_sd"],
+                       "p_rel_sd": pdo["pd_rel_sd"],
+                       "opp_oaa": oaa_opp, "opp_def_uer": uer_opp,
+                       **ldef[side], **tto,
+                       **s.batter_brr(pid, season),
                        **pprior, **park, **wx, **env,
                        "hrpt_score": s.hrpt(pid, opp_starter, season, date),
                        **s.fatigue(pid, date),
@@ -351,7 +379,10 @@ class Predictor:
             ctx_maps = {"ctx_ahead_obp": ("_obpp", (-2, -1)),
                         "ctx_behind_slg": ("_slgp", (1, 2)),
                         "ctx_ahead_obp_d": ("_obpp_d", (-2, -1)),
-                        "ctx_behind_slg_d": ("_slgp_d", (1, 2))}
+                        "ctx_behind_slg_d": ("_slgp_d", (1, 2)),
+                        # runners-ahead advancement (RBI): neighbors'
+                        # prior-season extra-base rate, from batter_brr
+                        "ctx_ahead_brr": ("bat_brr_xb", (-2, -1))}
 
             def _nmean(vals):
                 vals = [v for v in vals if v is not None and pd.notna(v)]
@@ -387,7 +418,9 @@ class Predictor:
 
     _LU_COLS = {"lu_k_sh": "s_k_pct_sh", "lu_bb_sh": "s_bb_pct_sh",
                 "lu_whiff": "m_whiff", "lu_vsh_k": "vsh_k_pct_sh",
-                "lu_wsw": "bd_wsw_d", "lu_chase": "bd_chase_d"}
+                "lu_wsw": "bd_wsw_d", "lu_chase": "bd_chase_d",
+                "lu_brkwh": "bd_brkwh_d", "lu_offwh": "bd_offwh_d",
+                "lu_fbwh": "bd_fbwh_d"}
 
     def _starter_rows(self, spec, bdf=None, bmeta=None):
         """K-model rows. bdf/bmeta (the batter rows) supply the
@@ -400,9 +433,11 @@ class Predictor:
         env = s.league_env(date)
         ump = s.ump_feats(spec.get("hp_ump_id"), date)
         rows, meta = [], []
-        for pid, team, opp, home in [
-                (spec["away_starter"], spec["away_team"], spec["home_team"], 0),
-                (spec["home_starter"], spec["home_team"], spec["away_team"], 1)]:
+        for side, pid, team, opp, home in [
+                ("away", spec["away_starter"], spec["away_team"],
+                 spec["home_team"], 0),
+                ("home", spec["home_starter"], spec["home_team"],
+                 spec["away_team"], 1)]:
             if not pid:  # starter not specified -> no K projection for side
                 continue
             self._starter_sanity(pid, spec)
@@ -410,7 +445,11 @@ class Predictor:
             vs = s.team_offense(opp, season, date, prefix="vs")
             row = {"Season": season, "month": date.month, "Home": home,
                    **f, **vs, **park, **wx, **env, **ump,
-                   **s.pd_pitcher_feats(pid, date)}
+                   **s.pd_pitcher_feats(pid, date),
+                   # his own TTO decay + the defense playing behind him
+                   **s.tto(pid, date),
+                   **s.lineup_oaa([p for p, _ in spec[f"{side}_lineup"]],
+                                  season, prefix="own")}
             F.add_pit_trends(row)
             # the starter's own arsenal, K-model view (same helper as training)
             pa = F.pitcher_arsenal_feats(
@@ -428,7 +467,12 @@ class Predictor:
             rows.append(row)
             meta.append({"PlayerId": pid, "Team": team, "Opponent": opp,
                          "Name": self._name(pid, spec)})
-        return pd.DataFrame(rows), pd.DataFrame(meta)
+        df = pd.DataFrame(rows)
+        if len(df):
+            # shared derived features (parity with build_starts_frame):
+            # weather, TTO decay, K-BB, lineup-collision products
+            df = F.add_starter_derived(df)
+        return df, pd.DataFrame(meta)
 
     def _starter_sanity(self, pid, spec):
         """Soft check: warn when a listed starter is a bullpen arm on the
@@ -452,11 +496,13 @@ class Predictor:
         env = s.league_env(date)
         rows = []
         sides = [(spec["away_team"], spec["home_starter"],
-                  spec["home_team"], 0),
+                  spec["home_team"], 0, "away", "home"),
                  (spec["home_team"], spec["away_starter"],
-                  spec["away_team"], 1)]
-        for team, opp_starter, opp, home in sides:
+                  spec["away_team"], 1, "home", "away")]
+        for team, opp_starter, opp, home, own_side, opp_side in sides:
             opp_starter = opp_starter if opp_starter else -1
+            own_lu = [p for p, _ in spec[f"{own_side}_lineup"]]
+            opp_lu = [p for p, _ in spec[f"{opp_side}_lineup"]]
             toff = s.team_offense(team, season, date, prefix="off")
             toff_loc = s.team_offense_loc(team, season, home, date,
                                           prefix="off_loc")
@@ -486,8 +532,19 @@ class Predictor:
                 "opp_ps_gb_d": pb["pbipd_gb"],
                 "opp_pc_era": stf["pc_era"],
                 "opp_pc_hr_bf": stf["pc_hr_bf"], **park, **wx, **env,
+                # full-surface pass (2026-07-12): actual defense faced, own
+                # lineup baserunning, opposing starter TTO sums (decay
+                # derived below on the assembled frame, matching the
+                # vectorized ps_tto_decay)
+                **s.lineup_oaa(opp_lu, season, prefix="opp"),
+                **s.lineup_brr(own_lu, season),
+                **s.tto(opp_starter, date),
             })
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        df["opp_ps_tto_decay"] = F.tto_decay_from_sums(df)
+        # shared weather derivation (parity with build_game_frame ->
+        # build_team_game_frame); the totals head reads hum_eff/air_dens too
+        return F.add_weather_derived(df)
 
     # starter features the winner model consumes, per side
     _WIN_ST = ["ps_era", "ps_k_bf", "ps_hr_bf", "ps_bb_bf",
@@ -815,7 +872,7 @@ GLOSSARY = [
      "an expected 5%+ per $1 staked, after removing the book's margin (vig). "
      "Sorted by EV — the top row is the strongest edge. If it's empty or shows "
      "a note, nothing cleared the bar (or no odds were captured — run "
-     "Scripts/scrape_odds.py near game time)."),
+     "Tools/2_scrape_odds.py near game time)."),
     ("Bets columns", "Model % is the model's chance for the side shown; Mkt % "
      "is the de-vigged market chance; Edge is their difference; Best Odds / "
      "Book are the most generous posted American price and the book offering "
@@ -844,7 +901,7 @@ GLOSSARY = [
      "slate. Even a mid-tier market can carry a strong pick when used the "
      "way its diagnostics say. A pick that is BOTH a rank-quality pick and "
      "a +EV bet shows light purple — the strongest signal on the sheet."),
-    ("Graded colors", "After the games, Model/grade_results.py re-colors "
+    ("Graded colors", "After the games, Tools/4_grade_results.py re-colors "
      "the workbook from the actual box scores (our own scraped data, "
      "matched by player ID). The grammar: DARK fill + white text = the "
      "pick HIT (dark blue / dark green / dark purple); GRAYED-OUT = the "
@@ -1097,7 +1154,7 @@ def compute_bets(out, specs, store_path=None, ev_threshold=BET_EV_THRESHOLD):
         return (pd.DataFrame(columns=BET_HEADERS), {},
                 f"No sportsbook odds in the store for "
                 f"{', '.join(sorted(dates))}. Run  python "
-                f"Scripts/scrape_odds.py  near game time to capture lines, "
+                f"Tools/2_scrape_odds.py  near game time to capture lines, "
                 f"then re-run this prediction.")
 
     cache = {}
@@ -1304,6 +1361,12 @@ def quality_marks(out, specs=None):
     the sharp-consensus sanity veto. Fails soft: any problem returns no
     marks (or just no veto), never blocks the workbook."""
     try:
+        # prop_rankings lives in Tools/ (the manually-run toolkit); when
+        # this runs under the GUI the Tools dir is already importable, but
+        # a direct `python Model/predict.py` run needs it on the path.
+        tools_dir = str(Path(__file__).resolve().parents[1] / "Tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
         import prop_rankings as R
         snap25 = joblib.load(R.ART / "eval_paired_select_2025.joblib")
         snap26 = joblib.load(R.ART / "eval_paired_2026.joblib")
@@ -1715,12 +1778,21 @@ def spec_from_game(stores, gamepk):
         if len(mu) and pd.notna(mu["HpUmpId"].iloc[0]):
             hp_ump = int(mu["HpUmpId"].iloc[0])
 
+    humidity = pressure = None        # real humidity/pressure, same reason
+    wt = r.get("weather")
+    if wt is not None:
+        mw = wt[wt["GamePk"] == gamepk]
+        if len(mw):
+            humidity = mw["Humidity"].iloc[0]
+            pressure = mw["Pressure"].iloc[0]
+
     return {
         "date": str(g["Date"].date()), "away_team": g["AwayTeam"],
         "home_team": g["HomeTeam"], "venue": g["Venue"],
         "day_night": g["DayNight"], "temp": g["Temp"],
         "wind_speed": g["WindSpeed"], "wind_dir": g["WindDir"],
         "condition": g["Condition"],
+        "humidity": humidity, "pressure": pressure,
         "away_starter": starter(g["AwayTeam"]),
         "home_starter": starter(g["HomeTeam"]),
         "away_lineup": lineup(g["AwayTeam"]),

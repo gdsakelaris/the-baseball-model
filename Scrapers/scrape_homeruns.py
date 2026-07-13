@@ -2,7 +2,7 @@
 
 The OnlyHomers database page (https://www.onlyhomers.com/database) is fed by
 a JSON API that returns a full season per request; this pulls each covered
-year (Scripts/seasons.py) and writes one combined CSV in chronological order
+year (Scrapers/seasons.py) and writes one combined CSV in chronological order
 (2020's first homer through the current season's latest). Running Total
 numbers every homer sequentially across all years; Total is the site's
 running count within a season; HR is that batter's season home run number;

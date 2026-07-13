@@ -756,7 +756,7 @@ def section_market(results, bf_y, sf_y, gf_y, art, year, store_path, n_boot):
     store = O.load_odds(store_path, year=year)
     if store.empty:
         print(f"  No odds captured for {year} (store: {store_path}).")
-        print("  Run `python Scripts/scrape_odds.py` near game time to start "
+        print("  Run `python Tools/2_scrape_odds.py` near game time to start "
               "collecting closing\n  lines; this section grades the model "
               "against them as they accrue. Everything\n  above is model vs. a "
               "naive base rate — this is the only section that asks whether\n"
@@ -790,7 +790,7 @@ def section_market(results, bf_y, sf_y, gf_y, art, year, store_path, n_boot):
     if not rows:
         print("  Odds present, but none matched the holdout predictions on "
               "(date, player).\n  Check that scraped player names resolved to "
-              "PlayerIds (Scripts/scrape_odds.py).")
+              "PlayerIds (Tools/2_scrape_odds.py).")
         return
     print(pd.DataFrame(rows).to_string(index=False))
     print("  'model ll' vs 'market ll': log loss on the SAME events (de-vigged "
@@ -1188,11 +1188,11 @@ def paired_day_bootstrap(dates, y, base_val, cand_val, kind, n_boot, seed=0):
 # update_all --retrain can tell "shipped code" from "experiment in flight"
 # and stand down rather than re-baseline a candidate as its own reference.
 CODE_FP_FILES = ("features.py", "train.py", "predict.py", "recalibrate.py",
-                 # Scripts/seasons.py decides which seasons feed the frames
+                 # Scrapers/seasons.py decides which seasons feed the frames
                  # (FIRST_SEASON); changing it is a modeling change like any
                  # other, so the daily job must go scrape-only until the
                  # experiment is confirmed and re-baselined.
-                 "../Scripts/seasons.py")
+                 "../Scrapers/seasons.py")
 
 
 def _code_fingerprint():
@@ -1407,7 +1407,7 @@ def main():
                          "instead of refusing.")
     ap.add_argument("--odds", default=str(O.DEFAULT_STORE),
                     help="odds store CSV for the vs-market section "
-                         "(Scripts/scrape_odds.py writes it)")
+                         "(Tools/2_scrape_odds.py writes it)")
     args = ap.parse_args()
     if args.select and args.confirm:
         sys.exit("--select and --confirm are mutually exclusive")
@@ -1530,7 +1530,7 @@ How to read this:
   - Sections 7-8 dispersion: if the index is well above 1.00, Poisson-based
     P(over) is overconfident at extreme lines - shade those probabilities.
   - Section 9 is the real-money test: model vs. de-vigged sportsbook prices on
-    the same events, plus flat-stake ROI. Needs an odds store (scrape_odds.py);
+    the same events, plus flat-stake ROI. Needs an odds store (2_scrape_odds.py);
     everything above only beats a naive base rate.
   - Section 10 asks whether a strictly-causal in-season correction would beat
     the frozen model as the environment drifts (a growing Section-4 miss) —

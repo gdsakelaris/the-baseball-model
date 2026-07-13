@@ -1,12 +1,13 @@
 # MLB Data Glossary
 
-Fifteen CSV files, all UTF-8 (Excel-safe), scraped by the scripts in
-`Scripts/`. Sources: MLB.com rosters & stats, OnlyHomers.com (home run log),
-Baseball Savant (pitch-level Statcast, batted balls, sprint speed, OAA),
-MLB Stats API (per-game boxscores), USGS/OpenTopoData (elevations).
+Eighteen CSV files, all UTF-8 (Excel-safe), scraped by the scripts in
+`Scrapers/`. Sources: MLB.com rosters & stats, OnlyHomers.com (home run log),
+Baseball Savant (pitch-level Statcast, batted balls, sprint speed, OAA,
+baserunning), MLB Stats API (per-game boxscores), USGS/OpenTopoData
+(elevations), Open-Meteo (per-game weather: humidity/pressure).
 
 Filenames are stable across seasons; every multi-season file covers 2020
-through the current season (`Scripts/seasons.py` decides what "current"
+through the current season (`Scrapers/seasons.py` decides what "current"
 means, so the files simply grow at each annual rollover).
 
 | File | Built by |
@@ -26,11 +27,14 @@ means, so the files simply grow at each annual rollover).
 | mlb_pitch_daily_batters.csv | scrape_pitches.py |
 | mlb_sprint_speed.csv | scrape_sprint_speed.py |
 | mlb_oaa.csv | scrape_oaa.py |
+| mlb_oaa_players.csv | scrape_oaa.py (same run writes both) |
+| mlb_baserunning.csv | scrape_baserunning.py |
+| mlb_weather.csv | scrape_weather.py (`--backfill` once; daily runs are incremental) |
 
-All scrapers write into `Data/` by default. `Scripts/update_all.py` runs every
+All scrapers write into `Data/` by default. `Scrapers/update_all.py` runs every
 scraper (everything except build_ballparks.py) for a one-command daily
 refresh; add `--retrain` to also retrain the models afterward. Each scraped
-file is schema-validated (`Scripts/validate_data.py`) against the previous
+file is schema-validated (`Scrapers/validate_data.py`) against the previous
 copy in `Data/backups/` before the pipeline accepts it; a file that fails
 validation is restored from backup and the retrain is skipped.
 
@@ -167,6 +171,8 @@ intentionally have no row here.
 | Team | Full team name of home club |
 | LF / CF / RF | Fence distance (ft) down left field / center / right field lines |
 | Elevation_ft | Ground elevation above sea level (ft), from USGS/OpenTopoData |
+| Lat / Lon | Stadium coordinates (the weather scrapers key Open-Meteo on these) |
+| Roof | open / retractable / dome (fixed) |
 
 ## mlb_homeruns.csv — every home run since 2020
 One row per home run. Source: OnlyHomers database. Rows run chronologically
@@ -299,9 +305,12 @@ than outcomes) for both batters and pitchers.
 
 ## mlb_pitch_daily_pitchers.csv / mlb_pitch_daily_batters.csv — pitch-level daily aggregates
 One row per player per day, aggregated at scrape time from EVERY pitch
-(~700k/season — too much to keep raw). Swing-and-miss and plate discipline
-are the fastest-stabilizing skills in baseball; none of this is in box
-scores or the batted-ball file.
+(~700k/season). Swing-and-miss and plate discipline are the fastest-
+stabilizing skills in baseball; none of this is in box scores or the
+batted-ball file. `--backfill` also archives the raw pitches to
+`Data/raw_pitches/pitches_{year}.parquet` (~117 MB/season, every Savant
+detail column) so future schema changes re-aggregate from disk
+(`--from-raw`) instead of re-downloading.
 
 | Column | Meaning |
 |---|---|
@@ -312,7 +321,17 @@ scores or the batted-ball file.
 | cs_n | Called strikes |
 | z_n / oz_n | Pitches in / out of the strike zone |
 | oz_sw | Out-of-zone swings (chases) |
-| fb_n / fb_v | Fastballs (FF+SI) with tracked velo / their velo sum (pitcher file only) |
+| oz_wh | Out-of-zone whiffs — with wh_n this splits whiffs by zone, so in-zone contact rate (the most stable hit-tool skill) is derivable |
+| fb95_n / fb95_sw / fb95_wh | Pitches / swings / whiffs vs 95+ mph fastballs (both files, v3) — batter: performance against elite velocity; pitcher: elite-velo usage |
+| fbmid_* / fblo_* | The graded bands below fb95 (v4): 92–95 and <92 mph FF/SI, same n/sw/wh trios — whiff splits and usage by velocity band |
+| brk_n / brk_sw / brk_wh | Breaking balls (SL/ST/SV/CU/KC/CS/SC/KN) seen or thrown / swings / whiffs (v3) — with off_* and the fastball remainder, whiff splits by pitch class |
+| off_n / off_sw / off_wh | Offspeed (CH/FS/FO/EP) counterparts (v3) |
+| edge_n | Pitches in the shadow band (0.67–1.33 of the scaled zone, plate_x/plate_z vs per-pitch sz_top/sz_bot) — edge_n/n is a command proxy (v3) |
+| fp_n / fp_sw / fp_s | 0-0-count pitches / swings at them / first-pitch strikes (v3) — fp_s/fp_n = F-strike% (pitcher), fp_sw/fp_n = first-pitch aggression (batter) |
+| ts_n / ts_sw / ts_wh | Two-strike pitches / swings / whiffs (v5) — pitcher put-away ability, batter two-strike survival |
+| f32_n / f32_z / f32_b / f32_sw / f32_wh | Full-count (3-2) pitches: total / in zone / called+blocked balls (= walks) / swings / whiffs (v5) — payoff-pitch behavior for the walk heads |
+| fb_n / fb_v / fb_v2 | Fastballs (FF+SI) with tracked velo / velo sum / velo sum-of-squares (pitcher file only; v2 enables within-pitcher velo SD, v5) |
+| rp_n / rp_x / rp_x2 / rp_z / rp_z2 | Release-point coords: count / x,z sums / sums-of-squares (pitcher file only, v5) — rebuild release scatter (mechanical repeatability) from cumulative sums |
 
 ## mlb_sprint_speed.csv — Statcast sprint speed
 One row per (Year, PlayerId), min 5 competitive runs. Consumed as
@@ -326,11 +345,47 @@ PRIOR-season values (leakage-free): a 2026 game sees the 2025 measurement.
 | HPto1B | Home-to-first time, seconds |
 
 ## mlb_oaa.csv — team Outs Above Average (defense)
-One row per (Year, Team). The only direct defense-range measurement in the
-data; consumed as PRIOR-season values.
+One row per (Year, Team). Consumed as PRIOR-season values.
 
 | Column | Meaning |
 |---|---|
 | Year, Team, TeamId, TeamName | Keys (Team = that season's abbreviation, rename-aware) |
 | OAA | Raw season outs above average |
 | OAA_per162 | Scaled to 162 games (2020 was a 60-game season) |
+
+## mlb_oaa_players.csv — per-fielder Outs Above Average
+One row per (Year, PlayerId), 2016+ (Statcast fielding era). Lets the model
+aggregate the ACTUAL lineup's defense instead of the team-season blend.
+Consumed as PRIOR-season values.
+
+| Column | Meaning |
+|---|---|
+| Year, PlayerId, Name | Keys |
+| Pos | Primary position that season (SS, CF, 1B, …) — used for infield/outfield splits |
+| OAA | Season outs above average |
+| FRP | Fielding runs prevented (run-value version) |
+
+## mlb_baserunning.csv — Statcast baserunning run value
+One row per (Year, PlayerId), 2016+, qualified runners only (~190/season;
+absent = treat as league-average). Consumed as PRIOR-season values.
+
+| Column | Meaning |
+|---|---|
+| Year, PlayerId, Name | Keys |
+| RunnerRuns | Total baserunning run value |
+| RunnerRunsXB | Extra-base advancement component (1st-to-3rd, scoring from 2nd, tag-ups) |
+| RunnerRunsSB | Basestealing component |
+| Opportunities | Times on base with an advancement opportunity |
+
+## mlb_weather.csv — per-game weather (air-density inputs)
+One row per GamePk (Open-Meteo archive/forecast at each park's coordinates,
+sampled at the approximate local start hour: day 13:00, night 19:00). The
+boxscores already carry Temp/Wind; this adds what they lack. Former and
+special-event venues have coordinates in scrape_weather.py.
+
+| Column | Meaning |
+|---|---|
+| GamePk, Date, Venue | Game keys |
+| Humidity | Relative humidity (%) at the start hour |
+| Pressure | Surface (station-level) pressure, hPa — embeds elevation, so it is the air-density input directly |
+| Precip | Total precipitation (mm) over the first three game hours |

@@ -5,7 +5,7 @@ outcomes: calibrated LightGBM models trained on 300K+ player-games across
 every season since 2020, with leakage-free feature engineering, a strict
 temporal holdout, and automated daily retraining. Season coverage and the
 train/calibration/holdout split roll forward automatically each year
-(`Scripts/seasons.py`; `train.py` derives its years from the data).
+(`Scrapers/seasons.py`; `train.py` derives its years from the data).
 
 ## What it predicts
 
@@ -81,13 +81,13 @@ metrics, calibration tables, and a 2025 stability backtest live in
 
 | Path | Role |
 |---|---|
-| `Scripts/` | 10+ scrapers (MLB Stats API, Baseball Savant, rosters, weather) + `scrape_odds.py` (real closing lines) + `update_all.py` one-command refresh + `seasons.py` (single source of truth for covered seasons — the annual rollover needs no code edits) |
+| `Scrapers/` | 10+ scrapers (MLB Stats API, Baseball Savant, rosters, weather) + `update_all.py` one-command refresh + `seasons.py` (single source of truth for covered seasons — the annual rollover needs no code edits) + `run_daily_update.cmd` (the 6 AM Task Scheduler entry point) |
+| `Tools/` | The manually-run toolkit, numbered in game-day order: `1_get_todays_games.py` (today's lineups/weather), `2_scrape_odds.py` (real closing lines, near game time), `3_gui.py` (the Tkinter app), `4_grade_results.py` / `hit_rate_report.py` (grade finished slates), `prop_rankings.py` (writes the `PROP_RANKINGS.xlsx` quality workbook kept alongside it) |
 | `Data/` | Scraped CSVs (~55 MB, gitignored — regenerate with `update_all.py`); schema documented in `Data/GLOSSARY.md` |
 | `Model/features.py` | Feature engineering: ~200 batter features, starter/game/winner frames, Elo, shared by training and inference |
 | `Model/train.py` | Builds frames, trains all models (14 props, K + count heads, runs, winner) for both suites — model-selection and shipping, with the year splits derived from the data; `--select` stops after the selection suite for fast iteration |
 | `Model/odds.py`, `recalibrate.py` | Odds/de-vig/EV math + odds-store schema; and the leakage-free in-season drift correction |
 | `Model/predict.py` | Prediction engine + Excel reports; `--game` replays history, `--selftest` checks parity, `--recal` applies in-season drift offsets |
-| `Model/gui.py` | Tkinter app for single games or full slates |
 | `Model/evaluate_deep.py` | Full holdout workup: bootstrap CIs, drift, segments, betting thresholds, K/totals/winner, model-vs-market ROI (Section 9), in-season recalibration backtest (Section 10), and `--set-baseline` regression diffing with noise bands (Section 11). Default run scores the selection suite on 2025 (iterate freely); `--confirm` scores shipping on 2026 |
 
 ## Quickstart
@@ -96,7 +96,7 @@ metrics, calibration tables, and a 2025 stability backtest live in
 pip install pandas numpy scikit-learn scipy lightgbm joblib openpyxl requests beautifulsoup4
 
 # 1. scrape all data (Data/ is not committed) — takes a while first time
-python Scripts/update_all.py
+python Scrapers/update_all.py
 
 # 2. build features and train everything (~2 min)
 python Model/train.py --rebuild
@@ -107,8 +107,8 @@ python Model/evaluate_deep.py            # selection suite on 2025 (iterate here
 python Model/evaluate_deep.py --confirm  # shipping suite on 2026 (confirm-only)
 
 # 4. predict
-python Scripts/get_todays_games.py   # today's matchups/lineups/weather
-python Model/gui.py                  # the GUI auto-loads today's slate
+python Tools/1_get_todays_games.py   # today's matchups/lineups/weather
+python Tools/3_gui.py                # the GUI auto-loads today's slate
 ```
 
 A Windows Task Scheduler job runs `update_all.py --retrain` every morning,

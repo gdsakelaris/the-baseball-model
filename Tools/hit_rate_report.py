@@ -15,19 +15,24 @@ skipped. Rows with no box score (scratched player, unscraped finals) are
 skipped and counted.
 
 Usage:
-    python Model/hit_rate_report.py                    # every workbook in Predictions/
-    python Model/hit_rate_report.py path\\to\\file.xlsx [more.xlsx ...]
+    python Tools/hit_rate_report.py                    # every workbook in Predictions/
+    python Tools/hit_rate_report.py path\\to\\file.xlsx [more.xlsx ...]
 """
 import argparse
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import openpyxl
 
-from grade_results import (BAT_EVENTS, LINE_RE, LINE_STAT, RUNS_RE,
-                           PRED_DIR, load_actuals)
+# 4_grade_results starts with a digit, so a plain `import` is a syntax
+# error — importlib loads it by name string instead
+import importlib
+
+_gr = importlib.import_module("4_grade_results")
+BAT_EVENTS, LINE_RE, LINE_STAT = _gr.BAT_EVENTS, _gr.LINE_RE, _gr.LINE_STAT
+RUNS_RE, PRED_DIR, load_actuals = _gr.RUNS_RE, _gr.PRED_DIR, _gr.load_actuals
 
 
 def collect_file(path):
@@ -98,12 +103,22 @@ def collect_file(path):
         ws, hidx = sheet_head("Games")
         run_cols = [(h, j, float(RUNS_RE.match(h).group(1)))
                     for h, j in hidx.items() if RUNS_RE.match(h)]
-        for r in (ws.iter_rows(min_row=2, values_only=True)
-                  if "Game" in hidx else ()):
-            g = games.get(str(r[hidx["Game"]]))
-            if g is None:
+        # doubleheader-safe: match a tag's i-th row to the day's i-th final
+        # for that matchup (same rule as 4_grade_results); rows whose finals
+        # aren't all in yet are skipped, never graded against the wrong game
+        game_rows = (list(ws.iter_rows(min_row=2, values_only=True))
+                     if "Game" in hidx else [])
+        need = Counter(str(r[hidx["Game"]]) for r in game_rows)
+        seen = Counter()
+        for r in game_rows:
+            tag = str(r[hidx["Game"]])
+            finals = games.get(tag, [])
+            k = seen[tag]
+            seen[tag] += 1
+            if len(finals) != need[tag]:
                 skipped += 1
                 continue
+            g = finals[k]
             if "Winner" in hidx and "Win Prob" in hidx:
                 p = prob(r[hidx["Win Prob"]])
                 if p is not None:

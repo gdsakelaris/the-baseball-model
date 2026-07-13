@@ -23,18 +23,22 @@ green/purple -> the light pick shade), then pass 2 grades fresh.
 
 Doubleheaders: a batter's stats are summed across the day's games (the
 slate carries one row per matchup, so the day total is the honest read).
+Games-sheet rows are matched per game: the tag's i-th row grades against
+the day's i-th final for that matchup (schedule order); if only one of
+the two games is final the tag's rows are skipped until both are in.
 
 If some games are missing (they weren't final at the last scrape), their
-rows are skipped and counted — run  python Scripts/scrape_gamelogs_3F.py
+rows are skipped and counted — run  python Scrapers/scrape_gamelogs_3F.py
 to pull the late finals, then grade again.
 
 Usage:
-    python Model/grade_results.py                    # newest in Predictions/
-    python Model/grade_results.py path\\to\\file.xlsx
+    python Tools/4_grade_results.py                  # newest in Predictions/
+    python Tools/4_grade_results.py path\\to\\file.xlsx
 """
 import argparse
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -105,7 +109,9 @@ def ip_to_outs(ip):
 
 def load_actuals(date):
     """(batters {pid: summed Series}, starters {pid: dict},
-    games {'AWY@HOM': dict}) for one date, from the scraped logs."""
+    games {'AWY@HOM': [dict, ...]}) for one date, from the scraped logs.
+    The games lists keep mlb_games.csv row order (the schedule's game
+    order), so a doubleheader's game 1 is entry 0 and game 2 entry 1."""
     gb = pd.read_csv(DATA_DIR / "mlb_game_batting.csv", encoding="utf-8-sig",
                      low_memory=False)
     gb = gb[gb["Date"] == date]
@@ -127,9 +133,9 @@ def load_actuals(date):
     games = {}
     for _, r in g.iterrows():
         a, h = float(r["AwayScore"]), float(r["HomeScore"])
-        games[f'{r["AwayTeam"]}@{r["HomeTeam"]}'] = {
+        games.setdefault(f'{r["AwayTeam"]}@{r["HomeTeam"]}', []).append({
             "total": a + h,
-            "winner": r["HomeTeam"] if h > a else r["AwayTeam"]}
+            "winner": r["HomeTeam"] if h > a else r["AwayTeam"]})
     return batters, starters, games
 
 
@@ -219,7 +225,7 @@ def grade(path):
     batters, starters, games = load_actuals(date)
     if not batters:
         sys.exit(f"no box scores for {date} in Data/mlb_game_batting.csv — "
-                 f"run  python Scripts/scrape_gamelogs_3F.py  first")
+                 f"run  python Scrapers/scrape_gamelogs_3F.py  first")
 
     wb = openpyxl.load_workbook(path)
     for ws in wb.worksheets:
@@ -267,9 +273,21 @@ def grade(path):
         hidx = headers_of(ws)
         run_cols = [(j, float(RUNS_RE.match(h).group(1)))
                     for h, j in hidx.items() if RUNS_RE.match(h)]
+        # Doubleheaders: the same "AWY@HOM" tag appears once per game, in
+        # start-time order, and the finals list keeps the schedule's game
+        # order — so match the sheet's i-th row for a tag to the i-th final.
+        # If the finals don't yet cover every predicted game of the tag
+        # (game 2 not final at the last scrape), skip the tag's rows rather
+        # than grade two predictions against one game.
+        need = Counter(str(ws.cell(row=i, column=hidx["Game"]).value)
+                       for i in range(2, ws.max_row + 1))
+        seen = Counter()
         for i in range(2, ws.max_row + 1):
-            tag = ws.cell(row=i, column=hidx["Game"]).value
-            g = games.get(str(tag))
+            tag = str(ws.cell(row=i, column=hidx["Game"]).value)
+            finals = games.get(tag, [])
+            k = seen[tag]
+            seen[tag] += 1
+            g = finals[k] if len(finals) == need[tag] else None
             if g is None:
                 stats["missing_rows"] += 1
                 continue
@@ -313,7 +331,7 @@ def main():
           f"occurred (now yellow / dark blue / dark green / dark purple)")
     if s["missing_rows"]:
         print(f"  {s['missing_rows']} row(s) had no final box score yet — "
-              f"run  python Scripts/scrape_gamelogs_3F.py  and grade again")
+              f"run  python Scrapers/scrape_gamelogs_3F.py  and grade again")
 
 
 if __name__ == "__main__":

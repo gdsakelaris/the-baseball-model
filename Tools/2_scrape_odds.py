@@ -9,9 +9,9 @@ Source: The Odds API (https://the-odds-api.com). Set an API key once:
 
 Then run it near game time to snapshot that day's closing-ish lines:
 
-    python Scripts/scrape_odds.py                        # today, everything (default)
-    python Scripts/scrape_odds.py --markets props        # player props only, no game markets
-    python Scripts/scrape_odds.py --markets hr,pk,totals --date 2026-07-04
+    python Tools/2_scrape_odds.py                        # today, everything (default)
+    python Tools/2_scrape_odds.py --markets props        # player props only, no game markets
+    python Tools/2_scrape_odds.py --markets hr,pk,totals --date 2026-07-04
 
 The default 'all' captures every posted player prop the model predicts plus the
 game markets (totals = over/under runs, h2h = moneyline / winner), from the
@@ -49,8 +49,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "Model"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import odds as O  # noqa: E402  (canonical schema + market map)
-from get_todays_games import (NICKNAME_TO_ABBREV, build_name_index,  # noqa: E402
-                              norm_name)
+# 1_get_todays_games starts with a digit, so a plain `import` is a syntax
+# error — importlib loads it by name string instead
+import importlib  # noqa: E402
+_gtg = importlib.import_module("1_get_todays_games")
+NICKNAME_TO_ABBREV = _gtg.NICKNAME_TO_ABBREV
+build_name_index = _gtg.build_name_index
+norm_name = _gtg.norm_name
 
 API = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
 PROP_APIS = sorted({m["api"] for m in O.PROP_MARKET.values()} |
@@ -369,7 +374,7 @@ def main():
               f"  persistent (recommended):  write the key into {KEY_FILE}\n"
               "     (one line, no quotes) — every run reads it, no env needed\n"
               "  env var:   setx ODDS_API_KEY \"...\"  then open a NEW terminal\n"
-              "  one-off:   python Scripts/scrape_odds.py --key <key>\n"
+              "  one-off:   python Tools/2_scrape_odds.py --key <key>\n"
               "Nothing to capture — exiting.")
         return  # exit 0: safe to schedule before you have a key
 

@@ -1,6 +1,6 @@
 """Scrape MLB player pitching stats (standard + expanded) from MLB.com.
 
-Pulls season-level pitching stats for every covered season (Scripts/
+Pulls season-level pitching stats for every covered season (Scrapers/
 seasons.py) from the same data service that powers
 https://www.mlb.com/stats/pitching (bdfed.stitch.mlbinfra.com) and
 writes one combined CSV. Regular season, all teams, all positions, all

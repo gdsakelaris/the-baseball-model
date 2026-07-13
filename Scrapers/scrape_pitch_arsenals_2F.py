@@ -1,7 +1,7 @@
 """Scrape Statcast pitch arsenal stats from Baseball Savant.
 
 Pulls https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats for
-every covered season (Scripts/seasons.py) via the leaderboard's CSV export
+every covered season (Scrapers/seasons.py) via the leaderboard's CSV export
 and writes one combined CSV.
 One row per player per pitch type per season. Minimum PA is set to 1 so
 every row the leaderboard tracks is included (the site defaults to 10).

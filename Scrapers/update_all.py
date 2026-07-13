@@ -3,9 +3,10 @@
 Discovers scrape_*.py in this directory and runs each one with its default
 output (all default to Data/). The pitch-arsenal scraper runs twice (pitcher
 and batter views). build_ballparks.py is intentionally excluded: park
-dimensions and elevations don't change daily. scrape_odds.py is also excluded:
-betting lines must be captured near game time (closing lines), not in this
-morning data job — run it alongside get_todays_games.py near first pitch.
+dimensions and elevations don't change daily. Tools/2_scrape_odds.py lives
+outside this directory on purpose: betting lines must be captured near game
+time (closing lines), not in this morning data job — run it alongside
+Tools/1_get_todays_games.py near first pitch.
 
 Each scraper is fault-isolated: one failing doesn't stop the rest, and the
 exit code is non-zero if anything failed.
@@ -19,7 +20,7 @@ can no longer poison the daily retrain. The last log line is always
 "RESULT: OK" or "RESULT: FAILED" for easy scanning of Logs/update_*.log.
 
 Usage:
-    python Scripts/update_all.py [--retrain]
+    python Scrapers/update_all.py [--retrain]
 
     --retrain    also rebuild feature frames and retrain the models
                  (Model/train.py --rebuild) after a fully successful update
@@ -46,11 +47,12 @@ BACKUP_DIR = V.BACKUP_DIR
 STATUS_FILE = SCRIPTS_DIR.parent / "Logs" / "last_run_status.json"
 
 
-# matches the scrape_*.py glob but must NOT run in the 6 AM data job: betting
-# lines are captured near game time (closing lines), and a morning run would
-# grab opening/empty markets and burn the odds-API quota. Run it near first
-# pitch with get_todays_games.py instead.
-EXCLUDE = {"scrape_odds.py"}
+# names that must NOT run in the 6 AM data job even if a copy ever lands in
+# this directory (the odds scraper lives at Tools/2_scrape_odds.py and is
+# run by hand near first pitch): betting lines are captured near game time
+# (closing lines), and a morning run would grab opening/empty markets and
+# burn the odds-API quota.
+EXCLUDE = {"scrape_odds.py", "2_scrape_odds.py"}
 
 # which Data/ files each job owns (backed up before the run, validated after)
 JOB_FILES = {
@@ -70,7 +72,9 @@ JOB_FILES = {
     "scrape_pitches.py": ["mlb_pitch_daily_pitchers.csv",
                           "mlb_pitch_daily_batters.csv"],
     "scrape_sprint_speed.py": ["mlb_sprint_speed.csv"],
-    "scrape_oaa.py": ["mlb_oaa.csv"],
+    "scrape_oaa.py": ["mlb_oaa.csv", "mlb_oaa_players.csv"],
+    "scrape_baserunning.py": ["mlb_baserunning.csv"],
+    "scrape_weather.py": ["mlb_weather.csv"],
     "scrape_umpires.py": ["mlb_umpires.csv"],
     "scrape_bat_tracking.py": ["mlb_bat_tracking.csv"],
 }

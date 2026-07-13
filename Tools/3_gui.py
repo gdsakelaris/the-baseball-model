@@ -6,7 +6,7 @@ HR probability (with fair odds), hit probability, both starters' projected
 strikeouts with over-probabilities, and game totals.
 
 Run:
-    python Model/gui.py
+    python Tools/3_gui.py
 """
 
 import datetime as dt
@@ -19,7 +19,8 @@ from tkinter import filedialog, messagebox, ttk
 import pandas as pd
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# the prediction engine (predict.py and friends) lives in Model/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Model"))
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "Data"
 LOGO_PATH = Path(__file__).resolve().parents[1] / "MLB-Logo.png"
@@ -55,7 +56,7 @@ class App(tk.Tk):
         super().__init__()
         self.title("MLB Prediction Engine")
         # wide enough for the full top form row through the HP Umpire box (col 10)
-        self.geometry("1220x820")
+        self.geometry("1220x920")
         self._apply_style()
         self.pred = None
         self.pools = {}      # abbrev -> dict(batters={label: pid}, pitchers={...})
@@ -177,7 +178,7 @@ class App(tk.Tk):
 
     def _health_check(self):
         """Warn when predictions would be built on bad inputs: the morning
-        data job failed (Scripts/update_all.py writes its outcome to
+        data job failed (Scrapers/update_all.py writes its outcome to
         Logs/last_run_status.json) or the game logs have gone stale
         mid-season. Without this, the only failure signal is a log line."""
         import json
@@ -211,14 +212,14 @@ class App(tk.Tk):
 
     def _load_todays_file(self, silent=False):
         """Populate the slate from Data/todays_games.json (written by
-        Scripts/get_todays_games.py) if it exists."""
+        Tools/1_get_todays_games.py) if it exists."""
         import json
         path = DATA_DIR / "todays_games.json"
         if not path.exists():
             if not silent:
                 messagebox.showinfo(
                     "No file", "Data/todays_games.json not found.\nRun: "
-                    "python Scripts/get_todays_games.py")
+                    "python Tools/1_get_todays_games.py")
             return
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -346,9 +347,13 @@ class App(tk.Tk):
         top = ttk.LabelFrame(body, text="Game")
         top.pack(fill="x", padx=8, pady=6)
 
-        def add(col, text, widget, width=14):
-            ttk.Label(top, text=text).grid(row=0, column=col, sticky="w", padx=4)
-            widget.grid(row=1, column=col, sticky="w", padx=4, pady=2)
+        # Two stacked input rows (game identity, then conditions) so the
+        # window stays narrow now that weather has more fields.
+        def add(col, text, widget, row=0):
+            ttk.Label(top, text=text).grid(row=row * 2, column=col,
+                                           sticky="w", padx=4)
+            widget.grid(row=row * 2 + 1, column=col, sticky="w", padx=4,
+                        pady=2)
             return widget
 
         self.cb_away = add(0, "Away team", ttk.Combobox(top, width=6, state="readonly"))
@@ -363,15 +368,29 @@ class App(tk.Tk):
         self.cb_dn = add(5, "Day/Night", ttk.Combobox(
             top, width=7, state="readonly", values=["day", "night"]))
         self.cb_dn.set("day")
-        self.sp_temp = add(6, "Temp °F", ttk.Spinbox(top, from_=20, to=115, width=5))
+        self.sp_temp = add(0, "Temp °F", ttk.Spinbox(top, from_=20, to=115,
+                                                     width=5), row=1)
         self.sp_temp.set(72)
-        self.sp_wind = add(7, "Wind mph", ttk.Spinbox(top, from_=0, to=45, width=5))
+        self.sp_wind = add(1, "Wind mph", ttk.Spinbox(top, from_=0, to=45,
+                                                      width=5), row=1)
         self.sp_wind.set(6)
-        self.cb_wdir = add(8, "Wind dir", ttk.Combobox(top, width=14))
-        self.cb_cond = add(9, "Condition", ttk.Combobox(top, width=14))
+        self.cb_wdir = add(2, "Wind dir", ttk.Combobox(top, width=14), row=1)
+        self.cb_cond = add(3, "Condition", ttk.Combobox(top, width=14), row=1)
+        # Air-density inputs (scraped from the Open-Meteo forecast by
+        # 1_get_todays_games.py; editable). Blank = NaN, the model imputes.
+        # Under a closed roof (Condition = Dome) the model swaps humidity
+        # for a fixed indoor value, so this field only matters outdoors.
+        self.sp_hum = add(4, "Humidity %", ttk.Spinbox(top, from_=0, to=100,
+                                                       width=5), row=1)
+        self.e_pres = add(5, "Pressure hPa", ttk.Entry(top, width=7), row=1)
         # Editable; leave blank for a neutral-ump prediction. Known names
         # resolve to an HpUmpId in _collect_spec; an unknown name -> no id.
-        self.cb_ump = add(10, "HP Umpire", ttk.Combobox(top, width=18))
+        self.cb_ump = add(6, "HP Umpire", ttk.Combobox(top, width=18), row=1)
+        # spread the two input rows evenly across the panel's full width
+        # (equal weights share the leftover space; no `uniform`, which would
+        # force every column as wide as the Stadium box and overflow)
+        for i in range(7):
+            top.columnconfigure(i, weight=1)
 
         self.cb_away.bind("<<ComboboxSelected>>", lambda e: self._team_changed("away"))
         self.cb_home.bind("<<ComboboxSelected>>", lambda e: self._team_changed("home"))
@@ -532,8 +551,12 @@ class App(tk.Tk):
         self.cb_venue.set(spec.get("venue") or "")   # ...the spec venue wins
         self.cb_dn.set(spec.get("day_night") or "")
         for widget, v in ((self.sp_temp, spec.get("temp")),
-                          (self.sp_wind, spec.get("wind_speed"))):
+                          (self.sp_wind, spec.get("wind_speed")),
+                          (self.sp_hum, spec.get("humidity"))):
             widget.set("" if v is None else v)
+        self.e_pres.delete(0, "end")
+        if spec.get("pressure") is not None:
+            self.e_pres.insert(0, spec["pressure"])
         self.cb_wdir.set(spec.get("wind_dir") or "")
         self.cb_cond.set(spec.get("condition") or "")
         self.cb_ump.set(spec.get("hp_ump") or "")
@@ -589,6 +612,8 @@ class App(tk.Tk):
                 "day_night": self.cb_dn.get(),
                 "temp": num(self.sp_temp, "temperature"),
                 "wind_speed": num(self.sp_wind, "wind speed"),
+                "humidity": num(self.sp_hum, "humidity"),
+                "pressure": num(self.e_pres, "pressure"),
                 "wind_dir": self.cb_wdir.get(), "condition": self.cb_cond.get()}
         ump = self.cb_ump.get().strip()
         spec["hp_ump"] = ump or None

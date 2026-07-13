@@ -12,8 +12,8 @@ Used two ways:
   - update_all.py: after each scraper runs, its output is validated; on
     failure the previous file is restored from Data/backups/ and the job is
     marked FAILED (which also blocks --retrain).
-  - standalone:  python Scripts/validate_data.py            # check all files
-                 python Scripts/validate_data.py mlb_odds.csv ...
+  - standalone:  python Scrapers/validate_data.py            # check all files
+                 python Scrapers/validate_data.py mlb_odds.csv ...
 
 A validation problem is a human-readable string; a file passes when its
 problem list is empty. Checks are deliberately about *shape and plumbing*
@@ -125,10 +125,18 @@ SPECS = {
         numeric=[("PlayerId", 0.0)],
         min_rows=2500, shrink_tol=0.95),        # snapshot, grows slowly
     "mlb_ballparks.csv": dict(                  # static; standalone runs only
-        required_cols=["Ballpark", "Team", "LF", "CF", "RF", "Elevation_ft"],
+        required_cols=["Ballpark", "Team", "LF", "CF", "RF", "Elevation_ft",
+                       "Lat", "Lon", "Roof"],
         key=["Ballpark"], max_dup_frac=0.0,
-        numeric=[("LF", 0.0), ("CF", 0.0), ("RF", 0.0)],
+        numeric=[("LF", 0.0), ("CF", 0.0), ("RF", 0.0), ("Lat", 0.0),
+                 ("Lon", 0.0)],
         min_rows=30, shrink_tol=1.0),
+    "mlb_weather.csv": dict(                    # one row per game, grows daily
+        required_cols=["GamePk", "Date", "Venue", "Humidity", "Pressure",
+                       "Precip"],
+        key=["GamePk"], max_dup_frac=0.0, date_col="Date", fresh_days=6,
+        numeric=[("GamePk", 0.0), ("Humidity", 0.02), ("Pressure", 0.02)],
+        min_rows=20000, shrink_tol=0.999),
     "mlb_statcast_bip.csv": dict(
         required_cols=["GamePk", "Season", "Date", "BatterId", "PitcherId",
                        "Events", "BBType", "ExitVelo", "LaunchAngle", "LSA",
@@ -139,14 +147,29 @@ SPECS = {
         min_rows=700000, shrink_tol=0.999, season_col="Season"),
     "mlb_pitch_daily_pitchers.csv": dict(
         required_cols=["PlayerId", "Date", "n", "sw_n", "wh_n", "cs_n",
-                       "z_n", "oz_n", "oz_sw", "fb_n", "fb_v"],
+                       "z_n", "oz_n", "oz_sw", "oz_wh", "fb_n", "fb_v",
+                       "fb95_n", "fb95_sw", "fb95_wh",
+                       "fbmid_n", "fbmid_sw", "fbmid_wh",
+                       "fblo_n", "fblo_sw", "fblo_wh",
+                       "brk_n", "brk_sw", "brk_wh", "off_n", "off_sw",
+                       "off_wh", "edge_n", "fp_n", "fp_sw", "fp_s",
+                       "ts_n", "ts_sw", "ts_wh",
+                       "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh",
+                       "fb_v2", "rp_n", "rp_x", "rp_x2", "rp_z", "rp_z2"],
         key=["PlayerId", "Date"], max_dup_frac=0.0, date_col="Date",
         fresh_days=6,
         numeric=[("PlayerId", 0.0), ("n", 0.001)],
         min_rows=120000, shrink_tol=0.999),
     "mlb_pitch_daily_batters.csv": dict(
         required_cols=["PlayerId", "Date", "n", "sw_n", "wh_n", "cs_n",
-                       "z_n", "oz_n", "oz_sw"],
+                       "z_n", "oz_n", "oz_sw", "oz_wh", "fb95_n", "fb95_sw",
+                       "fb95_wh",
+                       "fbmid_n", "fbmid_sw", "fbmid_wh",
+                       "fblo_n", "fblo_sw", "fblo_wh",
+                       "brk_n", "brk_sw", "brk_wh", "off_n", "off_sw",
+                       "off_wh", "edge_n", "fp_n", "fp_sw", "fp_s",
+                       "ts_n", "ts_sw", "ts_wh",
+                       "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh"],
         key=["PlayerId", "Date"], max_dup_frac=0.0, date_col="Date",
         fresh_days=6,
         numeric=[("PlayerId", 0.0), ("n", 0.001)],
@@ -162,6 +185,17 @@ SPECS = {
         key=["Year", "Team"], max_dup_frac=0.0,
         numeric=[("OAA", 0.0)],
         min_rows=200, shrink_tol=0.999, season_col="Year"),
+    "mlb_oaa_players.csv": dict(                # per (Year, fielder); 2016+
+        required_cols=["Year", "PlayerId", "Name", "Pos", "OAA", "FRP"],
+        key=["Year", "PlayerId"], max_dup_frac=0.0,
+        numeric=[("PlayerId", 0.0), ("OAA", 0.01)],
+        min_rows=4000, shrink_tol=0.999, shrink_abs=20, season_col="Year"),
+    "mlb_baserunning.csv": dict(                # per (Year, runner); 2016+
+        required_cols=["Year", "PlayerId", "Name", "RunnerRuns",
+                       "RunnerRunsXB", "RunnerRunsSB", "Opportunities"],
+        key=["Year", "PlayerId"], max_dup_frac=0.0,
+        numeric=[("PlayerId", 0.0), ("RunnerRuns", 0.01)],
+        min_rows=1500, shrink_tol=0.999, shrink_abs=20, season_col="Year"),
     "mlb_bat_tracking.csv": dict(               # per (Year, batter); 2023+
         required_cols=["Year", "PlayerId", "BatSpeed", "SwingLength"],
         key=["Year", "PlayerId"], max_dup_frac=0.0,
