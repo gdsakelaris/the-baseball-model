@@ -1,6 +1,8 @@
-# regenerable data — Scrapers/update_all.py rebuilds everything in Data/;
-# the schema doc stays committed
-Data/*
+# Data/ CSVs are tracked (G6 decision 2026-07-14), with two exceptions:
+# raw_pitches/ (~1 GB parquet archive, regenerable via --from-raw source data)
+# and mlb_statcast_bip.csv (146 MB — over GitHub's 100 MB hard push limit)
+Data/raw_pitches/
+Data/mlb_statcast_bip.csv
 cache
 backups
 todays_games.json
