@@ -59,6 +59,7 @@ import features as F  # noqa: E402
 import odds as O  # noqa: E402
 import recalibrate as R  # noqa: E402
 from predict import (american_odds, apply_stack, count_over,  # noqa: E402
+                     k_over, total_over,
                      nb_over, poisson_over, poisson_win, predict_prop,
                      predict_win)
 from train import PROPS  # noqa: E402
@@ -339,12 +340,13 @@ def section_strikeouts(sf_y, art):
     print(pd.DataFrame(rows).to_string(index=False))
 
     k_disp = float(art.get("k_disp", 1.0))
-    dist = (f"negative binomial, disp {k_disp:.2f} from cal year"
+    dist = ("cal-year per-line logit calibrators" if art.get("k_line_cals")
+            else f"negative binomial, disp {k_disp:.2f} from cal year"
             if k_disp > 1.001 else "Poisson")
     print(f"\n--- P(over) line calibration (the sellable output; uses {dist}) ---")
     rows = []
     for line in (3.5, 4.5, 5.5, 6.5, 7.5):
-        p_over = np.array([nb_over(l, line, k_disp) for l in mu])
+        p_over = k_over(art, mu, line)
         actual = (y > line).astype(int)
         rows.append({"line": line, "mean P(over)": f"{p_over.mean():.3f}",
                      "actual over rate": f"{actual.mean():.3f}",
@@ -417,7 +419,9 @@ def section_games(gf_y, art):
     resid = total_y - total_mu
     disp = float(np.mean(resid ** 2) / np.mean(total_mu))
     model_disp = float(art.get("total_disp", 1.0))
-    dist = (f"negative binomial, disp {model_disp:.2f} from cal year"
+    dist = ("cal-year per-line logit calibrators"
+            if art.get("total_line_cals")
+            else f"negative binomial, disp {model_disp:.2f} from cal year"
             if model_disp > 1.001 else "Poisson")
     print(f"  totals bias (pred-actual) {total_mu.mean() - total_y.mean():+.2f} "
           f"runs | observed dispersion {disp:.2f} | P(over) uses {dist}")
@@ -425,7 +429,7 @@ def section_games(gf_y, art):
     print("\n--- P(over) run-line calibration ---")
     rows = []
     for line in (6.5, 7.5, 8.5, 9.5, 10.5):
-        p_over = np.array([nb_over(l, line, model_disp) for l in total_mu])
+        p_over = total_over(art, total_mu, line)
         actual = (total_y > line).astype(int)
         rows.append({"line": line, "mean P(over)": f"{p_over.mean():.3f}",
                      "actual over rate": f"{actual.mean():.3f}",
@@ -601,11 +605,10 @@ def _starter_market_rows(sf_y, art, store, n_boot):
     # api market -> (mu, actual-count array, P(over line) fn)
     providers = {}
     if art.get("k_model") is not None and "y_so" in sf_y.columns:
-        k_disp = float(art.get("k_disp", 1.0))
         mu_k = art["k_model"].predict(prep(sf_y, art["st_cols"], art["cat_levels"]))
         providers["pitcher_strikeouts"] = (
             mu_k, sf_y["y_so"].to_numpy().astype(float),
-            lambda mu, line: np.array([nb_over(m, line, k_disp) for m in mu]))
+            lambda mu, line: k_over(art, mu, line))
     cm = art.get("count_models", {})
     api_of = {"outs": "pitcher_outs", "pbb": "pitcher_walks",
               "pha": "pitcher_hits_allowed", "per": "pitcher_earned_runs"}
@@ -693,7 +696,7 @@ def _game_market_rows(gf_y, art, store, n_boot):
             continue
         model = pd.DataFrame({
             "Date": date, "Team": team,
-            "p": np.array([nb_over(m, line, disp) for m in total_mu]),
+            "p": total_over(art, total_mu, line),
             "y": (total_y > line).astype(int)})
         row = _grade_against_market(f"totals {line:g}", model, cons, n_boot,
                                     key="Team")

@@ -31,6 +31,7 @@ import recalibrate as R  # noqa: E402
 ART = Path(__file__).resolve().parent / "artifacts"
 
 K_LINES = [3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+TOTAL_LINES = [6.5, 7.5, 8.5, 9.5, 10.5]
 
 # prop key -> output column, in display order
 PROP_COLS = {"hr": "P_HR", "hit": "P_Hit", "hits2": "P_2Hits",
@@ -90,7 +91,30 @@ def nb_over(lam, line, disp=1.0):
 # crossing line probabilities the way independent per-line logistics can.
 # Under-dispersed heads (outs ~0.8) stay on calibrators: NB can only widen
 # variance. One-line revert: remove the target from this set.
-NB_PRICED_TARGETS = {"y_per"}
+# 2026-07-13 full-surface pricing comparison (count_pricing_compare, all 9
+# families x both years, day-block CIs): per's NB verdict RE-CONFIRMED on
+# the ensemble-era model (2026 NB CI-clear at 2.5/3.5, 2025 flat); K added
+# (NB CI-clear at the low lines both years, calibrators win nowhere — K is
+# ~Poisson, disp 1.01); total added (calibrator's lone 2025 win at 7.5
+# flipped sign on 2026 + a CI-clear 2026 NB win at 6.5). Their fitted
+# calibrators stay banked in the artifacts (k_line_cals/total_line_cals);
+# removing a target from this set adopts them.
+NB_PRICED_TARGETS = {"y_per", "y_so", "total_runs"}
+
+# PA-sim game-level blend (Phase 3, 2026-07-13): w_sim per head, applied
+# to the sim outputs from Model/pa_serve.py — score/total means linear,
+# winner on logits. Evidence (fixed-w day-block CI vs the shipped
+# incumbent, hook engine): score CI-clear SIM+ both years at w=.3
+# (+.0068/+.0046); total CI-clear 2025 (+.010) / flat 2026 -> USER call
+# 07-13: in at half-weight; winner positive-tie both years -> USER call
+# 07-13: in at .30. Empty dict (or missing sim artifacts) = incumbent
+# alone; batter/starter heads and sb stay incumbent (w=0 verdicts).
+SIM_BLEND = {"score": 0.35, "total": 0.20, "winner": 0.30}
+
+
+def _sim_logit(p):
+    p = min(max(float(p), 1e-6), 1 - 1e-6)
+    return np.log(p / (1 - p))
 
 
 def count_over(head, mu, line):
@@ -107,6 +131,39 @@ def count_over(head, mu, line):
     if lc is not None:
         return lc.predict_proba(mu.reshape(-1, 1))[:, 1]
     return np.array([nb_over(m, line, head["disp"]) for m in mu])
+
+
+def k_over(art, mu, line):
+    """P(starter K > line): the cal-year per-line logistic when the artifact
+    carries one (2026-07-13 full-surface calibration pass — K lines were the
+    only starter family still priced by the raw NB tail), else nb_over with
+    the cal-year K dispersion (old-artifact guard)."""
+    mu = np.atleast_1d(np.asarray(mu, dtype=float))
+    if len(mu) == 0:
+        return np.array([])
+    lc = (None if "y_so" in NB_PRICED_TARGETS
+          else art.get("k_line_cals", {}).get(line))
+    if lc is not None:
+        return lc.predict_proba(mu.reshape(-1, 1))[:, 1]
+    disp = float(art.get("k_disp", 1.0))
+    return np.array([nb_over(m, line, disp) for m in mu])
+
+
+def total_over(art, mu, line):
+    """P(game total runs > line): cal-year per-line logistic when present
+    (same 2026-07-13 pass — total lines were the worst-calibrated family on
+    the board under the raw NB tail), else nb_over with the cal-year total
+    dispersion. Lines outside TOTAL_LINES (odds-store exotics) always fall
+    back to NB."""
+    mu = np.atleast_1d(np.asarray(mu, dtype=float))
+    if len(mu) == 0:
+        return np.array([])
+    lc = (None if "total_runs" in NB_PRICED_TARGETS
+          else art.get("total_line_cals", {}).get(line))
+    if lc is not None:
+        return lc.predict_proba(mu.reshape(-1, 1))[:, 1]
+    disp = float(art.get("total_disp", 1.0))
+    return np.array([nb_over(m, line, disp) for m in mu])
 
 
 def apply_stack(prop, p_self, donor_ps):
@@ -221,6 +278,7 @@ class Predictor:
         self.recal = recal
         self.offsets = self.art.get("inseason_offsets") or {}
         self.stores = stores or F.Stores(progress=progress)
+        self._slate_sim = None      # lazy PA-sim (False = unavailable)
         tick("indexing names...")
         # Name lookup, broadest to most current: batting AND pitching logs
         # (pitchers never bat post-DH, so batting logs alone miss them),
@@ -449,7 +507,9 @@ class Predictor:
                    # his own TTO decay + the defense playing behind him
                    **s.tto(pid, date),
                    **s.lineup_oaa([p for p, _ in spec[f"{side}_lineup"]],
-                                  season, prefix="own")}
+                                  season, prefix="own"),
+                   # MiLB translated prior, allowed side (2026-07-13)
+                   **s.milb_feats(pid, season, "pit")}
             F.add_pit_trends(row)
             # the starter's own arsenal, K-model view (same helper as training)
             pa = F.pitcher_arsenal_feats(
@@ -473,6 +533,28 @@ class Predictor:
             # weather, TTO decay, K-BB, lineup-collision products
             df = F.add_starter_derived(df)
         return df, pd.DataFrame(meta)
+
+    def _sim_game(self, spec):
+        """Game-level PA-sim outputs for the SIM_BLEND layer, or None
+        (missing artifacts, partial lineups, or a sim failure — every
+        path degrades to the incumbent alone). Loads lazily, once."""
+        if self._slate_sim is False:
+            return None
+        if self._slate_sim is None:
+            try:
+                from pa_serve import SlateSim
+                self._slate_sim = SlateSim()
+            except Exception as e:              # noqa: BLE001
+                print(f"[predict] PA-sim unavailable ({e}); incumbent "
+                      f"game heads alone")
+                self._slate_sim = False
+                return None
+        try:
+            return self._slate_sim.game(spec)
+        except Exception as e:                  # noqa: BLE001
+            print(f"[predict] PA-sim failed for this game ({e}); "
+                  f"incumbent alone")
+            return None
 
     def _starter_sanity(self, pid, spec):
         """Soft check: warn when a listed starter is a bullpen arm on the
@@ -645,12 +727,10 @@ class Predictor:
             columns=["PlayerId", "Team", "Opponent", "Name"])
         starters = starters.copy()
         starters["xK"] = np.round(k_pred, 2)
-        # K P(over): negative binomial shaded by the calibration-year K
-        # dispersion (nb_over falls back to Poisson when k_disp <= ~1)
-        k_disp = float(a.get("k_disp", 1.0))
+        # K P(over): cal-year per-line logistic (k_over), NB/Poisson fallback
         for line in K_LINES:
-            starters[f"P_over_{line}"] = [round(nb_over(l, line, k_disp), 3)
-                                          for l in k_pred]
+            starters[f"P_over_{line}"] = np.round(
+                k_over(a, k_pred, line), 3).tolist()
         # starter count props: outs recorded, walks/hits allowed (mean +
         # NB P(over) with each head's calibration-year dispersion)
         if len(sdf):
@@ -677,7 +757,21 @@ class Predictor:
                                        mu_home, mu_away)[0])
         else:
             p_home = poisson_win(mu_home, mu_away)
-        disp = float(a.get("total_disp", 1.0))
+        # PA-sim game-level blend (Phase 3, 2026-07-13): one sim of this
+        # game; score/total means blend linearly, the winner on logits, at
+        # the fixed SIM_BLEND weights. None -> incumbent alone.
+        sim = self._sim_game(spec) if SIM_BLEND else None
+        if sim is not None:
+            w = SIM_BLEND.get("score", 0.0)
+            mu_away = (1 - w) * float(mu_away) + w * sim["x_away"]
+            mu_home = (1 - w) * float(mu_home) + w * sim["x_home"]
+            w = SIM_BLEND.get("total", 0.0)
+            total_runs = (1 - w) * total_runs + w * sim["x_total"]
+            w = SIM_BLEND.get("winner", 0.0)
+            if w:
+                z = (w * _sim_logit(sim["p_home_win"])
+                     + (1 - w) * _sim_logit(p_home))
+                p_home = float(1 / (1 + np.exp(-z)))
         # Home-win PROBABILITY, not a pick: on the holdout the winner model
         # has no statistically significant edge over always taking the home
         # team, so it's presented as a calibrated number, never a bet.
@@ -688,8 +782,9 @@ class Predictor:
             "exp_total_runs": round(total_runs, 2),
             "home_team": spec["home_team"], "away_team": spec["away_team"],
             "home_win_prob": round(float(p_home), 3),
-            "P_over_runs": {str(l): round(nb_over(total_runs, l, disp), 3)
-                            for l in [6.5, 7.5, 8.5, 9.5, 10.5]},
+            "P_over_runs": {str(l): round(float(total_over(a, total_runs,
+                                                           l)[0]), 3)
+                            for l in TOTAL_LINES},
         }
         return {"batters": batters, "starters": starters, "totals": totals}
 
@@ -879,28 +974,39 @@ GLOSSARY = [
      "it; EV% is the expected profit per $1 at that price. Note flags a rookie "
      "(<50 career games) or a thin one-book price."),
     ("Green cells", "A green cell on the Batter/Pitching/Games sheets is a "
-     "flagged bet — the same pick that appears on the Bets sheet, shown where "
-     "its number lives so you can see it in context."),
+     "flagged OVER bet — the model prices the 'over' side (the stat clears "
+     "the line; for a game it is more runs, or the home team on the Win Prob "
+     "cell) at >=5% EV against the best posted price, shown where its number "
+     "lives so you can see it in context. UNDER bets are just as real but are "
+     "NOT painted here — the displayed cell is the over probability, so a "
+     "green under would point at the wrong number; every under (with its Side) "
+     "is on the Bets sheet, which carries both directions."),
     ("Blue cells", "A light-blue cell is a rank-quality pick: on the model's "
      "own held-out diagnostics (the PROP_RANKINGS playbook, computed fresh "
-     "from the current model — never the workbook file), that column earns "
-     "pick depth from its ODDS-RATIO top-pick lift (base-rate-fair, so "
-     "high-base columns like Hit compete on equal footing), passes a "
-     "calibration-slope sanity check, and this row is one of today's top "
-     "picks for it. Marks are OVER-side picks ranked by probability (the "
-     "side the diagnostics validate), each clearing an informedness floor "
-     "above the column's base rate — never trivial-under tail cells. When "
-     "sportsbook lines exist for the exact market, the sharp consensus "
-     "acts as a sanity veto (a pick the sharp books price at less than "
-     "half the model's number is dropped) — odds inform, they never "
-     "select: value selection stays with the green cells. Depth is "
-     "then capped by the column's composite rankings Score — for O/U "
-     "columns a 50/50 blend of the market row and that line's own row, so "
-     "both PROP_RANKINGS tables get a vote: up to 10 cells for STRONG or "
-     "better, 7 for SOLID, 4 for MARGINAL, 2 below that, across the whole "
-     "slate. Even a mid-tier market can carry a strong pick when used the "
-     "way its diagnostics say. A pick that is BOTH a rank-quality pick and "
-     "a +EV bet shows light purple — the strongest signal on the sheet."),
+     "from the current model — never the workbook file), that column has "
+     "PROVEN selection power and this row is one of today's best picks for "
+     "it. Everything is measured with a confidence interval, not a lucky "
+     "point estimate: the column earns depth only if the LOWER BOUND of its "
+     "odds-ratio top-pick lift clears the bar (base-rate-fair, so a "
+     "high-base column like Hit competes on equal footing) and its "
+     "calibration slope is sane; the depth is then capped by the tier of its "
+     "Score_lo — the day-block-bootstrap LOWER bound of the rankings Score "
+     "(for O/U columns, a 50/50 blend of the market row and that line's own "
+     "row, so both PROP_RANKINGS tables vote): up to 10 cells for STRONG or "
+     "better, 7 for SOLID, 5 for DECENT, 4 for LOW CEILING, 2 below that, "
+     "across the whole slate. So a THIN market (a rare prop, a deep line) "
+     "carries a wide "
+     "interval, a lower Score_lo, and shallower blue — it can no longer buy "
+     "depth on one good season. Marks are OVER-side only, ranked by "
+     "probability, and each must clear an INFORMEDNESS FLOOR over that "
+     "column's own base rate — a likely line is never marked just for being "
+     "likely (K > 3.5, which hits ~67% of the time, needs 77.5%+ to be "
+     "painted; K > 8.5 needs 15.4%+). When sportsbook lines exist for the "
+     "exact market the sharp consensus acts as a VETO only (a pick the sharp "
+     "books price at under half the model's number is dropped) — odds never "
+     "SELECT a blue mark; value selection stays with the green cells. A pick "
+     "that is BOTH a rank-quality pick and a +EV bet shows light purple — "
+     "the strongest signal on the sheet."),
     ("Graded colors", "After the games, Tools/4_grade_results.py re-colors "
      "the workbook from the actual box scores (our own scraped data, "
      "matched by player ID). The grammar: DARK fill + white text = the "
@@ -1142,8 +1248,12 @@ def compute_bets(out, specs, store_path=None, ev_threshold=BET_EV_THRESHOLD):
     its expected profit per 1u >= ev_threshold.
 
     Returns (bets_df, highlights, note):
-      bets_df    - one row per flagged bet, sorted by EV (BET_HEADERS columns)
-      highlights - {sheet_title: [(row_match, display_column), ...]} for _polish
+      bets_df    - one row per flagged bet, sorted by EV (BET_HEADERS columns),
+                   BOTH sides — overs and unders
+      highlights - {sheet_title: [(row_match, display_column), ...]} for _polish,
+                   OVER-side bets only (the displayed cell describes the over,
+                   so under bets are not painted on the grid — they still ship
+                   on the Bets sheet with their Side)
       note       - a human message when there is nothing to show, else None
     """
     store = O.load_odds(store_path or O.DEFAULT_STORE)
@@ -1168,9 +1278,17 @@ def compute_bets(out, specs, store_path=None, ev_threshold=BET_EV_THRESHOLD):
     bets = []
     highlights = defaultdict(list)
 
-    def add(rec, sheet, match, disp_col):
+    def add(rec, sheet, match, disp_col, side):
         bets.append(rec)
-        if disp_col:
+        # Prop-grid cells are painted green for the OVER only — the standard
+        # "this happens" pick that the displayed number describes. Under bets
+        # are real +EV plays and still appear on the Bets sheet (with their
+        # Side), but painting the over-probability cell green for an under is
+        # misleading (a green 11% HR cell that actually means "no HR"). Over
+        # semantics per market: batter/pitcher props = the stat clears the
+        # line; game total = more runs; moneyline = the home team (the side
+        # the displayed Win Prob is for).
+        if disp_col and side == "over":
             highlights[sheet].append((match, disp_col))
 
     single_tag = _game_records(out, specs)[0]["tag"] if specs else ""
@@ -1204,7 +1322,7 @@ def compute_bets(out, specs, store_path=None, ev_threshold=BET_EV_THRESHOLD):
             add(_bet_rec(r["Game"] if b_game else single_tag, r["Name"],
                          r.get("Team", ""), meta["label"], side, meta["line"],
                          p, c, ev, note),
-                "Batter Props", match, disp)
+                "Batter Props", match, disp, side)
 
     # ---- pitcher count-prop lines (join on PlayerId, multi-line) ----
     starters = out["starters"]
@@ -1238,7 +1356,7 @@ def compute_bets(out, specs, store_path=None, ev_threshold=BET_EV_THRESHOLD):
                 add(_bet_rec(r["Game"] if s_game else single_tag, r["Name"],
                              r.get("Team", ""), label, side, line, p, c, ev,
                              "1 book" if c["n_books"] == 1 else ""),
-                    "Pitching Props", match, disp)
+                    "Pitching Props", match, disp, side)
 
     # ---- game markets: totals + moneyline (join on home Team) ----
     games_sheet = "games" in out
@@ -1256,7 +1374,7 @@ def compute_bets(out, specs, store_path=None, ev_threshold=BET_EV_THRESHOLD):
                          line, p, c, ev,
                          "1 book" if c["n_books"] == 1 else ""),
                 "Games", {"Game": g["tag"]},
-                (f"Runs > {lstr}" if games_sheet else None))
+                (f"Runs > {lstr}" if games_sheet else None), side)
         c = cons("h2h", None, "Team").get(g["home"])
         if c is not None:
             p = g["home_win_prob"]
@@ -1267,7 +1385,10 @@ def compute_bets(out, specs, store_path=None, ev_threshold=BET_EV_THRESHOLD):
                              p, c, ev, "winner: no proven edge vs. always-home",
                              side_label=team),
                     "Games", {"Game": g["tag"]},
-                    ("Win Prob" if games_sheet else None))
+                    # Win Prob shows the HOME win %, so it is the "over" cell:
+                    # paint it only when home is the pick; away bets live on
+                    # the Bets sheet only.
+                    ("Win Prob" if games_sheet else None), side)
 
     highlights = dict(highlights)
     if not bets:
@@ -1291,75 +1412,54 @@ def _bets_sheet(bets_df, note):
 # ---------------------------------------------------------------------------
 # Quality marks: light-blue highlights on the picks each column's own
 # held-out diagnostics say are its best use — the prop-rankings playbook
-# applied to today's slate. Data-driven, no odds: a column earns pick depth
-# from its ODDS-RATIO top-10 lift, must pass a calibration-slope sanity
-# gate, the depth is capped by the column's composite rankings Score (the
-# same 0-100 both PROP_RANKINGS tables print — the market row's Score for
-# binaries, market and per-line Scores blended 50/50 for O/U columns, so
-# both tables get a vote). Marks take the OVER side only, ranked by
-# P(over) — that is the side the lift diagnostics validate; ranking
-# "confidence" via max(p, 1-p) marked trivial unders on tail lines (a 1%
-# K > 8.5 cell). Each mark clears an informedness floor over the base
-# rate, and the sharp consensus vetoes picks it prices under half the
-# model's number (see the QUALITY_* constants). Odds-ratio lift (top-pick
-# odds / base odds) instead of raw lift because raw lift caps at 1/base —
-# a 61%-base column like Hit can never exceed 1.64x raw, so a uniform raw
-# threshold structurally shuts out every high-base-rate prop no matter how
-# real its selection power is. Metrics are computed LIVE from the paired
-# snapshots + artifacts via prop_rankings — the same numbers the
-# PROP_RANKINGS workbook prints, but never read from that file (it can go
-# stale; the snapshots refresh with every baseline). Hard cap per column:
-# QUALITY_N_DEEP / QUALITY_N_TOP cells per workbook, slate-wide.
-QUALITY_OR_DEEP, QUALITY_OR_TOP = 2.0, 1.55
-QUALITY_N_DEEP, QUALITY_N_TOP = 10, 5
-QUALITY_SLOPE = (0.80, 1.20)
-# a mark must be an INFORMED pick, not just the column's least-bad row:
-# P(over) must clear min(2 x base rate, base + 10pts). Kills the old
-# failure mode of "quality" marks sitting on 1-5% tail cells.
+# applied to today's slate. Data-driven, no odds for SELECTION.
+#
+# HOW DEEP a column is painted is decided in prop_rankings.quality_playbook()
+# (single source of truth with the rankings workbook, so the two can never
+# disagree) and is CI-AWARE end to end: a column earns depth only when the
+# LOWER BOUND of its odds-ratio top-pick lift clears the floor and its
+# calibration slope is sane, and that depth is then capped by the tier of its
+# Score LOWER BOUND — the day-block-bootstrap Score_lo, not a point estimate.
+# So a thin market (SB, a deep K line) can no longer buy deep blue on a lucky
+# season: its CI is wide, its Score_lo falls, its depth shrinks. Odds-ratio
+# lift (top-pick odds / base odds) rather than raw lift, because raw lift caps
+# at 1/base — a 61%-base column like Hit could never clear a uniform raw bar
+# no matter how real its selection power is.
+#
+# WHICH cells get painted is decided here, on today's slate:
+#   - OVER side only, ranked by P(over) — the side the lift diagnostics
+#     validate. (Ranking "confidence" via max(p, 1-p) used to mark trivial
+#     unders on tail lines, e.g. a 1% K > 8.5 cell.) This also keeps blue
+#     consistent with green, which is likewise over-only on the grids.
+#   - each mark clears an INFORMEDNESS FLOOR over the column's own base rate,
+#     so a high-base line is never marked just for being likely: K > 3.5
+#     (base ~67%) needs P(over) >= 77.5%, K > 8.5 (base ~8%) needs >= 15.4%.
+#   - where the odds store prices the exact market/line, the sharp consensus
+#     is a VETO only (a pick the sharp books price under half the model's
+#     number is dropped). Odds never SELECT a blue mark — that stays green.
+#
+# Diagnostics come LIVE from the paired snapshots + artifacts via
+# prop_rankings (the same numbers PROP_RANKINGS prints, but never read from
+# that xlsx — it goes stale; the snapshots refresh with every baseline). The
+# bootstrap behind Score_lo is disk-cached by snapshot fingerprint, so the
+# first call after a baseline pays ~1 min and every later serve is instant.
 QUALITY_BASE_MULT, QUALITY_BASE_PAD = 2.0, 0.10
 # where the odds store prices the exact market/line, the sharp consensus
 # is a sanity anchor: a pick the sharp books price at less than half the
 # model's number is dropped. Veto only — value SELECTION stays green/+EV.
 QUALITY_FAIR_VETO = 0.5
-# composite-Score depth caps, keyed to prop_rankings' tier cuts:
-# STRONG-or-better columns may take the full lift-proposed depth, SOLID
-# stops at 7, MARGINAL at 4, AVOID at 2 (still visible — the user wants
-# every column's best picks marked, weak ones just shallower).
-QUALITY_SCORE_CAPS = ((42, 10), (28, 7), (15, 4), (float("-inf"), 2))
-# starter sheet column-prefix -> prop_rankings count-head key
-_QUAL_STARTER_KEY = {"pk": "k", "pouts": "outs", "phits": "pha",
-                     "pbb": "pbb", "per": "per"}
-
-
-def _or_lift(m):
-    """Odds-ratio top-10 lift for one year's metrics: the top picks' hit
-    odds over the base odds. Base-rate-fair where raw lift is not."""
-    lift, base = m.get("lift", np.nan), m.get("base", np.nan)
-    if not (np.isfinite(lift) and np.isfinite(base)) or not 0 < base < 1:
-        return np.nan
-    top = min(lift * base, 1 - 1e-6)
-    return (top / (1 - top)) / (base / (1 - base))
-
-
-def _pick_depth(orl, q):
-    """Depth = what selection power (odds-ratio lift) proposes, capped by
-    the composite rankings Score `q`: lift proves the column's TOP picks
-    are real, the Score keeps depth honest about the column overall."""
-    if not (np.isfinite(orl) and np.isfinite(q)) or orl < QUALITY_OR_TOP:
-        return 0
-    n = QUALITY_N_DEEP if orl >= QUALITY_OR_DEEP else QUALITY_N_TOP
-    cap = next(c for s, c in QUALITY_SCORE_CAPS if q >= s)
-    return min(n, cap)
 
 
 def quality_marks(out, specs=None):
     """{sheet: [(row_match, display_column), ...]} of rank-quality picks to
-    paint light blue, from the model's own held-out diagnostics (2025+2026
-    averaged). Marks take the OVER side only (the side the lift metrics
-    validate), must clear the informedness floor above the column's base
-    rate, and — when the odds store prices the exact market/line — survive
-    the sharp-consensus sanity veto. Fails soft: any problem returns no
-    marks (or just no veto), never blocks the workbook."""
+    paint light blue. Depth per column comes from
+    prop_rankings.quality_playbook() — CI-aware (odds-ratio lift LOWER bound
+    + Score_lo tier cap), shared with the rankings workbook. This function
+    only applies it to TODAY's slate: OVER side, top-`depth` by P(over), each
+    clearing the informedness floor over that column's own base rate and — if
+    the odds store prices the exact market/line — the sharp-consensus veto.
+    Fails soft: any problem returns no marks (or just no veto), never blocks
+    the workbook."""
     try:
         # prop_rankings lives in Tools/ (the manually-run toolkit); when
         # this runs under the GUI the Tools dir is already importable, but
@@ -1368,11 +1468,7 @@ def quality_marks(out, specs=None):
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         import prop_rankings as R
-        snap25 = joblib.load(R.ART / "eval_paired_select_2025.joblib")
-        snap26 = joblib.load(R.ART / "eval_paired_2026.joblib")
-        b25, b26 = R.binary_year(snap25), R.binary_year(snap26)
-        c25 = R.count_year(snap25, joblib.load(R.ART / "models_bt.joblib"))
-        c26 = R.count_year(snap26, joblib.load(R.ART / "models.joblib"))
+        book = R.quality_playbook()
     except Exception:
         return {}
     # sharp fair probs for the slate, if odds were scraped (else no veto)
@@ -1401,10 +1497,6 @@ def quality_marks(out, specs=None):
 
     marks = defaultdict(list)
 
-    def slope_ok(*ms):
-        s = np.nanmean([m.get("slope", np.nan) for m in ms])
-        return np.isfinite(s) and QUALITY_SLOPE[0] <= s <= QUALITY_SLOPE[1]
-
     def collect(frame, pcol, n, base, api, line, sheet, disp, has_game):
         """Top-n rows by P(over), each clearing the informedness floor and
         the sharp-line veto; a vetoed row frees its slot for the next."""
@@ -1431,58 +1523,32 @@ def quality_marks(out, specs=None):
     batters = out["batters"]
     b_game = "Game" in batters.columns
     for prop, pcol in PROP_COLS.items():
-        if prop not in b25 or prop not in b26 or pcol not in batters.columns:
-            continue
-        m25, m26 = b25[prop], b26[prop]
-        try:  # a binary IS its own line — market row and Lines row agree
-            q = R.final_score(R.binary_score(m25), R.binary_score(m26))
-        except Exception:
-            q = np.nan
-        n = _pick_depth(np.nanmean([_or_lift(m25), _or_lift(m26)]), q)
-        if not n or not slope_ok(m25, m26):
+        pb = book.get("binary", {}).get(prop)
+        if pb is None or not pb["depth"] or pcol not in batters.columns:
             continue
         meta = O.PROP_MARKET.get(prop)
-        collect(batters, pcol, n,
-                np.nanmean([m25.get("base", np.nan),
-                            m26.get("base", np.nan)]),
+        collect(batters, pcol, pb["depth"], pb["base"],
                 meta["api"] if meta else None,
                 meta["line"] if meta else None,
                 "Batter Props", BAT_HEADERS.get(pcol, pcol), b_game)
 
-    # ---- pitcher O/U lines: per-line depth, leaning the bias direction ----
+    # ---- pitcher O/U lines: per-line depth from the playbook ----
     starters = out["starters"]
     s_game = "Game" in starters.columns
     for skey, prefix in STARTER_PREFIX.items():
-        key = _QUAL_STARTER_KEY.get(skey)
-        if key is None or key not in c25 or key not in c26:
+        ckey = R.QUAL_STARTER_KEY.get(skey)
+        if ckey is None:
             continue
-        f25, f26 = c25[key], c26[key]
-        try:  # the family's market-table Score, one half of the blend
-            fam_q = R.final_score(R.count_score(f25), R.count_score(f26))
-        except Exception:
-            fam_q = np.nan
         meta = O.STARTER_MARKET.get(skey)
         for col in [c for c in starters.columns if c.startswith(prefix)]:
             try:
                 line = float(col[len(prefix):])
             except ValueError:
                 continue
-            l25 = f25.get("lines", {}).get(line)
-            l26 = f26.get("lines", {}).get(line)
-            if l25 is None or l26 is None:
+            pb = book.get("pitch_line", {}).get((ckey, line))
+            if pb is None or not pb["depth"]:
                 continue
-            try:  # this line's own Lines-sheet Score, the other half
-                line_q = R.final_score(R.binary_score(l25),
-                                       R.binary_score(l26))
-            except Exception:
-                line_q = np.nan
-            q = np.nanmean([fam_q, line_q])
-            n = _pick_depth(np.nanmean([_or_lift(l25), _or_lift(l26)]), q)
-            if not n or not slope_ok(l25, l26):
-                continue
-            collect(starters, col, n,
-                    np.nanmean([l25.get("base", np.nan),
-                                l26.get("base", np.nan)]),
+            collect(starters, col, pb["depth"], pb["base"],
                     meta["api"] if meta else None, line,
                     "Pitching Props", _over_display(col), s_game)
     return dict(marks)

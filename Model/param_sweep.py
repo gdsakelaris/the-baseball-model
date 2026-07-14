@@ -1,10 +1,14 @@
 """Per-head hyperparameter sweep via day-block cross-validation.
 
-Only `run` and `hrr2` carry tuned LightGBM params today (train.PROP_PARAMS);
-every other binary shares LGB_CLS and every count head shares LGB_POIS. This
-script sweeps a small, curated ladder of regularization/capacity profiles for
-each head and picks the best by an HONEST out-of-fold score, so the choice is
-made on generalization, not on the 2025 test year.
+Per-head LightGBM overrides live in train.PROP_PARAMS (12 heads carry the
+2026-07-10 LGBM-only winners); every other binary shares LGB_CLS, count
+heads share LGB_POIS, the winner LGB_WIN. NOTE: this sweep's "default"
+profile is the GLOBAL base (LGB_CLS/LGB_POIS/LGB_WIN), NOT the head's
+current PROP_PARAMS entry — recommendations REPLACE PROP_PARAMS wholesale
+(a "default" recommendation means drop the head's override). The script
+sweeps a small, curated ladder of regularization/capacity profiles for
+each head and picks the best by an HONEST out-of-fold score, so the choice
+is made on generalization, not on the 2025 test year.
 
 Design (why it doesn't leak the verification set):
   * The selection suite is train<=2023 / cal 2024 / TEST 2025. This sweep touches

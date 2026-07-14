@@ -34,3 +34,4 @@ venv/
 # local tooling
 .claude/
 cache/
+.vscode

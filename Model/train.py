@@ -73,9 +73,13 @@ LGB_POIS = dict(n_estimators=2000, learning_rate=0.03, num_leaves=63,
 # The winner model trains on ~10k games, not ~190k batter-games: batter-scale
 # capacity overfit instantly (v1 early-stopped at 26 trees, test AUC 0.52).
 # Small trees + heavy regularization let boosting actually accumulate signal.
+# mcs 150->300 / rl 10->6 = the 2026-07-13 families-aware sweep's "reg_up"
+# (its largest gated win: ensemble OOF logloss -0.0018, AUC +0.0014); the
+# XGB/CB winner members keep their standing params — the sweep fit them
+# as-is, so the recommendation already accounts for them.
 LGB_WIN = dict(n_estimators=3000, learning_rate=0.02, num_leaves=15,
-               min_child_samples=150, subsample=0.9, subsample_freq=1,
-               colsample_bytree=0.7, reg_lambda=10.0, objective="binary",
+               min_child_samples=300, subsample=0.9, subsample_freq=1,
+               colsample_bytree=0.7, reg_lambda=6.0, objective="binary",
                verbose=-1)
 
 # Monotonic constraints (HR only): physics/domain says HR probability can
@@ -169,36 +173,21 @@ CB_WIN = dict(iterations=3000, learning_rate=0.02, depth=4,
               verbose=0, allow_writing_files=False,
               task_type="GPU", devices="0")
 
-# Per-prop LightGBM overrides from the day-block-CV sweep (param_sweep.py,
-# 2026-07-10): 4-fold GroupKFold-by-day on Season<=2024 (2025 stays the
-# untouched paired-eval set), scored by OOF logloss with an AUC gate. Under the
-# CURRENT dev regime (LGBM-only, 268-col superset) 12 of 14 binaries prefer LESS
-# capacity than LGB_CLS (nl=127); run/single and every count head + winner kept
-# default (not listed → LGB_CLS/LGB_POIS/LGB_WIN). CV logloss gains: tb2 -.0017,
-# bb -.0014, hrr2 -.0014, bk2 -.0010, sb -.0009, hr/rbi -.0008, hits2/bk -.0005,
-# double/hit/hrr3 -.0006.
-# SHIP CAVEAT: this is LGBM-ONLY + CV-logloss tuning. The OLD full-ensemble grid
-# found the OPPOSITE for hit/tb2/rbi (more reg tilted their ECE UP), and run took
-# its now-dropped heavy override for ECE not logloss — so RE-CONFIRM these with
-# the XGB/CatBoost families back on + the balanced net-vote (esp. ECE) at ship.
-_REG_MED = dict(num_leaves=63, min_child_samples=160)
+# Per-prop LightGBM overrides — RE-SWEPT 2026-07-13 with param_sweep
+# --ensemble (XGB+CatBoost members fit per fold, the ENSEMBLE's OOF
+# scored — the honest objective now that the bag ships). Verdict: with
+# the families averaging away variance, the 07-10 LGBM-only overrides
+# are mostly REDUNDANT — 19/23 heads returned to the global bases (the
+# 07-10 SHIP CAVEAT anticipated exactly this). Survivors cleared the
+# gates against the raw base on the current 559-col/2015+ regime: run
+# -.0005, hits2 -.0005, hrr2 -.0004 OOF logloss (winner's move lives in
+# LGB_WIN above). Heads not listed = LGB_CLS/LGB_POIS.
 _REG_MED2 = dict(num_leaves=63, min_child_samples=300,
                  colsample_bytree=0.7, reg_lambda=6.0)
-_REG_HEAVY = dict(num_leaves=31, min_child_samples=300,
-                  colsample_bytree=0.7, reg_lambda=6.0)
 PROP_PARAMS = {
-    "hr":     dict(LGB_CLS, **_REG_HEAVY),
-    "rbi":    dict(LGB_CLS, **_REG_MED2),
-    "hit":    dict(LGB_CLS, **_REG_MED2),
-    "hits2":  dict(LGB_CLS, **_REG_MED),
-    "tb2":    dict(LGB_CLS, **_REG_MED2),
-    "double": dict(LGB_CLS, **_REG_MED2),
-    "bb":     dict(LGB_CLS, **_REG_MED2),
-    "sb":     dict(LGB_CLS, min_child_samples=160),        # reg_light
-    "bk":     dict(LGB_CLS, **_REG_MED),
-    "bk2":    dict(LGB_CLS, **_REG_HEAVY),
-    "hrr2":   dict(LGB_CLS, **_REG_HEAVY),
-    "hrr3":   dict(LGB_CLS, **_REG_MED),
+    "run":    dict(LGB_CLS, min_child_samples=160),        # reg_light
+    "hits2":  dict(LGB_CLS, **_REG_MED2),
+    "hrr2":   dict(LGB_CLS, **_REG_MED2),
 }
 
 # Per-prop feature routing. The batter frame carries a SUPERSET of columns;
@@ -469,6 +458,19 @@ PROPS = {
 # repopulate this dict to retry with different donors.
 STACK_DONORS = {}
 
+# Calibrator choice per head. Default = cal-year isotonic. PLATT_CAL heads
+# use features.PlattCal (2-parameter logistic on the blended logit) instead:
+# isotonic's free-form steps memorize thin-support extremes and serve
+# overconfident tails on the holdout (worst where support is thinnest:
+# winner ~2.4k cal games slope .68, double weakest signal slope .76, both
+# years). Applied to the FULL binary surface per the no-pre-declared-targets
+# policy (2026-07-13); the calibrator is per-head local, so the paired read
+# verdicts each head's swap independently — keep Platt where it wins, restore
+# isotonic per head where it harms. Platt is monotone, so ranking/AUC are
+# untouched by construction everywhere; the read is pure pricing. Count
+# heads are unaffected (their per-line calibrators are already logistic).
+PLATT_CAL = set(PROPS) | {"winner"}
+
 # Count-style props: Poisson LGBM (starter-K pattern) + per-line logistic
 # calibrators fit on the calibration year (predict.count_over). Batter heads
 # exist for the MEANS (xSO, xHRR) — their half-point lines are priced by the
@@ -582,8 +584,13 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
         if ll < best_ll:
             best_ll, best_w = ll, w
 
-    iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-4, y_max=1 - 1e-4)
-    iso.fit(best_w * g_cal + (1 - best_w) * l_cal, yca)
+    s_cal = best_w * g_cal + (1 - best_w) * l_cal
+    if name.lower() in PLATT_CAL:
+        iso = F.PlattCal().fit(s_cal, yca)
+    else:
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-4,
+                                 y_max=1 - 1e-4)
+        iso.fit(s_cal, yca)
 
     g_te = model.predict_proba(te[cols])[:, 1]
     l_te = lr.predict_proba(te[num_cols])[:, 1]
@@ -682,8 +689,12 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
     s_cal = w1 * g_cal + (1 - w1) * l_cal
     pois_cal = np.where(np.isfinite(pois_cal), pois_cal, s_cal)
     w_ml = 1.0 if mu_map is None else pick_w(s_cal, pois_cal)
-    iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-4, y_max=1 - 1e-4)
-    iso.fit(w_ml * s_cal + (1 - w_ml) * pois_cal, yca)
+    if "winner" in PLATT_CAL:
+        iso = F.PlattCal().fit(w_ml * s_cal + (1 - w_ml) * pois_cal, yca)
+    else:
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-4,
+                                 y_max=1 - 1e-4)
+        iso.fit(w_ml * s_cal + (1 - w_ml) * pois_cal, yca)
 
     g_te, l_te, pois_te = parts(te)
     s_te = w1 * g_te + (1 - w1) * l_te
@@ -782,6 +793,24 @@ def naive_hr_baseline(te, slot_pa, league_hr_pa):
     return 1 - (1 - rate) ** exp_pa
 
 
+def fit_line_cals(mu_cal, y_cal, lines):
+    """Per-line logistic calibrators on the CAL year: P(over line) as a
+    direct monotone 2-parameter function of mu. One shared implementation
+    for every count-family (count heads, starter K, game total) so the
+    pricing mechanism is identical across the whole line surface. Degenerate
+    lines (single-class cal year) are skipped — consumers fall back to
+    nb_over."""
+    mu_cal = np.asarray(mu_cal, dtype=float)
+    y_cal = np.asarray(y_cal, dtype=float)
+    out = {}
+    for line in lines:
+        over = (y_cal > line).astype(int)
+        if 0 < over.mean() < 1:
+            out[line] = LogisticRegression(C=1e6, max_iter=1000).fit(
+                mu_cal.reshape(-1, 1), over)
+    return out
+
+
 def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     """Fit the full model suite (8 batter props, starter K, team runs, winner)
     on one train/cal/test split. Returns (artifacts, metrics) with the same
@@ -869,6 +898,13 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     log(f"starter-K dispersion ({cal_yr} cal year): {k_disp:.2f} "
         f"(Poisson assumes 1.00)")
 
+    # K per-line calibrators (2026-07-13 full-surface calibration pass): K
+    # lines were the only starter family still priced by the raw NB/Poisson
+    # tail; they now get the same cal-year logistic pricing as outs/pbb/pha
+    # (predict.k_over consumes, NB fallback for old artifacts).
+    from predict import K_LINES, TOTAL_LINES
+    k_line_cals = fit_line_cals(kp_cal, sf_cal["y_so"].to_numpy(), K_LINES)
+
     # count heads (starter-K pattern): Poisson mean + cal-year dispersion
     count_models = {}
     for cname, ch in COUNT_HEADS.items():
@@ -914,12 +950,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         # variance (bounded by PA / the manager's hook), so nb_over — which
         # can only widen, never narrow — misprices their tails; consumers
         # fall back to nb_over only when a line has no calibrator.
-        line_cals = {}
-        for line in ch["lines"]:
-            over = (y_cal > line).astype(int)
-            if 0 < over.mean() < 1:
-                line_cals[line] = LogisticRegression(
-                    C=1e6, max_iter=1000).fit(mu_cal.reshape(-1, 1), over)
+        line_cals = fit_line_cals(mu_cal, y_cal, ch["lines"])
         metrics[f"{cname}_{test_yr}"] = m
         count_models[cname] = {"model": model, "cols": cols, "disp": disp,
                                "lines": ch["lines"], "line_cals": line_cals,
@@ -948,6 +979,13 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     log(f"game-total dispersion ({cal_yr} cal year): {total_disp:.2f} "
         f"(Poisson assumes 1.00)")
 
+    # total-runs per-line calibrators (same 2026-07-13 pass): the raw NB
+    # tail left the total lines the worst-calibrated family on the board
+    # (slopes .84-.95); per-game cal-year mu vs actual totals, predict.
+    # total_over consumes with NB fallback for exotic odds-store lines.
+    total_line_cals = fit_line_cals(per_game["mu"].to_numpy(),
+                                    per_game["y"].to_numpy(), TOTAL_LINES)
+
     # dedicated winner model, blended with the runs-model Poisson win prob.
     # The suite's own runs model never trains on cal_yr (it early-stops
     # there), so the mu_map is safe for the blend-weight fit — see the
@@ -971,6 +1009,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         "props": props,
         "k_model": k_model, "team_runs_model": team_runs_model,
         "win_model": win_model, "total_disp": total_disp, "k_disp": k_disp,
+        "k_line_cals": k_line_cals, "total_line_cals": total_line_cals,
         "count_models": count_models,
         # st_cols = the K model's column contract (predict/evaluate feed it
         # to k_model); the count heads carry their own cols. k_cols drops

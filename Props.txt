@@ -1,0 +1,73 @@
+Batter Props:
+
+    HR
+    xTB
+    2+ TB
+    Hit
+    2+ Hits
+    RBI
+    Run
+    xHRR
+    H+R+RBI 2+
+    H+R+RBI 3+
+    SB
+    xSO
+    K
+    2+ K
+    Single
+    Double
+    BB
+
+Pitcher Props:
+
+    xK
+    K > 3.5
+    K > 4.5
+    K > 5.5
+    K > 6.5
+    K > 7.5
+    K > 8.5
+    xER
+    ER > 1.5
+    ER > 2.5
+    ER > 3.5
+    ER > 4.5
+    xOuts
+    Outs > 14.5
+    Outs > 15.5
+    Outs > 16.5
+    Outs > 17.5
+    Outs > 18.5
+    xHits
+    Hits > 3.5
+    Hits > 4.5
+    Hits > 5.5
+    Hits > 6.5
+    xBB
+    BB > 0.5
+    BB > 1.5
+    BB > 2.5
+
+Game Props:
+
+    Winner
+    Win Prob
+    Away Score
+    Home Score
+    Total Runs
+    Runs > 6.5
+    Runs > 7.5
+    Runs > 8.5
+    Runs > 9.5
+    Runs > 10.5
+    Lineup HRs
+
+
+Proposed (NOT shipped — batched for a future retrain):
+
+    3+ K
+    3+ TB
+    4+ TB
+    H+R+RBI 4+
+    Triple
+    ...

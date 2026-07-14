@@ -165,6 +165,55 @@ class CatSafe:
         return self.model.predict_proba(self._clean(X))
 
 
+class PlattCal:
+    """Two-parameter Platt map for heads where cal-year isotonic overfits:
+    p_out = sigmoid(a * logit(p_in) + b), fit by Newton on cal-year log loss.
+    Isotonic's free-form steps memorize the thin-support extremes (winner has
+    ~2.4k cal games; double is the weakest batter signal), which serves
+    overconfident tails on the holdout — a 2-parameter sigmoid can only
+    shrink or shift, and a > 0 keeps it monotone so ranking/AUC are identical
+    by construction. Same predict() contract as IsotonicRegression, so it
+    drops in under the artifact's "iso" key. Lives here so pickles resolve
+    from any entry point (MeanBag precedent)."""
+
+    def __init__(self, lo=1e-4):
+        self.a, self.b, self.lo = 1.0, 0.0, lo
+
+    @staticmethod
+    def _logit(p):
+        p = np.clip(np.asarray(p, dtype=float), 1e-6, 1 - 1e-6)
+        return np.log(p / (1 - p))
+
+    def fit(self, p, y, iters=25, ridge=1e-4):
+        z = self._logit(p)
+        y = np.asarray(y, dtype=float)
+        a, b = 1.0, 0.0
+        for _ in range(iters):
+            q = 1.0 / (1.0 + np.exp(-(a * z + b)))
+            w = np.clip(q * (1 - q), 1e-6, None)
+            g0 = float(((q - y) * z).sum())        # d(nll)/da
+            g1 = float((q - y).sum())              # d(nll)/db
+            h00 = float((w * z * z).sum()) + ridge
+            h01 = float((w * z).sum())
+            h11 = float(w.sum()) + ridge
+            det = h00 * h11 - h01 * h01
+            if not np.isfinite(det) or det <= 0:
+                break
+            da = (h11 * g0 - h01 * g1) / det
+            db = (h00 * g1 - h01 * g0) / det
+            a -= da
+            b -= db
+            if abs(da) < 1e-9 and abs(db) < 1e-9:
+                break
+        self.a = float(np.clip(a, 1e-3, 10.0))     # a > 0: stay monotone
+        self.b = float(np.clip(b, -10.0, 10.0))
+        return self
+
+    def predict(self, p):
+        q = 1.0 / (1.0 + np.exp(-(self.a * self._logit(p) + self.b)))
+        return np.clip(q, self.lo, 1 - self.lo)
+
+
 def inf_to_nan(X):
     """sklearn rejects inf (from divide-by-zero rates); make them missing so
     the imputer handles them. Lives here (not in train's __main__) so a
@@ -330,6 +379,16 @@ def load_raw():
             weather[c] = pd.to_numeric(weather[c], errors="coerce")
     umps = _opt("mlb_umpires.csv", parse_dates=["Date"])
     bat_track = _opt("mlb_bat_tracking.csv")   # bat speed / swing (2023+ only)
+    # MiLB translated priors — a joblib artifact, not a CSV; optional like
+    # bip so a tree without the PA-sim program still builds frames
+    milb_path = Path(__file__).resolve().parent / "artifacts" / \
+        "milb_priors.joblib"
+    if milb_path.exists():
+        import joblib as _jl
+        _m = _jl.load(milb_path)
+        milb = {k: _m[k]["serve"] for k in ("bat", "pit")}
+    else:
+        milb = None
 
     # 7-inning doubleheaders (2020-21) bias per-game rates; flag to exclude.
     outs_per_game = gp.groupby("GamePk")["Outs"].sum()
@@ -348,7 +407,7 @@ def load_raw():
                bat_season=bat_season, pit_season=pit_season, bip=bip,
                pdp=pdp, pdb=pdb, sprint=sprint, oaa=oaa,
                oaa_players=oaa_players, baserun=baserun, weather=weather,
-               umps=umps, bat_track=bat_track)
+               umps=umps, bat_track=bat_track, milb=milb)
     raw["gb"] = annotate_opp_hand(gb, gp, hands)
     return raw
 
@@ -1405,6 +1464,24 @@ BAT_TRACK_REN = {"BatSpeed": "bt_speed", "SwingLength": "bt_swlen",
                  "HardSwingRate": "bt_hardsw", "BlastPerSwing": "bt_blast"}
 BAT_TRACK_COLS = list(BAT_TRACK_REN.values())
 
+# MiLB level-translated priors (Model/milb_priors.py artifact): pooled
+# AAA/AA/A+ line translated to MLB-equivalent PA-class rates + evidence
+# mass (log1p of the decayed PA sum). Serve rows are keyed by the season
+# they SERVE and only use MiLB seasons <= Season-1, so the join is
+# EXACT-season (not _merge_prior_season). OUT is dropped (rates sum to 1).
+MILB_REN = {"t_K": "k", "t_BB": "bb", "t_HBP": "hbp", "t_1B": "b1",
+            "t_2B": "b2", "t_3B": "b3", "t_HR": "hr"}
+MILB_BAT_COLS = [f"milb_{v}" for v in MILB_REN.values()] + ["milb_n"]
+MILB_PIT_COLS = [f"pmilb_{v}" for v in MILB_REN.values()] + ["pmilb_n"]
+
+
+def _milb_cols(serve, prefix):
+    """Feature-named copy of a milb_priors serve table."""
+    t = serve.rename(columns={k: f"{prefix}{v}" for k, v in MILB_REN.items()})
+    t[f"{prefix}n"] = np.log1p(t["n_eff"])
+    cols = [f"{prefix}{v}" for v in MILB_REN.values()] + [f"{prefix}n"]
+    return t[["PlayerId", "Season", *cols]]
+
 # stolen-base success rate: prior ~ league SB% ; small K (fast to stabilize)
 SB_SUCC_PRIOR, SB_SUCC_K = 0.75, 20.0
 TSB_STOP_PRIOR = 1.0 - SB_SUCC_PRIOR  # league share of attempts cut down
@@ -2304,6 +2381,16 @@ def build_batter_frame(raw):
     else:
         df["bat_brr"] = np.nan
         df["bat_brr_xb"] = np.nan
+    # MiLB translated prior (2026-07-13, Phase-3 rider): the batter's
+    # level-translated minors line — genuinely new information for
+    # thin-MLB-history rows; NaN for everyone without kept-level minors
+    # in the 3-season window (GBM imputes). Exact-season join by design.
+    if raw.get("milb") is not None:
+        df = df.merge(_milb_cols(raw["milb"]["bat"], "milb_"),
+                      on=["PlayerId", "Season"], how="left")
+    else:
+        for c in MILB_BAT_COLS:
+            df[c] = np.nan
 
     # prior-season GO/AO (fly-ball tendency) and pitcher SB control
     df = _merge_prior_season(df, _batter_season_table(raw["bat_season"]),
@@ -2679,6 +2766,11 @@ def batter_feature_cols():
              "xpa_x_rbi", "xpa_x_r",
              "mix_k", "mix_bb", "mix_hr", "mix_hit", "mix_gb", "mix_ld",
              "rbi_conv", "run_opp", "park_x_hr", "p_kbb",
+             # MiLB translated priors (2026-07-13 Phase-3 rider): the
+             # batter's minors line translated to MLB-equivalent rates +
+             # evidence mass — new info for thin-history rows; selection
+             # votes per head as usual
+             *MILB_BAT_COLS,
              # v3 scrape schema (2026-07-12): whiff splits by pitch class +
              # first-pitch aggression (batter), usage mix / shadow-band
              # command / first-pitch strike (opposing starter), and the
@@ -2867,6 +2959,16 @@ def build_starts_frame(raw, batter_frame=None):
         for c in ("own_def_p_oaa", "own_def_p_if", "own_def_p_of"):
             st[c] = np.nan
 
+    # MiLB translated prior, pitcher-allowed side (2026-07-13 rider) —
+    # same semantics as the batter block (exact-season join, NaN without
+    # kept-level minors in window)
+    if raw.get("milb") is not None:
+        st = st.merge(_milb_cols(raw["milb"]["pit"], "pmilb_"),
+                      on=["PlayerId", "Season"], how="left")
+    else:
+        for c in MILB_PIT_COLS:
+            st[c] = np.nan
+
     # shared derived features (weather, TTO decay, K-BB, lineup collisions)
     # — the serving path calls the same function (parity)
     st = add_starter_derived(st)
@@ -2927,6 +3029,8 @@ def starts_feature_cols():
             # ball behavior, velo spread, release-point scatter
             "pd_tswh_d", "pd_f32z_d", "pd_f32b_d",
             "pd_fbv_sd", "pd_rel_sd",
+            # MiLB translated prior, allowed side (2026-07-13 rider)
+            *MILB_PIT_COLS,
             "DayNight", "Condition", "WindDir"]
 
 
@@ -3333,6 +3437,13 @@ class Stores:
             r["sprint"].drop_duplicates(["PlayerId", "Year"], keep="last")
             .set_index(["PlayerId", "Year"])
             if r.get("sprint") is not None else None)
+        # MiLB translated priors: serve rows are keyed by the season they
+        # serve (exact-season lookup, not _prior_val's Year+lag)
+        self.milb = ({k: _milb_cols(r["milb"][k],
+                                    "milb_" if k == "bat" else "pmilb_")
+                      .set_index(["PlayerId", "Season"])
+                      for k in ("bat", "pit")}
+                     if r.get("milb") is not None else None)
         self.bat_track_prior = (
             r["bat_track"].drop_duplicates(["PlayerId", "Year"], keep="last")
             .set_index(["PlayerId", "Year"])
@@ -3563,6 +3674,8 @@ class Stores:
             out[feat] = (self._prior_val(self.bat_track_prior, pid, season,
                                          raw_c)
                          if self.bat_track_prior is not None else np.nan)
+        # MiLB translated prior (exact-season serve-table lookup)
+        out.update(self.milb_feats(pid, season, "bat"))
 
         q = self.hrq[(self.hrq["BatterId"] == pid) & (self.hrq["Date"] < date)]
         if len(q):
@@ -3821,6 +3934,20 @@ class Stores:
         if self.oaa_prior is None:
             return np.nan
         return self._prior_val(self.oaa_prior, team, season, "OAA_per162")
+
+    def milb_feats(self, pid, season, kind):
+        """MiLB translated-prior features for one batter ("bat") or
+        starter ("pit"), exact-season lookup — parity with the frames'
+        exact-season merge."""
+        cols = MILB_BAT_COLS if kind == "bat" else MILB_PIT_COLS
+        if self.milb is not None:
+            t = self.milb[kind]
+            try:
+                row = t.loc[(int(pid), int(season))]
+                return {c: float(row[c]) for c in cols}
+            except KeyError:
+                pass
+        return {c: np.nan for c in cols}
 
     def ump_feats(self, ump_id, date):
         """HP-umpire zone tendency (K%/BB% per batter faced) over his games

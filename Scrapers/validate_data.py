@@ -206,6 +206,24 @@ SPECS = {
         key=["GamePk"], max_dup_frac=0.0, date_col="Date", fresh_days=6,
         numeric=[("GamePk", 0.0)],              # HpUmpId may be NaN (data gaps)
         min_rows=12000, shrink_tol=0.999, season_col="Season"),
+    # MiLB season aggregates (Scrapers/scrape_milb.py; consumed by
+    # Model/milb_priors.py). No date column — season-grain files; the
+    # season_col check is the history guard, and completed seasons come from
+    # the stored cache so shrinkage means a bad current-season fetch.
+    "milb_batting.csv": dict(
+        required_cols=["Year", "SportId", "Level", "League", "PlayerId",
+                       "Name", "Age", "PA", "AB", "H", "2B", "3B", "HR",
+                       "BB", "HBP", "SO"],
+        key=["Year", "SportId", "PlayerId"], max_dup_frac=0.001,
+        numeric=[("PlayerId", 0.0), ("PA", 0.001)],
+        min_rows=80000, shrink_tol=0.999, shrink_abs=25, season_col="Year"),
+    "milb_pitching.csv": dict(
+        required_cols=["Year", "SportId", "Level", "League", "PlayerId",
+                       "Name", "Age", "TBF", "H", "2B", "3B", "HR",
+                       "BB", "HBP", "SO"],
+        key=["Year", "SportId", "PlayerId"], max_dup_frac=0.001,
+        numeric=[("PlayerId", 0.0), ("TBF", 0.001)],
+        min_rows=90000, shrink_tol=0.999, shrink_abs=25, season_col="Year"),
     "mlb_odds.csv": dict(                       # append-only store
         required_cols=["Date", "GamePk", "PlayerId", "Market", "Line",
                        "OverPrice", "UnderPrice", "Book", "CapturedAt"],

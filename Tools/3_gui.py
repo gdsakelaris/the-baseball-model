@@ -14,7 +14,7 @@ import re
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
 import pandas as pd
 
@@ -52,11 +52,14 @@ def load_logo(height=64):
 
 
 class App(tk.Tk):
+    # opening size — wide enough for the full top form row through the HP
+    # Umpire box (col 10). _fit_minsize() raises it if the built form needs more.
+    START_W, START_H = 1220, 920
+
     def __init__(self):
         super().__init__()
         self.title("MLB Prediction Engine")
-        # wide enough for the full top form row through the HP Umpire box (col 10)
-        self.geometry("1220x920")
+        self.geometry(f"{self.START_W}x{self.START_H}")
         self._apply_style()
         self.pred = None
         self.pools = {}      # abbrev -> dict(batters={label: pid}, pitchers={...})
@@ -67,11 +70,26 @@ class App(tk.Tk):
         self._load_msg = "starting..."
         self._pred_state = None
         self._build_layout()
+        self._fit_minsize()
         self.status.set("Loading data and models...")
         threading.Thread(target=self._load, daemon=True).start()
         self.after(200, self._poll_load)
 
     # ------------------------------------------------------------ setup
+
+    def _fit_minsize(self):
+        """The window itself no longer scrolls, so it must never be shrinkable
+        past what the fixed form needs — otherwise content would be silently
+        clipped with no scrollbar to reach it. Measure the built layout once and
+        pin that as the floor (clamped to the screen, so a small display still
+        gets a usable window). Everything above the floor goes to the slate, the
+        one elastic region, which scrolls internally."""
+        self.update_idletasks()
+        need_w = min(self.winfo_reqwidth(), self.winfo_screenwidth())
+        need_h = min(self.winfo_reqheight(), self.winfo_screenheight())
+        self.minsize(need_w, need_h)
+        self.geometry(f"{max(self.START_W, need_w)}x"
+                      f"{max(self.START_H, need_h)}")
 
     def _load(self):
         try:
@@ -282,30 +300,6 @@ class App(tk.Tk):
         self.option_add("*TCombobox*Listbox.selectBackground", RED)
         self.option_add("*TCombobox*Listbox.selectForeground", WHITE)
 
-    def _make_vscroll(self, parent):
-        """Return an inner frame inside a vertically scrollable canvas.
-        The mouse wheel scrolls it only while the pointer is over it, so it
-        never fights the scrollbars in the results windows."""
-        container = tk.Frame(parent, bg=NAVY)
-        canvas = tk.Canvas(container, bg=NAVY, highlightthickness=0)
-        vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        inner = tk.Frame(canvas, bg=NAVY)
-        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>",
-                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>",
-                    lambda e: canvas.itemconfigure(win_id, width=e.width))
-
-        def _wheel(e):
-            canvas.yview_scroll(int(-e.delta / 120), "units")
-        container.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _wheel))
-        container.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
-        container.pack(side="top", fill="both", expand=True)
-        return inner
-
     @staticmethod
     def _tree_with_scroll(parent, **kw):
         """A Treeview paired with a vertical scrollbar in its own frame."""
@@ -332,7 +326,7 @@ class App(tk.Tk):
                   "calibrated probabilities with fair odds",
                   style="Sub.TLabel").pack(anchor="w")
 
-        # fixed bottom bar first, so it stays pinned below the scrollable body
+        # fixed bottom bar first, so it stays pinned below the body
         bottom = ttk.Frame(self)
         bottom.pack(side="bottom", fill="x", padx=8, pady=6)
         self.btn_predict = ttk.Button(bottom, text="Predict", state="disabled",
@@ -342,7 +336,15 @@ class App(tk.Tk):
         ttk.Label(bottom, textvariable=self.status, wraplength=820,
                   justify="left").pack(side="left", padx=12)
 
-        body = self._make_vscroll(self)
+        # The window itself does NOT scroll — the form is always fully visible
+        # and the Predict bar stays pinned. The SLATE is the only scrolling
+        # region (its listbox owns the one scrollbar): it is also the only part
+        # that grows without bound, so it absorbs the spare vertical space and
+        # scrolls internally once the games outrun it. _fit_minsize() below
+        # then forbids shrinking the window past the fixed form, which is what
+        # makes dropping the global scrollbar safe (nothing can be clipped).
+        body = ttk.Frame(self)
+        body.pack(side="top", fill="both", expand=True)
 
         top = ttk.LabelFrame(body, text="Game")
         top.pack(fill="x", padx=8, pady=6)
@@ -418,10 +420,12 @@ class App(tk.Tk):
             b.grid(row=10, column=1, sticky="e", pady=4)
             self.side_widgets[side] = w
 
+        # the ONLY scrolling region in the app: it takes every spare pixel
+        # (fill both / expand) and scrolls internally once the games outgrow it
         slate_f = ttk.LabelFrame(body, text="Slate (click a game to load it "
                                             "into the form and edit; Predict "
                                             "runs them all)")
-        slate_f.pack(fill="x", padx=8, pady=4)
+        slate_f.pack(fill="both", expand=True, padx=8, pady=4)
         self.slate = []
         self._loaded_idx = None   # slate index currently loaded into the form
         # exportselection=False: keep the row selected while the user edits
@@ -429,7 +433,8 @@ class App(tk.Tk):
         self.lb_slate = tk.Listbox(slate_f, height=8, bg=WHITE, fg=NAVY,
                                    selectbackground=RED, exportselection=False,
                                    font=("Segoe UI", 10))
-        self.lb_slate.pack(side="left", fill="x", expand=True, padx=(6, 0), pady=4)
+        self.lb_slate.pack(side="left", fill="both", expand=True,
+                           padx=(6, 0), pady=4)
         self.lb_slate.bind("<<ListboxSelect>>", self._slate_selected)
         lb_vsb = ttk.Scrollbar(slate_f, orient="vertical",
                                command=self.lb_slate.yview)

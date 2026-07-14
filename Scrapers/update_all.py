@@ -39,6 +39,7 @@ import validate_data as V
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 MODEL_TRAIN = SCRIPTS_DIR.parent / "Model" / "train.py"
+PROP_RANKINGS = SCRIPTS_DIR.parent / "Tools" / "prop_rankings.py"
 DATA_DIR = V.DATA_DIR
 BACKUP_DIR = V.BACKUP_DIR
 # machine-readable outcome of the last run; the GUI reads this at startup
@@ -68,6 +69,7 @@ JOB_FILES = {
         ["mlb_pitch_arsenals_batters.csv"],
     "scrape_pitching_stats.py": ["mlb_pitching_stats.csv"],
     "scrape_rosters.py": ["mlb_rosters.csv"],
+    "scrape_milb.py": ["milb_batting.csv", "milb_pitching.csv"],
     "scrape_statcast.py": ["mlb_statcast_bip.csv"],
     "scrape_pitches.py": ["mlb_pitch_daily_pitchers.csv",
                           "mlb_pitch_daily_batters.csv"],
@@ -209,6 +211,7 @@ def main():
             # guarantees this only ever snapshots SHIPPED code.
             if ok:
                 ev = str(MODEL_TRAIN.parent / "evaluate_deep.py")
+                base_ok = True
                 for label, cmd in (
                         ("evaluate_deep.py --set-baseline",
                          [ev, "--set-baseline"]),
@@ -217,6 +220,26 @@ def main():
                     ok, took = run(label, cmd)
                     results.append((label, ok, took))
                     all_ok = all_ok and ok
+                    base_ok = base_ok and ok
+                # Warm the prop-rankings bootstrap cache. The two baselines
+                # above rewrote the paired snapshots, and quality_boot.joblib
+                # is keyed by THEIR fingerprints — so it is now stale, and
+                # without this the first predict of the day would stall ~60s
+                # rebuilding it before it could paint blue marks. Needs BOTH
+                # baselines (the cache key spans both years).
+                #
+                # Deliberately NON-FATAL: it does not touch all_ok. A cold
+                # cache costs one slow serve, never correctness, and a perf
+                # nicety must not be able to turn the nightly run FAILED.
+                if base_ok:
+                    w_ok, took = run("prop_rankings.py --warm-cache",
+                                     [str(PROP_RANKINGS), "--warm-cache"])
+                    results.append(("warm quality-bootstrap cache "
+                                    "(non-fatal)", w_ok, took))
+                    if not w_ok:
+                        print(">>> cache warm failed — harmless: the first "
+                              "predict of the day just rebuilds it itself",
+                              file=sys.stderr, flush=True)
         else:
             print("\nskipping retrain: at least one scraper failed or "
                   "produced invalid data", file=sys.stderr)

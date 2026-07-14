@@ -10,6 +10,10 @@ PlayerId-exact, so no third-party box-score scraping or name matching:
   stat occurred + cell was a light-green +EV bet     -> darker green
   stat occurred + cell was light purple (blue + green) -> dark purple
 
+On the Bets sheet, every WINNING bet has its whole row painted solid dark
+green (#00B050); losing / not-yet-settled rows keep the light board. Under
+bets settle too (the row carries its Side). Re-running is idempotent.
+
 Every graded cell answers the same literal question: DID THE STAT OCCUR.
 Binary batter columns light up if the event happened (the HR cell if he
 homered); O/U line columns light up if the OVER hit (K > 8.5 only if he
@@ -73,6 +77,26 @@ MISSED = {
     GREEN:  PatternFill("solid", fgColor="C4D79B"),
     PURPLE: PatternFill("solid", fgColor="D2C8DE"),
 }
+
+# Bets sheet: a WINNING bet paints its whole row solid dark green; a losing
+# or not-yet-settled row shows the light-green board. #00B050 is the same
+# dark green a HIT +EV cell gets on the prop grids — one "good outcome" hue.
+BETS_WIN = PatternFill("solid", fgColor="00B050")      # winning bet row
+BETS_BOARD = PatternFill("solid", fgColor="E7F3E2")    # the light-green board
+BET_PCT_COLS = {"Model %", "Mkt %", "Edge", "EV%"}     # bold over 50% (as _polish)
+# Bets 'Prop' label (odds.PROP_MARKET / STARTER_MARKET) -> how to settle it.
+# Batter labels map to the BAT_EVENTS check above; pitcher labels prefix a
+# "... o<line>" string and settle off the row's own Line column.
+BET_LABEL_TO_BATCOL = {
+    "1+ HR": "HR", "1+ hit": "Hit", "2+ hits": "2+ Hits",
+    "2+ total bases": "2+ TB", "run scored": "Run", "1+ RBI": "RBI",
+    "1+ walk": "BB", "stolen base": "SB", "1+ single": "Single",
+    "1+ double": "Double", "1+ batter K": "K", "2+ batter K": "2+ K",
+    "2+ H+R+RBI": "H+R+RBI 2+", "3+ H+R+RBI": "H+R+RBI 3+",
+}
+BET_PIT_STAT = {"pitcher strikeouts": "SO", "pitcher outs": "outs",
+                "pitcher hits allowed": "H", "pitcher walks": "BB",
+                "pitcher earned runs": "ER"}
 
 # batter columns -> did the event happen, from the day's summed line
 BAT_EVENTS = {
@@ -217,6 +241,115 @@ def _mark(cell, occurred):
 
 
 
+def _name_pid(ws):
+    """{Name: pid} and {(Game, Name): pid} from a graded prop sheet, so a
+    Bets row (which carries the player NAME, not the ID) can be settled off
+    the same PlayerId-keyed actuals the prop grids use. (Game, Name) wins
+    when present; plain Name is the single-game fallback."""
+    hidx = {str(c.value): j for j, c in enumerate(ws[1], start=1)}
+    byname, bygame = {}, {}
+    if "Name" not in hidx or "ID" not in hidx:
+        return byname, bygame
+    gj = hidx.get("Game")
+    for i in range(2, ws.max_row + 1):
+        nm = ws.cell(row=i, column=hidx["Name"]).value
+        pid = ws.cell(row=i, column=hidx["ID"]).value
+        if nm is None or pid is None:
+            continue
+        byname[str(nm)] = int(pid)
+        if gj is not None:
+            bygame[(str(ws.cell(row=i, column=gj).value), str(nm))] = int(pid)
+    return byname, bygame
+
+
+def _settle_bet(row, batters, starters, games, bat_pid, pit_pid):
+    """Did this Bets row win? True / False / None (can't settle yet: no
+    final, unmatched player, or a doubleheader game bet we can't pin to one
+    game from an EV-sorted board). `row` is {header: value}; `bat_pid` /
+    `pit_pid` resolve a (game, name) to a PlayerId."""
+    game, prop = str(row.get("Game", "")), str(row.get("Prop", ""))
+    side, line = str(row.get("Side", "")), row.get("Line")
+
+    def _line():
+        try:
+            return float(line)
+        except (TypeError, ValueError):
+            return None
+
+    if prop == "moneyline":                     # Side is the picked team
+        finals = games.get(game, [])
+        return finals[0]["winner"] == side if len(finals) == 1 else None
+    if prop == "total runs":
+        finals, ln = games.get(game, []), _line()
+        if len(finals) != 1 or ln is None:
+            return None
+        occ = finals[0]["total"] > ln
+        return occ if side == "Over" else not occ
+    if prop in BET_LABEL_TO_BATCOL:
+        pid = bat_pid(game, row.get("Player"))
+        s = batters.get(pid) if pid is not None else None
+        if s is None:
+            return None
+        occ = bool(BAT_EVENTS[BET_LABEL_TO_BATCOL[prop]](s))
+        return occ if side == "Over" else not occ
+    for lbl, stat in BET_PIT_STAT.items():      # "pitcher strikeouts o6.5"
+        if prop.startswith(lbl):
+            pid = pit_pid(game, row.get("Player"))
+            a = starters.get(pid) if pid is not None else None
+            ln = _line()
+            if a is None or ln is None:
+                return None
+            occ = a[stat] > ln
+            return occ if side == "Over" else not occ
+    return None
+
+
+def _grade_bets(wb, batters, starters, games, stats):
+    """Paint every WINNING bet row solid #00B050; reset the rest to the
+    light board first, so re-running is idempotent (the Bets sheet is
+    skipped by _ungrade for exactly this reason). No-op on the 'no bets'
+    note sheet (it has no Game/Prop/Side columns)."""
+    if "Bets" not in wb.sheetnames:
+        return
+    ws = wb["Bets"]
+    headers = [str(c.value) for c in ws[1]]
+    hidx = {h: j for j, h in enumerate(headers, start=1)}
+    if not {"Game", "Prop", "Side"} <= set(hidx):
+        return                                  # the "No bets to show." note
+    bp_name, bp_game = (_name_pid(wb["Batter Props"])
+                        if "Batter Props" in wb.sheetnames else ({}, {}))
+    pp_name, pp_game = (_name_pid(wb["Pitching Props"])
+                        if "Pitching Props" in wb.sheetnames else ({}, {}))
+
+    def bat_pid(g, nm):
+        nm = None if nm is None else str(nm)
+        return bp_game.get((g, nm)) or bp_name.get(nm)
+
+    def pit_pid(g, nm):
+        nm = None if nm is None else str(nm)
+        return pp_game.get((g, nm)) or pp_name.get(nm)
+
+    ncol = ws.max_column
+    for i in range(2, ws.max_row + 1):
+        # reset to board (undo any earlier win paint) — bold-over-50% on the
+        # percent columns, matching predict._polish
+        for j, h in enumerate(headers, start=1):
+            c = ws.cell(row=i, column=j)
+            c.fill = BETS_BOARD
+            v = c.value
+            c.font = Font(bold=(h in BET_PCT_COLS
+                                and isinstance(v, (int, float)) and v > 0.5))
+        row = {h: ws.cell(row=i, column=hidx[h]).value for h in headers}
+        won = _settle_bet(row, batters, starters, games, bat_pid, pit_pid)
+        stats["bets"] = stats.get("bets", 0) + 1
+        if won:
+            stats["bets_won"] = stats.get("bets_won", 0) + 1
+            for j in range(1, ncol + 1):
+                c = ws.cell(row=i, column=j)
+                c.fill = BETS_WIN
+                c.font = Font(bold=True, color="FFFFFF")
+
+
 def grade(path):
     m = re.match(r"(\d{4}-\d{2}-\d{2})", Path(path).stem)
     if not m:
@@ -229,6 +362,8 @@ def grade(path):
 
     wb = openpyxl.load_workbook(path)
     for ws in wb.worksheets:
+        if ws.title == "Bets":
+            continue          # graded by _grade_bets (whole-row), not _ungrade
         _ungrade(ws)
     stats = {"cells": 0, "hit": 0, "missing_rows": 0}
 
@@ -306,6 +441,8 @@ def grade(path):
                 stats["hit"] += occ
                 _mark(ws.cell(row=i, column=j), occ)
 
+    _grade_bets(wb, batters, starters, games, stats)
+
     try:
         wb.save(path)
     except PermissionError:
@@ -329,6 +466,9 @@ def main():
     print(f"graded {path}")
     print(f"  {date}: {s['cells']:,} cells checked, {s['hit']:,} stats "
           f"occurred (now yellow / dark blue / dark green / dark purple)")
+    if s.get("bets"):
+        print(f"  Bets sheet: {s.get('bets_won', 0)} of {s['bets']} bet(s) "
+              f"won -> row highlighted solid green")
     if s["missing_rows"]:
         print(f"  {s['missing_rows']} row(s) had no final box score yet — "
               f"run  python Scrapers/scrape_gamelogs_3F.py  and grade again")
