@@ -241,7 +241,10 @@ Per the specs in FEATURE_BACKLOG Part 3 #H1/#H3/#H4/#H5/#H6:
    plan (engine work in `pa_engine`/`pa_sim`, then `pa_backtest` regrade).
 2. **Steal-layer blend re-sweep** — currently w=0; re-sweep after hazard v2 + the new sb
    context lands (`pa_blend`). **Battery-modulation rider (user-adjudicated 2026-07-15,
-   backlog #35):** BUILD the steal-table battery modulation HERE, before this re-sweep —
+   backlog #35): BUILT 2026-07-15 AM, ahead of schedule (user call; spec + verification
+   in FEATURE_BACKLOG #35 — STEAL_BATTERY flag, shared helpers both consumers, cache
+   updated). The re-sweep below grades it.** Original spec:
+   BUILD the steal-table battery modulation HERE, before this re-sweep —
    scale each slate's attempt rate by the opposing starter's steal permissiveness
    (`psb_sb27` vs prior-season league, the sb_chain_env centering) and success rate by
    the opposing team's battery stop value (`CSAA_att` / era-centered pop from

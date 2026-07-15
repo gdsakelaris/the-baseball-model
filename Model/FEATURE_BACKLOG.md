@@ -348,10 +348,17 @@ line originally kept catcher framing/pop-time SHELVED per #13's serving-input pr
     the catcher half sb_chain_env never had); starts frame
     `own_cat_frame/csaa/pop` + `frame_x_edge` (framing × edge share) + `run_cat_x`
     (lu_sb × catcher stop — run_game_x's catcher half). PA-sim steal-layer battery
-    modulation: **USER-ADJUDICATED 2026-07-15 → Phase-3 rider** (build with the steal
-    blend re-sweep, NOT before — sb blend w=0 today and an engine change mid-forward-
-    record would shift served game heads through stale SIM_BLEND weights; full spec
-    lives at FINISH_PLAN Phase-3 step 2).
+    modulation: **BUILT 2026-07-15 AM (user moved it ahead of the Phase-3 re-sweep —
+    the "engine change mid-forward-record" concern was moot with serving guard-down
+    pre-chain, and the post-chain re-sweep re-fits SIM_BLEND weights regardless).**
+    `pa_sim.build_battery_tables` (prior-season, Season=Year+1, TEAM_RENAMES-aliased):
+    attempt rate × opposing starter's SB/27 EB-shrunk (BATT_K_UNITS=10 27-out units)
+    ratioed to lg SB/27; success rate − opposing team's CSAA_att (2015 NaN imputed
+    via the build-time-fitted CSAA~PopC OLS slope, −0.80/s), clips 0.6–1.7 / ±0.12.
+    Shared `battery_context`/`battery_adjust` applied identically in pa_backtest +
+    pa_serve (engine contract untouched); `STEAL_BATTERY=False` = exact runner-only
+    revert; unit-tested (TestBattery); banked into pa_sim_tables.joblib. Graded at
+    the Phase-3 steal re-sweep.
 
 ---
 

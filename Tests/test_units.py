@@ -283,5 +283,61 @@ class TestTrainEval(unittest.TestCase):
         self.assertEqual(self.E.verdict("k_dispersion", 1.30, 1.05), "better")
 
 
+class TestBattery(unittest.TestCase):
+    """Steal-layer battery modulation (#35) — the pure application math;
+    the table BUILD reads Data CSVs and is exercised by the Phase-3
+    regrade, not here."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.PS = importlib.import_module("pa_sim")
+        cls.tables = {"ratio": {(2025, 123): 1.40},
+                      "stop": {(2025, "NYY"): 0.05}}
+
+    def test_context_lookup_and_fallbacks(self):
+        PS = self.PS
+        self.assertEqual(PS.battery_context(self.tables, 2025, "NYY", 123),
+                         (1.40, 0.05))
+        # missing starter / team / both -> neutral halves
+        self.assertEqual(PS.battery_context(self.tables, 2025, "NYY", 999),
+                         (1.0, 0.05))
+        self.assertEqual(PS.battery_context(self.tables, 2025, "BOS", 123),
+                         (1.40, 0.0))
+        self.assertEqual(PS.battery_context(self.tables, 2024, "NYY", 123),
+                         (1.0, 0.0))
+        # stale cache (no battery tables) and unparseable starter -> neutral
+        self.assertEqual(PS.battery_context(None, 2025, "NYY", 123),
+                         (1.0, 0.0))
+        self.assertEqual(PS.battery_context(self.tables, 2025, "NYY",
+                                            float("nan")),
+                         (1.0, 0.0))
+
+    def test_flag_off_is_exact_noop(self):
+        PS = self.PS
+        old = PS.STEAL_BATTERY
+        try:
+            PS.STEAL_BATTERY = False
+            self.assertEqual(PS.battery_context(self.tables, 2025, "NYY",
+                                                123), (1.0, 0.0))
+        finally:
+            PS.STEAL_BATTERY = old
+        att = np.full(9, 0.08)
+        succ = np.full(9, 0.78)
+        a2, s2 = PS.battery_adjust(att, succ, 1.0, 0.0)
+        np.testing.assert_allclose(a2, att)
+        np.testing.assert_allclose(s2, succ)
+
+    def test_adjust_math_and_clips(self):
+        PS = self.PS
+        att = np.array([0.05, 0.30, 0.50])
+        succ = np.array([0.40, 0.78, 0.96])
+        a2, s2 = PS.battery_adjust(att, succ, 1.5, 0.05)
+        np.testing.assert_allclose(a2, [0.075, 0.45, 0.6])   # cap 0.6
+        np.testing.assert_allclose(s2, [0.35, 0.73, 0.91])   # floor 0.35
+        a3, s3 = PS.battery_adjust(att, succ, 0.6, -0.05)
+        np.testing.assert_allclose(a3, [0.03, 0.18, 0.30])
+        np.testing.assert_allclose(s3, [0.45, 0.83, 0.98])   # ceil 0.98
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

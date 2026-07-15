@@ -20,8 +20,8 @@ import numpy as np
 import pandas as pd
 
 from pa_model import FRAME_CACHE
-from pa_sim import (STEAL_K_ATT, STEAL_K_SUCC, hazard_slice_v2,
-                    starter_exp_bf)
+from pa_sim import (STEAL_K_ATT, STEAL_K_SUCC, battery_adjust,
+                    battery_context, hazard_slice_v2, starter_exp_bf)
 from pa_engine import MatchupFeatures, PackedTransitions, GameSim
 
 HERE = Path(__file__).resolve().parent
@@ -106,7 +106,12 @@ class SlateSim:
                     self.mf.rows(**common, vs_pen=False)[self.cols]),
                 "pen": self.model.predict_proba(
                     self.mf.rows(**common, vs_pen=True)[self.cols])}
-            steal[side] = self._steal(lus[side], date)
+            # battery modulation (#35): opp_team's battery + starter face
+            # this batting side — same helper as the backtest path
+            r_att, stp = battery_context(self.tables.get("battery"),
+                                         season, opp_team, pitcher)
+            steal[side] = battery_adjust(*self._steal(lus[side], date),
+                                         ratio=r_att, stop=stp)
 
         bf_t = self.tables["starter_bf"]
         # hazard v2 (2026-07-14): per-starter absolute-BF slice of the

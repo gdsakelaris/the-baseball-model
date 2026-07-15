@@ -30,6 +30,7 @@ from pa_model import CLASSES, EB_K, FRAME_CACHE, _asof_counts, _cq_shrink, \
     _cq_tables, _eb, _league_trailing
 from milb_priors import build_all as milb_build, prior_blend
 from pa_sim import (STEAL_K_ATT, STEAL_K_SUCC, TIER_EDGES,  # noqa: F401
+                    battery_adjust, battery_context,
                     hazard_slice_v2, starter_exp_bf)
 from pa_engine import PackedTransitions, GameSim, CI, TB_OF  # noqa: F401
 
@@ -326,7 +327,13 @@ def run_backtest(year, n_sims, part_i=0, part_k=1):
                 break
             idx = rows.index
             sides[side] = {"st": p_st[idx], "pen": p_pen[idx]}
-            steal[side] = (steal_att[idx], steal_succ[idx])
+            # battery modulation (#35): rows["starter"]/["Opponent"] are
+            # this batting side's OPPOSING starter and fielding team
+            r_att, stp = battery_context(tables.get("battery"), season,
+                                         rows["Opponent"].iat[0],
+                                         rows["starter"].iat[0])
+            steal[side] = battery_adjust(steal_att[idx], steal_succ[idx],
+                                         r_att, stp)
             meta[side] = rows
         if not okay:
             continue

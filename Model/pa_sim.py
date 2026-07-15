@@ -425,6 +425,100 @@ def build_steal_tables():
     return {"players": cum, "league": lg}
 
 
+# ---------------------------------------- battery modulation (#35) ------
+# 2026-07-15 Phase-3 rider (user-adjudicated): runner-only steal tables
+# were the likely reason sim-sb graded flat — every battery in the league
+# looked identical. Prior-season, season-grain context (serving-safe like
+# team OAA / the opp_cat_* features: tonight's catcher is unknown, the
+# team battery is):
+#   * ATTEMPT rate x the opposing STARTER's steal permissiveness — his
+#     prior-season SB allowed per 27 outs, EB-shrunk, RATIOED to the same
+#     prior-season league SB/27 that sb_chain_env centers on (regime
+#     drift — the 2023 rules shift — must not flip it era-wide);
+#   * SUCCESS rate shifted by the opposing TEAM's battery stop value —
+#     CSAA_att (caught-stealing above average per attempt: already in
+#     success-probability units, sign flipped at application). 2015's
+#     all-NaN CSAA is imputed from era-centered pop time (PopC, the
+#     opp_cat_popc centering) via the cross-year OLS slope fit at build
+#     time — no stale hardcoded constant.
+# Runner-side tables stay the base; the battery scales them per matchup.
+# STEAL_BATTERY = False restores runner-only behavior exactly.
+STEAL_BATTERY = True
+BATT_K_UNITS = 10.0          # EB prior for starter SB/27, in 27-out units
+                             # (10 ~ 90 IP: half-season starters keep
+                             # their signal, call-ups shrink to league)
+BATT_ATT_CLIP = (0.6, 1.7)   # attempt-ratio guardrails
+BATT_STOP_CLIP = 0.12        # |success shift| cap (~CSAA_att p99)
+
+
+def build_battery_tables():
+    """{'stop': {(Season, Team): succ shift}, 'ratio': {(Season,
+    StarterId): attempt multiplier}, 'pop_slope': fitted CSAA~PopC
+    slope} — see the section comment. Season = Year + 1 (prior-season
+    serving); franchise renames aliased like every other team-keyed
+    prior-season file."""
+    from features import TEAM_RENAMES, ip_to_outs
+
+    cat = pd.read_csv(HERE.parent / "Data" / "mlb_catchers_team.csv",
+                      encoding="utf-8-sig")
+    cat["PopC"] = (cat["PopTime"]
+                   - cat.groupby("Year")["PopTime"].transform("mean"))
+    ok = cat["CSAA_att"].notna() & cat["PopC"].notna()
+    slope = float(np.polyfit(cat.loc[ok, "PopC"],
+                             cat.loc[ok, "CSAA_att"], 1)[0])
+    cat["stop"] = cat["CSAA_att"].where(ok, slope * cat["PopC"])
+    for new, old in TEAM_RENAMES.items():
+        rows = cat[cat["Team"] == old].copy()
+        if len(rows):
+            rows["Team"] = new
+            cat = pd.concat([cat, rows], ignore_index=True)
+    stop = {(int(y) + 1, str(t)): float(np.clip(v, -BATT_STOP_CLIP,
+                                                BATT_STOP_CLIP))
+            for y, t, v in cat[["Year", "Team", "stop"]]
+            .itertuples(index=False) if np.isfinite(v)}
+
+    ps = pd.read_csv(HERE.parent / "Data" / "mlb_pitching_stats.csv",
+                     encoding="utf-8-sig",
+                     usecols=["Year", "PlayerId", "IP", "SB"])
+    for c in ("Year", "PlayerId", "SB"):
+        ps[c] = pd.to_numeric(ps[c], errors="coerce")
+    ps["u27"] = ip_to_outs(ps["IP"]) / 27.0
+    ps = ps.dropna(subset=["Year", "PlayerId"])
+    g = ps.groupby(["PlayerId", "Year"])[["SB", "u27"]].sum()
+    lg = ps.groupby("Year")[["SB", "u27"]].sum()
+    g = g.join((lg["SB"] / lg["u27"]).rename("lg27"), on="Year")
+    shrunk = (g["SB"] + BATT_K_UNITS * g["lg27"]) \
+        / (g["u27"] + BATT_K_UNITS)
+    ratio = (shrunk / g["lg27"]).clip(*BATT_ATT_CLIP)
+    ratio_d = {(int(y) + 1, int(p)): float(r)
+               for (p, y), r in ratio.items() if np.isfinite(r)}
+    log(f"battery tables: {len(stop)} team-seasons (pop slope "
+        f"{slope:+.3f}/s), {len(ratio_d):,} pitcher-season ratios")
+    return {"stop": stop, "ratio": ratio_d, "pop_slope": slope}
+
+
+def battery_context(battery, season, def_team, starter_id):
+    """(attempt ratio, success shift) for a batting side facing
+    def_team's battery + starter_id. Neutral when the flag is off, the
+    tables are missing (stale cache), or the matchup has no prior-season
+    row (rookie starter / expansion-era gap)."""
+    if not STEAL_BATTERY or not battery:
+        return 1.0, 0.0
+    try:
+        sid = int(starter_id)
+    except (TypeError, ValueError):
+        return 1.0, 0.0
+    return (battery["ratio"].get((int(season), sid), 1.0),
+            battery["stop"].get((int(season), str(def_team)), 0.0))
+
+
+def battery_adjust(att, succ, ratio, stop):
+    """Scale one side's 9-slot (att, succ) steal arrays by its matchup
+    context — the engine's array contract is unchanged."""
+    return (np.clip(np.asarray(att) * ratio, 0.0, 0.6),
+            np.clip(np.asarray(succ) - stop, 0.35, 0.98))
+
+
 # ----------------------------------------------------------- build ------
 
 def build_all(force=False):
@@ -435,6 +529,7 @@ def build_all(force=False):
               "starter_bf": bf_tables,
               "pen_rates": build_pen_rates(),
               "steals": build_steal_tables(),
+              "battery": build_battery_tables(),
               "starter_hazard": build_starter_hazard(bf_tables),
               "starter_hazard_v2": build_starter_hazard_v2(bf_tables)}
     joblib.dump(tables, TABLE_CACHE, compress=3)
