@@ -72,6 +72,17 @@ XPA_K = 10.0             # games of shrinkage for xpa_bat
 # ---------------------------------------------------------------- loading
 
 
+# Bag members are combined in LOG-ODDS space (2026-07-15, tier-1 mechanics
+# batch): a probability-space mean systematically pulls toward 0.5 and blunts
+# confident members; the geometric-mean-renormalized form below equals the
+# logit mean for binary heads. Regression bags (predict) stay arithmetic —
+# Poisson/Tweedie means are already on the right scale. Flip to False to
+# restore the incumbent probability-space mean bit-for-bit. NOTE: the flag is
+# read at PREDICT time, so it also governs previously pickled MeanBag
+# artifacts loaded under this code.
+BAG_LOGIT_MEAN = True
+
+
 class MeanBag:
     """Average-prediction ensemble over seed-bagged LightGBM models: quacks
     like a single model (predict / predict_proba / best_iteration_) so every
@@ -86,7 +97,13 @@ class MeanBag:
         return np.mean([m.predict(X) for m in self.models], axis=0)
 
     def predict_proba(self, X):
-        return np.mean([m.predict_proba(X) for m in self.models], axis=0)
+        ps = [m.predict_proba(X) for m in self.models]
+        if not BAG_LOGIT_MEAN:
+            return np.mean(ps, axis=0)
+        # exp(mean log p) renormalized == sigmoid(mean logit) for 2 classes
+        g = np.exp(np.mean([np.log(np.clip(p, 1e-7, None)) for p in ps],
+                           axis=0))
+        return g / g.sum(axis=1, keepdims=True)
 
 
 class InfSafe:
@@ -213,6 +230,138 @@ class PlattCal:
     def predict(self, p):
         q = 1.0 / (1.0 + np.exp(-(self.a * self._logit(p) + self.b)))
         return np.clip(q, self.lo, 1 - self.lo)
+
+
+class BetaCal:
+    """Three-parameter beta calibration (Kull et al. 2017): p_out =
+    sigmoid(a*ln(p) - b*ln(1-p) + c) with a, b >= 0 (monotone). Sits between
+    PlattCal (2 params — cannot fix asymmetric miscalibration around the
+    base rate) and isotonic (free-form — memorizes thin cal-year tails).
+    Fit by ridge-IRLS on cal-year log loss; a negative a or b coefficient is
+    dropped and the reduced model refit (the betacal-package convention).
+    Same predict() contract as IsotonicRegression/PlattCal, so it drops in
+    under the artifact's "iso" key. Lives here so pickles resolve from any
+    entry point (MeanBag precedent)."""
+
+    def __init__(self, lo=1e-4):
+        self.a, self.b, self.c, self.lo = 1.0, 1.0, 0.0, lo
+
+    @staticmethod
+    def _uv(p):
+        p = np.clip(np.asarray(p, dtype=float), 1e-6, 1 - 1e-6)
+        return np.log(p), -np.log(1 - p)
+
+    @staticmethod
+    def _irls(Z, y, iters=50, ridge=1e-4):
+        beta = np.zeros(Z.shape[1])
+        for _ in range(iters):
+            q = 1.0 / (1.0 + np.exp(-(Z @ beta)))
+            w = np.clip(q * (1 - q), 1e-6, None)
+            g = Z.T @ (q - y) + ridge * beta
+            H = (Z * w[:, None]).T @ Z + ridge * np.eye(Z.shape[1])
+            try:
+                step = np.linalg.solve(H, g)
+            except np.linalg.LinAlgError:
+                break
+            beta -= step
+            if np.abs(step).max() < 1e-9:
+                break
+        return beta
+
+    def fit(self, p, y):
+        u, v = self._uv(p)
+        y = np.asarray(y, dtype=float)
+        ones = np.ones_like(u)
+        beta = self._irls(np.column_stack([u, v, ones]), y)
+        a, b, c = beta
+        if a < 0:                      # drop ln(p), refit on -ln(1-p) alone
+            b, c = self._irls(np.column_stack([v, ones]), y)
+            a = 0.0
+        if b < 0:                      # drop -ln(1-p), refit on ln(p) alone
+            a, c = self._irls(np.column_stack([u, ones]), y)
+            b = 0.0
+        if a < 0:                      # both dropped: intercept-only fallback
+            a, (c,) = 0.0, self._irls(ones[:, None], y)
+        self.a = float(np.clip(a, 0.0, 20.0))
+        self.b = float(np.clip(b, 0.0, 20.0))
+        self.c = float(np.clip(c, -20.0, 20.0))
+        return self
+
+    def predict(self, p):
+        u, v = self._uv(p)
+        q = 1.0 / (1.0 + np.exp(-(self.a * u + self.b * v + self.c)))
+        return np.clip(q, self.lo, 1 - self.lo)
+
+
+def blend(a, b, w, space="logit"):
+    """w*a + (1-w)*b in probability space, or the same convex combination of
+    LOG-ODDS mapped back through a sigmoid (space="logit"). With a Platt/beta
+    calibrator downstream, the logit-space grid over w is exactly the full
+    2-member logistic stack: sigmoid(s*(w*z_a + (1-w)*z_b) + t) has free
+    per-member coefficients s*w and s*(1-w). Shared by train.py (fit side)
+    and predict.py (serve side) so the artifact's blend_space key means the
+    same thing everywhere."""
+    if space == "logit":
+        pa = np.clip(np.asarray(a, dtype=float), 1e-6, 1 - 1e-6)
+        pb = np.clip(np.asarray(b, dtype=float), 1e-6, 1 - 1e-6)
+        z = w * np.log(pa / (1 - pa)) + (1 - w) * np.log(pb / (1 - pb))
+        return 1.0 / (1.0 + np.exp(-z))
+    return w * a + (1 - w) * b
+
+
+# Threshold-ladder coherence (2026-07-15, tier-1 mechanics batch): these
+# binary heads price nested events, so their calibrated probabilities must
+# not cross (P(3+ TB) > P(2+ TB) is incoherent to a bettor and noise to the
+# metrics). enforce_ladders projects each ladder onto monotone order per row
+# (exact L2 pool-adjacent-violators), applied identically by predict.py
+# serving and evaluate_deep's build_binary_results so eval verdicts the same
+# prices that serve. WITHIN-family chains only; cross-family implications
+# (single<=hit, hr<=tb4, ...) form a DAG and stay a backlog extension.
+PROP_LADDERS = [("hit", "hits2"), ("tb2", "tb3", "tb4"),
+                ("bk", "bk2", "bk3"), ("hrr2", "hrr3", "hrr4"),
+                ("run", "run2"), ("rbi", "rbi2")]
+
+
+def _pav2(a, b):
+    """Project (a, b) onto a >= b, per element (L2: pool to the mean)."""
+    m = b > a
+    avg = 0.5 * (a + b)
+    return np.where(m, avg, a), np.where(m, avg, b)
+
+
+def _pav3(a, b, c):
+    """Exact per-element L2 isotonic projection onto a >= b >= c (PAV with
+    left-to-right block pooling and cascade, vectorized over the 4 cases)."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    c = np.asarray(c, dtype=float)
+    merged_ab = b > a
+    m1 = np.where(merged_ab, 0.5 * (a + b), a)     # first-block mean
+    m2 = 0.5 * (b + c)
+    m_all = (a + b + c) / 3.0
+    pool_all = (merged_ab & (c > m1)) | (~merged_ab & (c > b) & (m2 > a))
+    merged_bc = ~merged_ab & (c > b) & ~pool_all
+    out_a = np.where(pool_all, m_all, m1)
+    out_b = np.where(pool_all, m_all,
+                     np.where(merged_ab, m1, np.where(merged_bc, m2, b)))
+    out_c = np.where(pool_all, m_all, np.where(merged_bc, m2, c))
+    return out_a, out_b, out_c
+
+
+def enforce_ladders(p):
+    """Make the threshold-ladder heads coherent: for each ladder in
+    PROP_LADDERS whose heads are present in dict p (name -> probability
+    array), replace their entries with the monotone L2 projection. Heads a
+    ladder is missing (old artifacts) are skipped; the surviving prefix
+    still projects. Returns p (mutated in place)."""
+    for ladder in PROP_LADDERS:
+        names = [n for n in ladder if n in p]
+        if len(names) == 2:
+            p[names[0]], p[names[1]] = _pav2(p[names[0]], p[names[1]])
+        elif len(names) == 3:
+            p[names[0]], p[names[1]], p[names[2]] = _pav3(
+                p[names[0]], p[names[1]], p[names[2]])
+    return p
 
 
 def inf_to_nan(X):

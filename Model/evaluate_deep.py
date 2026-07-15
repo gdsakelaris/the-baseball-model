@@ -1074,16 +1074,20 @@ def handle_baseline(summary, year, set_baseline, select=False):
 
 def build_binary_results(art, bf_y):
     """Per-row calibrated probabilities for every binary prop, in serving order
-    (raw pass first so stacked props see their donors) — the `results` dict the
-    print sections and the paired test both consume."""
+    (raw pass first so stacked props see their donors, then the threshold-
+    ladder coherence projection predict.py also applies) — the `results` dict
+    the print sections and the paired test both consume."""
     X = prep(bf_y, art["bat_cols"], art["cat_levels"])
     raw_p = {name: predict_prop(art["props"][name], X)
              for name in PROPS if name in art["props"]}
+    fin_p = {name: apply_stack(art["props"][name], raw_p[name], raw_p)
+             for name in raw_p}
+    fin_p = F.enforce_ladders(fin_p)   # serve/eval identical prices
     results = {}
     for name, (target, _desc) in PROPS.items():
-        if name not in raw_p:  # artifact predates this prop
+        if name not in fin_p:  # artifact predates this prop
             continue
-        p = apply_stack(art["props"][name], raw_p[name], raw_p)
+        p = fin_p[name]
         y = bf_y[target].to_numpy()
         base = np.full_like(p, y.mean())
         results[name] = {

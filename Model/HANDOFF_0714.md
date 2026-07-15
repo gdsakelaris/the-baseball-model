@@ -151,3 +151,47 @@ together.
   `finish-plan`, `accept-bar-and-keep-policy` (v4), `no-unilateral-declines`,
   `true-test-doctrine`, `mlb-model-current-state`, `pa-sim-program`, `feature-backlog`,
   `daily-pipeline-automation`.
+
+## 6. 2026-07-15 ADDENDUM — tier-1 mechanics batch (built in the second chat, rides the chain)
+
+Layered onto baseline 501dc24 AFTER the audit batch. Five training/serving-mechanics
+changes (no new features, no frame changes — `frames.joblib` cache stays valid):
+
+1. **Recency sample-weighting** — `train.RECENCY_DECAY` (default 1.0 = OFF, bit-identical);
+   weights `decay**(cal_yr − Season)` on every booster + LR fit (ES eval weighted too;
+   XGB/CB wired for the future). **Pre-chain step: run `python Model/decay_sweep.py`**
+   (selection suite, grid 1.0/.95/.9/.85/.8, resumable, ~5 × selection-train runtime;
+   overwrites `metrics_select.json`/`models_bt.joblib` per run — chain regenerates) and
+   bake the winning value into `RECENCY_DECAY`. Blend/calibrator fits stay unweighted (cal
+   year weight ≡ 1).
+2. **Log-odds bag averaging** — `features.BAG_LOGIT_MEAN = True`; `MeanBag.predict_proba`
+   now sigmoid(mean logit) (geometric-mean-renormalized). Read at predict time — also
+   affects OLD pickles loaded under new code (serving guard already blocks the stale
+   `models.joblib`; chain re-baselines anyway per the ES-split note).
+3. **Logit-space GBM-vs-LR blend** — `train.BLEND_SPACE = "logit"`; grid + Platt now spans
+   the full 2-member logistic stack. Artifacts carry `blend_space`; `predict_prop`/
+   `predict_win` honor it (absent key = old artifact = prob space). Winner's second
+   (Poisson) blend included.
+4. **Auto per-head calibrator** — `train.AUTO_CAL = True`: Platt vs beta (`features.BetaCal`,
+   new) vs isotonic by 5-fold GamePk-CV logloss within the cal year; ties → simplest.
+   `PLATT_CAL` set is the `AUTO_CAL = False` fallback. Chosen kind logged per head and in
+   metrics (`"calibrator"`).
+5. **Threshold-ladder coherence** — `features.enforce_ladders` (exact per-row PAV; ladders
+   hit≥hits2, tb2≥tb3≥tb4, bk≥bk2≥bk3, hrr2≥hrr3≥hrr4, run≥run2, rbi≥rbi2) applied in BOTH
+   `predict.predict_game` (after stack/offsets) and `evaluate_deep.build_binary_results`,
+   so eval verdicts the served prices. Cross-family implications (single≤hit, hr≤tb4…) are
+   a DAG — deliberately NOT projected (backlog).
+
+Also per user 2026-07-15: **LGBM-only (6-bag + LR) is the STANDING shipped ensemble** —
+`LGBM_ONLY_TEMP` stays `True` through the final chain (FINISH_PLAN Phase-4 step 0
+superseded; comments/banner updated). XGB/CB return is a deliberate future decision.
+
+Verification done here: `py_compile` clean on all five files; 26-check unit smoke ALL PASS
+(exact PAV vs reference on 5k random triples; BetaCal monotone/nonneg/logloss-improving;
+MeanBag logit-mean exact; `_recency_w` values; synthetic end-to-end `fit_classifier` →
+`predict_prop` train/serve logloss parity to 1e-9). NOT yet exercised on real frames —
+the chain's selftest + smokes cover that.
+
+Every change is single-flag revertible: `RECENCY_DECAY = 1.0`, `BAG_LOGIT_MEAN = False`,
+`BLEND_SPACE = "prob"`, `AUTO_CAL = False`, and deleting the two `enforce_ladders` call
+sites restores the incumbent exactly.

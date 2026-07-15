@@ -84,6 +84,36 @@ LGB_WIN = dict(n_estimators=3000, learning_rate=0.02, num_leaves=7,
                colsample_bytree=0.7, reg_lambda=6.0, objective="binary",
                verbose=-1)
 
+# Recency sample-weighting (2026-07-15, tier-1 mechanics batch): every
+# booster and LR fit weights row i by RECENCY_DECAY ** (cal_yr - Season_i),
+# so 2015 stops counting as much as 2024 across a decade of era shifts
+# (juiced ball, pitch clock, shift ban, bigger bases). 1.0 = OFF (all-ones
+# weights are skipped entirely — bit-identical to the incumbent). The value
+# is swept on the SELECTION suite by Model/decay_sweep.py (--decay overrides
+# per run); bake the sweep winner here before the ship chain. Blend weights,
+# calibrators, and dispersions still fit UNWEIGHTED on the cal year — decay
+# shapes what the boosters learn, not how they are priced.
+RECENCY_DECAY = 1.0
+
+
+def _recency_w(frame, cal_yr):
+    """Per-row training weights RECENCY_DECAY**(cal_yr - Season); None when
+    the decay is off so every fit call stays bit-identical to the incumbent."""
+    if RECENCY_DECAY >= 1.0:
+        return None
+    yrs = np.clip(cal_yr - frame["Season"].to_numpy(dtype=float), 0, None)
+    return RECENCY_DECAY ** yrs
+
+
+# GBM-vs-LR blend space (2026-07-15, tier-1 mechanics batch): the 21-point
+# grid over w now combines the two members' LOG-ODDS (see features.blend).
+# With the Platt/beta calibrator fit downstream on the blended score, the
+# logit-space grid is exactly the full 2-member logistic stack (free
+# per-member coefficients), which probability-space blending cannot express.
+# Artifacts carry blend_space so predict.py serves the same arithmetic;
+# absent key = old artifact = probability space. "prob" restores incumbent.
+BLEND_SPACE = "logit"
+
 # Monotonic constraints (HR only): physics/domain says HR probability can
 # only rise with these — exit velo, barrel rate, own HR rate, HR-friendly
 # park, heat, altitude. Constraining the GBM is pure regularization: it
@@ -139,12 +169,15 @@ LGBM_BAGS = 6   # shipped keep-train (6 bags, user 07-15); superset overridden t
 # tolerates them), hence features.InfSafe. Set XGB_BAGS = 0 to revert to
 # pure-LightGBM everywhere.
 #
-# TEMP 2026-07-14 (user): LGBM_ONLY_TEMP drops the XGB+CB families so the
+# 2026-07-14 (user): LGBM_ONLY_TEMP drops the XGB+CB families so the
 # FINISH_PLAN build batch can iterate on retrains cheaply (6 LGBM bags per
 # head only). Downstream adapts on its own: feature_select votes only the
 # families present, predict's _force_xgb_cpu no-ops, param_sweep reads
-# these constants. Flip to False before the FINAL two-train chain so the
-# shipped ensemble is 3-family again (LGBM 6 + XGB 2 + CB 2).
+# these constants.
+# 2026-07-15 (user): NO LONGER TEMP — the shipped ensemble stays LGBM-only
+# (6-bag + LR blend) for the foreseeable future; the FINAL chain ships with
+# this flag True. The XGB/CB wiring stays intact (weights included) so
+# flipping False deliberately brings the 3-family ensemble back whole.
 LGBM_ONLY_TEMP = True
 XGB_BAGS = 0 if LGBM_ONLY_TEMP else 2  # 2 = SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
 XGB_CLS = dict(n_estimators=3000, learning_rate=0.03, tree_method="hist",
@@ -370,6 +403,49 @@ STACK_DONORS = {}
 # heads are unaffected (their per-line calibrators are already logistic).
 PLATT_CAL = set(PROPS) | {"winner"}
 
+# Automated per-head calibrator choice (2026-07-15, tier-1 mechanics batch):
+# instead of the global PLATT_CAL policy, each binary head picks its own
+# calibrator — Platt (2-param), beta (3-param, fixes asymmetric
+# miscalibration Platt can't), or isotonic (free-form) — by 5-fold
+# GamePk-grouped CV log loss WITHIN the calibration year, then refits the
+# winner on the full cal year. Deterministic folds (GamePk % 5), candidate
+# order breaks ties toward the simplest monotone map. All three candidates
+# serve through the artifact's "iso" key, so predict/evaluate need no
+# changes. AUTO_CAL = False restores the PLATT_CAL-set policy exactly.
+AUTO_CAL = True
+CAL_CANDIDATES = ("platt", "beta", "iso")
+
+
+def _make_cal(kind):
+    if kind == "platt":
+        return F.PlattCal()
+    if kind == "beta":
+        return F.BetaCal()
+    return IsotonicRegression(out_of_bounds="clip", y_min=1e-4, y_max=1 - 1e-4)
+
+
+def _pick_calibrator(s_cal, y, gamepk, name):
+    """(fitted calibrator, kind) for one head's cal-year blended scores."""
+    if not AUTO_CAL:
+        kind = "platt" if name.lower() in PLATT_CAL else "iso"
+        return _make_cal(kind).fit(s_cal, y), kind
+    folds = np.asarray(gamepk).astype(np.int64) % 5
+    y = np.asarray(y, dtype=float)
+    best_kind, best_ll = "platt", np.inf
+    for kind in CAL_CANDIDATES:
+        lls = []
+        for f in range(5):
+            tr_m, va_m = folds != f, folds == f
+            # degenerate fold (single class either side, or too thin) -> skip
+            if va_m.sum() < 50 or y[tr_m].std() == 0 or y[va_m].std() == 0:
+                continue
+            c = _make_cal(kind).fit(s_cal[tr_m], y[tr_m])
+            p = np.clip(c.predict(s_cal[va_m]), 1e-6, 1 - 1e-6)
+            lls.append(log_loss(y[va_m], p))
+        if lls and np.mean(lls) < best_ll - 1e-9:
+            best_ll, best_kind = float(np.mean(lls)), kind
+    return _make_cal(best_kind).fit(s_cal, y), best_kind
+
 # Count-style props: Poisson LGBM (starter-K pattern) + per-line logistic
 # calibrators fit on the calibration year (predict.count_over). Batter heads
 # exist for the MEANS (xSO, xHRR) — their half-point lines are priced by the
@@ -465,9 +541,10 @@ def set_categories(df, cat_levels):
     return df
 
 
-def _fit_logistic(tr, cols, target):
+def _fit_logistic(tr, cols, target, w=None):
     """Regularized logistic on numeric features (categoricals dropped) — a
-    learner diverse from the trees, so blending the two helps."""
+    learner diverse from the trees, so blending the two helps. w = per-row
+    sample weights (recency decay), routed to the LR step only."""
     num_cols = [c for c in cols if c not in F.CAT_COLS]
     pipe = Pipeline([
         # F.inf_to_nan lives in the features module so the pickled pipeline
@@ -477,7 +554,8 @@ def _fit_logistic(tr, cols, target):
         ("scale", StandardScaler()),
         ("lr", LogisticRegression(max_iter=2000, C=0.3, solver="lbfgs")),
     ])
-    pipe.fit(tr[num_cols], tr[target])
+    pipe.fit(tr[num_cols], tr[target],
+             **({"lr__sample_weight": w} if w is not None else {}))
     return pipe, num_cols
 
 
@@ -489,59 +567,63 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr]
     fit, es = _es_split(tr)         # cal year never picks iteration counts
+    w_fit, w_es = _recency_w(fit, cal_yr), _recency_w(es, cal_yr)
     models = []
     for b in range(n_bags):
         p = dict(params or LGB_CLS)
         if b:                       # bag 0 = the incumbent default seed
             p["random_state"] = b
         m = lgb.LGBMClassifier(**p)
-        m.fit(fit[cols], fit[target],
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
               eval_set=[(es[cols], es[target])],
+              eval_sample_weight=None if w_es is None else [w_es],
               eval_metric="binary_logloss",
               callbacks=[lgb.early_stopping(150, verbose=False)])
         models.append(m)
     for b in range(n_xgb):          # family members join AFTER the LGBM bag
         m = F.InfSafe(xgb_lib.XGBClassifier(**XGB_CLS, random_state=b))
-        m.fit(fit[cols], fit[target],
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
+              sample_weight_eval_set=None if w_es is None else [w_es],
               eval_set=[(es[cols], es[target])], verbose=False)
         models.append(m)
     cat_here = [c for c in cols if c in F.CAT_COLS]
     for b in range(n_cb):
+        # CatBoost: train rows weighted; the ES eval stays unweighted (a
+        # weighted eval needs a Pool, which would bypass CatSafe's cleaning)
         m = F.CatSafe(CatBoostClassifier(**CB_CLS, random_seed=b,
                                          cat_features=cat_here), cat_here)
-        m.fit(fit[cols], fit[target], eval_set=[(es[cols], es[target])])
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
+              eval_set=[(es[cols], es[target])])
         models.append(m)
     model = F.MeanBag(models) if len(models) > 1 else models[0]
 
     # diverse second learner + blend weight chosen on the calibration year
     # (the LR has no early stopping, so it may use the full training slice)
-    lr, num_cols = _fit_logistic(tr, cols, target)
+    lr, num_cols = _fit_logistic(tr, cols, target, w=_recency_w(tr, cal_yr))
     g_cal = model.predict_proba(ca[cols])[:, 1]
     l_cal = lr.predict_proba(ca[num_cols])[:, 1]
     yca = ca[target].to_numpy()
     best_w, best_ll = 1.0, np.inf
     for w in np.linspace(0.0, 1.0, 21):
-        ll = log_loss(yca, np.clip(w * g_cal + (1 - w) * l_cal, 1e-6, 1 - 1e-6))
+        ll = log_loss(yca, np.clip(F.blend(g_cal, l_cal, w, BLEND_SPACE),
+                                   1e-6, 1 - 1e-6))
         if ll < best_ll:
             best_ll, best_w = ll, w
 
-    s_cal = best_w * g_cal + (1 - best_w) * l_cal
-    if name.lower() in PLATT_CAL:
-        iso = F.PlattCal().fit(s_cal, yca)
-    else:
-        iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-4,
-                                 y_max=1 - 1e-4)
-        iso.fit(s_cal, yca)
+    s_cal = F.blend(g_cal, l_cal, best_w, BLEND_SPACE)
+    iso, cal_kind = _pick_calibrator(s_cal, yca, ca["GamePk"].to_numpy(), name)
 
     g_te = model.predict_proba(te[cols])[:, 1]
     l_te = lr.predict_proba(te[num_cols])[:, 1]
-    p_te = iso.predict(best_w * g_te + (1 - best_w) * l_te)
+    p_te = iso.predict(F.blend(g_te, l_te, best_w, BLEND_SPACE))
     y = te[target].to_numpy()
     base = np.full_like(p_te, tr[target].mean())
     metrics = {
         "n_train": len(tr), "n_test": len(te), "base_rate": float(y.mean()),
         "best_iter": int(model.best_iteration_ or 0),
         "blend_gbm_weight": round(float(best_w), 2),
+        "blend_space": BLEND_SPACE,
+        "calibrator": cal_kind,
         "auc": float(roc_auc_score(y, p_te)),
         "acc": float(((p_te >= 0.5).astype(float) == y).mean()),
         "logloss": float(log_loss(y, p_te)),
@@ -564,8 +646,9 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
         f"logloss {metrics['logloss']:.4f} (base {metrics['logloss_baserate']:.4f}) | "
         f"brier {metrics['brier']:.4f} (base {metrics['brier_baserate']:.4f}) | "
         f"top10/day {metrics['top10_daily_hit_rate']:.3f} vs base "
-        f"{metrics['base_rate']:.3f} | gbm wt {best_w:.2f}")
-    prop = {"gbm": model, "lr": lr, "lr_cols": num_cols, "w": best_w, "iso": iso}
+        f"{metrics['base_rate']:.3f} | gbm wt {best_w:.2f} | cal {cal_kind}")
+    prop = {"gbm": model, "lr": lr, "lr_cols": num_cols, "w": best_w,
+            "iso": iso, "blend_space": BLEND_SPACE}
     return prop, metrics
 
 
@@ -586,29 +669,36 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
     ca = wf[wf["Season"] == cal_yr]
     te = wf[wf["Season"] == test_yr]
     fit, es = _es_split(tr)         # cal year never picks iteration counts
+    w_fit, w_es = _recency_w(fit, cal_yr), _recency_w(es, cal_yr)
     members = []
     for b in range(LGBM_BAGS):      # bag 0 = the pre-bagging incumbent seed
         p = dict(LGB_WIN)
         if b:
             p["random_state"] = b
         m = lgb.LGBMClassifier(**p)
-        m.fit(fit[cols], fit[target],
-              eval_set=[(es[cols], es[target])], eval_metric="binary_logloss",
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
+              eval_set=[(es[cols], es[target])],
+              eval_sample_weight=None if w_es is None else [w_es],
+              eval_metric="binary_logloss",
               callbacks=[lgb.early_stopping(150, verbose=False)])
         members.append(m)
     for b in range(XGB_BAGS):       # family members join AFTER the incumbent
         m = F.InfSafe(xgb_lib.XGBClassifier(**XGB_WIN, random_state=b))
-        m.fit(fit[cols], fit[target],
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
+              sample_weight_eval_set=None if w_es is None else [w_es],
               eval_set=[(es[cols], es[target])], verbose=False)
         members.append(m)
     cat_here = [c for c in cols if c in F.CAT_COLS]
     for b in range(CB_BAGS):
+        # CatBoost: train rows weighted; ES eval unweighted (Pool would
+        # bypass CatSafe's cleaning) — same note as fit_classifier
         m = F.CatSafe(CatBoostClassifier(**CB_WIN, random_seed=b,
                                          cat_features=cat_here), cat_here)
-        m.fit(fit[cols], fit[target], eval_set=[(es[cols], es[target])])
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
+              eval_set=[(es[cols], es[target])])
         members.append(m)
     model = F.MeanBag(members) if len(members) > 1 else members[0]
-    lr, num_cols = _fit_logistic(tr, cols, target)
+    lr, num_cols = _fit_logistic(tr, cols, target, w=_recency_w(tr, cal_yr))
 
     def parts(d):
         g = model.predict_proba(d[cols])[:, 1]
@@ -625,27 +715,25 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
     def pick_w(a, b):
         best_w, best_ll = 1.0, np.inf
         for w in np.linspace(0.0, 1.0, 21):
-            ll = log_loss(yca, np.clip(w * a + (1 - w) * b, 1e-6, 1 - 1e-6))
+            ll = log_loss(yca, np.clip(F.blend(a, b, w, BLEND_SPACE),
+                                       1e-6, 1 - 1e-6))
             if ll < best_ll:
                 best_ll, best_w = ll, w
         return best_w
 
     g_cal, l_cal, pois_cal = parts(ca)
     w1 = pick_w(g_cal, l_cal)
-    s_cal = w1 * g_cal + (1 - w1) * l_cal
+    s_cal = F.blend(g_cal, l_cal, w1, BLEND_SPACE)
     pois_cal = np.where(np.isfinite(pois_cal), pois_cal, s_cal)
     w_ml = 1.0 if mu_map is None else pick_w(s_cal, pois_cal)
-    if "winner" in PLATT_CAL:
-        iso = F.PlattCal().fit(w_ml * s_cal + (1 - w_ml) * pois_cal, yca)
-    else:
-        iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-4,
-                                 y_max=1 - 1e-4)
-        iso.fit(w_ml * s_cal + (1 - w_ml) * pois_cal, yca)
+    s2_cal = F.blend(s_cal, pois_cal, w_ml, BLEND_SPACE)
+    iso, cal_kind = _pick_calibrator(s2_cal, yca, ca["GamePk"].to_numpy(),
+                                     "winner")
 
     g_te, l_te, pois_te = parts(te)
-    s_te = w1 * g_te + (1 - w1) * l_te
+    s_te = F.blend(g_te, l_te, w1, BLEND_SPACE)
     pois_te = np.where(np.isfinite(pois_te), pois_te, s_te)
-    p_te = iso.predict(w_ml * s_te + (1 - w_ml) * pois_te)
+    p_te = iso.predict(F.blend(s_te, pois_te, w_ml, BLEND_SPACE))
     y = te[target].to_numpy()
     base = np.full_like(p_te, tr[target].mean())
     metrics = {
@@ -653,6 +741,8 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
         "best_iter": int(model.best_iteration_ or 0),
         "blend_gbm_weight": round(float(w1), 2),
         "blend_ml_weight": round(float(w_ml), 2),
+        "blend_space": BLEND_SPACE,
+        "calibrator": cal_kind,
         "auc": float(roc_auc_score(y, p_te)),
         "acc": float(((p_te >= 0.5).astype(float) == y).mean()),
         "logloss": float(log_loss(y, p_te)),
@@ -665,7 +755,7 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
         f"(base {metrics['logloss_baserate']:.4f}) | gbm wt {w1:.2f} | "
         f"ML-vs-poisson wt {w_ml:.2f}")
     prop = {"gbm": model, "lr": lr, "lr_cols": num_cols, "w": w1,
-            "w_ml": w_ml, "iso": iso}
+            "w_ml": w_ml, "iso": iso, "blend_space": BLEND_SPACE}
     return prop, metrics
 
 
@@ -682,6 +772,7 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr].copy()
     fit, es = _es_split(tr)         # cal year never picks iteration counts
+    w_fit, w_es = _recency_w(fit, cal_yr), _recency_w(es, cal_yr)
     tweedie = tweedie_power is not None
     models = []
     for b in range(n_bags):
@@ -692,8 +783,9 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
         if b:                       # bag 0 = the incumbent default seed
             p["random_state"] = b
         m = lgb.LGBMRegressor(**p)
-        m.fit(fit[cols], fit[target],
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
               eval_set=[(es[cols], es[target])],
+              eval_sample_weight=None if w_es is None else [w_es],
               eval_metric=("tweedie" if tweedie else "poisson"),
               callbacks=[lgb.early_stopping(150, verbose=False)])
         models.append(m)
@@ -704,7 +796,8 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
                      tweedie_variance_power=tweedie_power,
                      eval_metric=f"tweedie-nloglik@{tweedie_power}")
         m = F.InfSafe(xgb_lib.XGBRegressor(**p, random_state=b))
-        m.fit(fit[cols], fit[target],
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
+              sample_weight_eval_set=None if w_es is None else [w_es],
               eval_set=[(es[cols], es[target])], verbose=False)
         models.append(m)
     cat_here = [c for c in cols if c in F.CAT_COLS]
@@ -713,10 +806,13 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
         if tweedie:
             tw = f"Tweedie:variance_power={tweedie_power}"
             p = dict(p, loss_function=tw, eval_metric=tw)
+        # CatBoost: train rows weighted; ES eval unweighted (Pool would
+        # bypass CatSafe's cleaning) — same note as fit_classifier
         m = F.CatSafe(CatBoostRegressor(**p, random_seed=b,
                                         cat_features=cat_here),
                       cat_here, exponent=True)
-        m.fit(fit[cols], fit[target], eval_set=[(es[cols], es[target])])
+        m.fit(fit[cols], fit[target], sample_weight=w_fit,
+              eval_set=[(es[cols], es[target])])
         models.append(m)
     model = F.MeanBag(models) if len(models) > 1 else models[0]
     pred = model.predict(te[cols])
@@ -996,6 +1092,9 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
             "lgbm_only_temp": LGBM_ONLY_TEMP,
             "bags": {"lgbm": LGBM_BAGS, "xgb": XGB_BAGS, "cb": CB_BAGS},
             "superset_sample": _SUPERSET_SAMPLE,
+            "recency_decay": RECENCY_DECAY,
+            "blend_space": BLEND_SPACE,
+            "auto_cal": AUTO_CAL,
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         },
         "props": props,
@@ -1034,6 +1133,7 @@ def suite_years(bf, min_rows=2000):
 
 
 def main():
+    global RECENCY_DECAY
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true",
                     help="rebuild feature frames even if cached")
@@ -1042,7 +1142,15 @@ def main():
                          "back from shipping) — the fast iteration loop. "
                          "The default run trains it too, then the shipping "
                          "models on top.")
+    ap.add_argument("--decay", type=float, default=None,
+                    help="override RECENCY_DECAY for this run (used by "
+                         "decay_sweep.py; 1.0 = no recency weighting)")
     args = ap.parse_args()
+    if args.decay is not None:
+        RECENCY_DECAY = args.decay
+    if RECENCY_DECAY < 1.0:
+        log(f"recency sample-weighting ON: decay {RECENCY_DECAY} per season "
+            f"back from each suite's cal year")
 
     # role banner (audit #8): superset runs write models_superset*.joblib and
     # never touch the serving artifacts; the temp-regime flag prints loudly so
@@ -1054,8 +1162,10 @@ def main():
            "(no keep-list; writes models_superset_bt.joblib / "
            "models_superset.joblib — serving artifacts untouched)"))
     if LGBM_ONLY_TEMP:
-        log("!! LGBM_ONLY_TEMP is ON: XGB/CB families disabled (cheap "
-            "iteration regime). Flip it False before the FINAL ship chain.")
+        log("LGBM_ONLY_TEMP is ON: XGB/CB families disabled. STANDING "
+            "regime per user 2026-07-15 — the shipped ensemble is the LGBM "
+            "6-bag + LR blend for the foreseeable future; flip False only "
+            "when the 3-family ensemble is deliberately brought back.")
 
     cache = ART / "frames.joblib"
     if cache.exists() and not args.rebuild:

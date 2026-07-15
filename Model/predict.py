@@ -229,13 +229,15 @@ def predict_prop(prop, X):
     """Calibrated probability from a prop's GBM+logistic blend. X is prepped
     with the full batter column set; props trained on a subset (per-prop
     feature selection) carry their own column list. Backwards-compatible
-    with older {model, iso} artifacts."""
+    with older {model, iso} artifacts. blend_space (2026-07-15) says which
+    space the blend weight was fit in — log-odds for new artifacts; absent
+    key = old artifact = probability space."""
     if "gbm" in prop:
         Xp = X[prop["cols"]] if "cols" in prop else X
         g = prop["gbm"].predict_proba(Xp)[:, 1]
         l = prop["lr"].predict_proba(Xp[prop["lr_cols"]])[:, 1]
-        w = prop["w"]
-        return prop["iso"].predict(w * g + (1 - w) * l)
+        s = F.blend(g, l, prop["w"], prop.get("blend_space", "prob"))
+        return prop["iso"].predict(s)
     return prop["iso"].predict(prop["model"].predict_proba(X)[:, 1])
 
 
@@ -253,15 +255,17 @@ def predict_win(win_art, X, mu_home, mu_away):
     """Home-win probability from the winner artifact: GBM+logistic blend,
     then (when trained with one) a second blend with the runs-model Poisson
     win probability, then isotonic calibration. Backwards-compatible with
-    artifacts that have no Poisson blend (w_ml defaults to 1)."""
+    artifacts that have no Poisson blend (w_ml defaults to 1) and with
+    pre-blend_space artifacts (absent key = probability space)."""
+    space = win_art.get("blend_space", "prob")
     g = win_art["gbm"].predict_proba(X[win_art["cols"]])[:, 1]
     l = win_art["lr"].predict_proba(X[win_art["lr_cols"]])[:, 1]
-    s = win_art["w"] * g + (1 - win_art["w"]) * l
+    s = F.blend(g, l, win_art["w"], space)
     w_ml = win_art.get("w_ml", 1.0)
     if w_ml < 1.0:
         pois = np.array([poisson_win(h, a) for h, a in
                          zip(np.atleast_1d(mu_home), np.atleast_1d(mu_away))])
-        s = w_ml * s + (1 - w_ml) * np.where(np.isfinite(pois), pois, s)
+        s = F.blend(s, np.where(np.isfinite(pois), pois, s), w_ml, space)
     return win_art["iso"].predict(s)
 
 
@@ -956,13 +960,20 @@ class Predictor:
         # apply_stack) can see their donors' scores
         raw_p = {prop: predict_prop(a["props"][prop], X)
                  for prop in PROP_COLS if prop in a["props"]}
-        for prop, col in PROP_COLS.items():
-            if prop not in raw_p:  # artifact predates this prop
-                continue
+        fin_p = {}
+        for prop in raw_p:
             p = apply_stack(a["props"][prop], raw_p[prop], raw_p)
             if offs.get(prop):
                 p = R.apply_offset(p, offs[prop])
-            batters[col] = np.round(p, 4)
+            fin_p[prop] = p
+        # threshold-ladder coherence (2026-07-15): P(3+ TB) may never exceed
+        # P(2+ TB) etc. — same projection evaluate_deep applies, so the
+        # served prices are the ones the paired read verdicts
+        fin_p = F.enforce_ladders(fin_p)
+        for prop, col in PROP_COLS.items():
+            if prop not in fin_p:  # artifact predates this prop
+                continue
+            batters[col] = np.round(fin_p[prop], 4)
         batters["xHR"] = np.round(batters["P_HR"] * a["multi_hr"], 4)
         batters["HR_fair_odds"] = [american_odds(p) for p in batters["P_HR"]]
         # count-head means (xSO = batter Ks, xHRR = hits+runs+RBIs,

@@ -262,11 +262,23 @@ Per the specs in FEATURE_BACKLOG Part 3 #H1/#H3/#H4/#H5/#H6:
 
 ## Phase 4 — The one training chain (~4 h, overnight)
 
-0. **RESTORE THE FAMILIES FIRST**: flip `LGBM_ONLY_TEMP = False` in `train.py` (set
-   2026-07-14 to iterate the build batch on cheap LGBM-only retrains). The final chain
-   must ship the full 3-family ensemble (LGBM 6 + XGB 2 + CB 2) — an LGBM-only final
-   train is NOT the shipped recipe and its paired read against the 3-family Phase-0
-   baseline would be apples-to-oranges.
+0. ~~RESTORE THE FAMILIES FIRST~~ **SUPERSEDED 2026-07-15 (user): the shipped
+   ensemble stays LGBM-only (6-bag + LR blend) for the foreseeable future —
+   `LGBM_ONLY_TEMP` remains `True` through the FINAL chain.** XGB/CB wiring stays
+   intact (recency weights included) for a deliberate future return. CAVEAT the
+   step-0 warning flagged: the paired read against the 3-family Phase-0 baseline is
+   now family-confounded — the delta bundles "batch changes" with "dropping XGB/CB".
+   User accepts (all-at-once attribution risk already accepted 07-14).
+0b. **TIER-1 MECHANICS BATCH (2026-07-15, built in the other chat) rides this chain**:
+   recency sample-weighting (`RECENCY_DECAY`, swept via `Model/decay_sweep.py` on the
+   selection suite BEFORE the final chain — bake the winner into `train.py`),
+   log-odds bag averaging (`features.BAG_LOGIT_MEAN`), logit-space GBM-vs-LR blend
+   (`train.BLEND_SPACE`, artifacts carry `blend_space`), per-head auto calibrator
+   Platt/beta/isotonic (`train.AUTO_CAL`, metrics carry `calibrator`), and
+   threshold-ladder coherence projection (`features.enforce_ladders`, applied
+   identically in `predict.predict_game` and `evaluate_deep.build_binary_results`).
+   All five are single-flag revertible; the paired read verdicts the package, per-head
+   calibrator/ladder effects are visible in the metrics keys.
 1. `train.py --rebuild` (frame schema changed everywhere).
 2. **Full two-train superset recipe** (this IS the wholesale re-litigation case): superset
    train both suites (frames carrying the 1F shadow columns) →
