@@ -1,17 +1,23 @@
 # MLB Prediction Model
 
-Gradient-boosted ensembles (LightGBM seed bags; XGBoost + CatBoost family
-members in the shipped 3-family configuration — `train.py LGBM_ONLY_TEMP`
-gates a temporary LGBM-only iteration regime) trained on the CSVs in
-`Data/`, predicting per game (or per slate of games — the GUI's "Add game
-to slate" runs many at once with one combined, cross-game-ranked board):
+Seed-bagged LightGBM ensembles (6 bags per head, averaged in log-odds
+space, plus a per-head logistic-regression blend member — the standing
+shipped configuration since 2026-07-15; the XGBoost/CatBoost family
+members are benched behind `train.py LGBM_ONLY_TEMP`) trained on the CSVs
+in `Data/`, predicting per game (or per slate of games — the GUI's "Add
+game to slate" runs many at once with one combined, cross-game-ranked
+board). **36 heads** ship (21 batter binaries + 7 batter counts + 5
+starter counts + 3 game-level), every one calibrated:
 
-- **Per lineup batter:** calibrated probabilities for 14 props — home
-  run (with fair American odds), 1+ hit, 2+ hits, 2+ total bases, run
-  scored, 1+ RBI, 1+ walk, stolen base, single, double, 1+/2+ strikeouts,
-  2+/3+ hits+runs+RBIs — plus expected HR / K / H+R+RBI counts and a
-  career-games flag (players under ~50 MLB games are the least reliable
-  segment; they're marked `*` in the GUI).
+- **Per lineup batter — 21 binary props:** home run (with fair American
+  odds), 1+/2+ hits, single, double, triple, 2+/3+/4+ total bases, run
+  scored, 2+ runs, 1+/2+ RBIs, 1+ walk, stolen base, 1+/2+/3+
+  strikeouts, and 2+/3+/4+ hits+runs+RBIs. **Plus 7 expected counts**
+  (xH, xR, xRBI, xBB, xSO, xTB, xHRR) — means with honest dispersion;
+  their half-point lines are banked as calibrators but the binaries
+  remain the sellable prices (the count-vs-binary shoot-out verdict,
+  07-13). A career-games flag marks players under ~50 MLB games (`*` in
+  the GUI) — the least reliable segment.
 - **Per starter:** expected strikeouts and P(over) for K lines 3.5–8.5,
   negative-binomial-shaded by the calibration-year K dispersion; plus
   outs recorded, walks allowed, hits allowed, and earned runs with
@@ -19,34 +25,44 @@ to slate" runs many at once with one combined, cross-game-ranked board):
   expected ERA derived from the earned-runs and outs heads
   (27 × xER / xOuts). Single-start ERA is inherently noisy — the
   earned-run over/under lines are the sellable output.
-- **Per game:** expected lineup home runs; expected total runs with
-  P(over) from a negative binomial whose dispersion is measured on the
-  calibration year (real totals run ~2x Poisson variance); and a home-win
-  probability from a dedicated winner model (team win%, run differential,
+- **Per game:** expected total runs with P(over) from a negative binomial
+  whose dispersion is measured on the calibration year (real totals run
+  ~2x Poisson variance); **per-team totals** with their own line
+  calibrators; expected lineup home runs; and a home-win probability
+  from a dedicated winner model (team win%, run differential,
   pythagorean expectation, Elo with cross-season carryover, recent form,
-  both starters, bullpens, rest — blended with the runs-model Poisson win
-  probability, weights chosen on the calibration year). The winner output is
-  presented as a **calibrated probability, not a pick**: on the holdout it
-  shows no significant edge over always taking the home team (Section 8).
+  both starters, bullpens, rest). Game-level outputs are then blended
+  with a **plate-appearance-level Monte Carlo simulation** of the game
+  (`pa_serve.SlateSim`, 1,500 sims): `SIM_BLEND` weights
+  {score 0.60, total 0.55, winner 0.30}, fit on 2025 only (2026-07-15);
+  any sim failure degrades cleanly to the GBM alone. The winner output
+  is presented as a **calibrated probability, not a pick**: on the
+  holdout it shows no significant edge over always taking the home team.
 
 ## Files
 
 | File | Role |
 |---|---|
 | `features.py` | Feature engineering. Everything is **as-of date**: a game on date D only uses data from before D (no leakage). Same definitions serve training (vectorized) and prediction (per-entity); `predict.py --selftest` proves the two paths agree. |
-| `train.py` | Builds frames, trains everything. TWO ROLES (2026-07-15): with `feature_keep.json` present it is the KEEP-train and writes the serving artifacts (`models_bt.joblib` selection suite, `models.joblib` shipping suite); without it it is the SUPERSET train and writes `models_superset*.joblib` (feature_select's electorate — cheaper regime: fewer bags + a row sample, documented mismatch). Train/cal/holdout years are DERIVED from the data (`suite_years`) — currently ≤2023/2024/2025 and ≤2024/2025/2026; boosters early-stop on a held-out ~10% GamePk slice of the TRAINING rows (`_es_split`), never the calibration year. Heads are seed-bagged LightGBM (`LGBM_BAGS`) + XGB/CB family members when `LGBM_ONLY_TEMP` is off; per-head overrides in `PROP_PARAMS`. Artifacts carry a `meta_stamp` (role/regime/created) that predict.py's serving guard enforces. `--rebuild` refreshes cached frames; `--select` stops after the selection suite. |
-| `predict.py` | `Predictor.predict_game(spec)`; CLI: `--game <GamePk>` replays a historical game, `--selftest` checks train/serve parity. Every run saves a workbook to `Predictions/`. |
+| `train.py` | Builds frames, trains everything. TWO ROLES (2026-07-15): with `feature_keep.json` present it is the KEEP-train and writes the serving artifacts (`models_bt.joblib` selection suite, `models.joblib` shipping suite); without it it is the SUPERSET train and writes `models_superset*.joblib` (feature_select's electorate — cheaper regime: fewer bags + a row sample, documented mismatch). Train/cal/holdout years are DERIVED from the data (`suite_years`) — currently ≤2023/2024/2025 and ≤2024/2025/2026; boosters early-stop on a held-out ~10% GamePk slice of the TRAINING rows (`_es_split`), never the calibration year. Heads are seed-bagged LightGBM (`LGBM_BAGS = 6`) averaged in log-odds space, with **recency-decayed sample weights** (`RECENCY_DECAY = 0.95` per season, swept 07-15), a per-head **auto-selected calibrator** (`AUTO_CAL`: Platt / beta / isotonic, chosen on the calibration year), a logit-space GBM+LR blend, and **ladder coherence** (PAV projection so e.g. P(2+ hits) ≤ P(1+ hit) always). Per-head hyperparameter overrides live in `PROP_PARAMS` (binaries) and `COUNT_PARAMS` (counts), tuned by `param_sweep.py`. Artifacts carry a `meta_stamp` (role/regime/created) that predict.py's serving guard enforces. `--rebuild` refreshes cached frames; `--select` stops after the selection suite. |
+| `feature_select.py` | Shadow-calibrated stability selection (Boruta-style): the superset train plants shuffled `shdw_` decoys, per-head SHAP shares are measured against the shadow quantile (`SHADOW_Q = 0.85`), and the surviving columns are written to `feature_keep.json` — the **sole decider** of what each head trains on. The old hand-curated per-prop routing tables were retired 2026-07-10 and deleted 2026-07-15 (git history keeps them). |
+| `param_sweep.py` | Per-head LightGBM hyperparameter sweep: day-grouped GroupKFold OOF on the training years, single-member isolation, deviance/ECE-guarded acceptance gates. Winners are wired into `PROP_PARAMS`/`COUNT_PARAMS` by hand. |
+| `predict.py` | `Predictor.predict_game(spec)`; CLI: `--game <GamePk>` replays a historical game, `--selftest` checks train/serve parity. Applies the `SIM_BLEND` layer to game-level outputs. Refuses superset-role or shadow-contract artifacts (serving guard). Every run saves a workbook to `Predictions/`. |
+| `pa_sim.py` / `pa_engine.py` / `pa_model.py` | The plate-appearance simulator: matchup-calibrated PA outcome model, base-running/steal layer with **battery modulation** (opposing starter's steal permissiveness × catcher CSAA/pop, prior-season, `STEAL_BATTERY`), starter-hazard pulls (v2, bf-relative), MiLB-informed priors for thin MLB histories (`milb_priors.py`). |
+| `pa_serve.py` | Serves the simulator at predict time (`SlateSim`); `pa_backtest.py` replays full seasons through it; `pa_grade.py` + `pa_blend.py` grade the sim vs the GBM incumbent and fit the per-head blend weights (2025 only). |
 | `odds.py` | Sportsbook-odds utilities: American↔probability, de-vig, EV/ROI, and the canonical odds-store schema. Bridges the model's fair probabilities to the prices books actually post; shared by `Tools/2_scrape_odds.py` and evaluate_deep Section 9. |
-| `recalibrate.py` | In-season drift correction: a per-prop log-odds shift fit only on recent in-season games (leakage-free). Stored by `train.py`, backtested in evaluate_deep Section 10, applied at serving with `predict.py --recal`. |
-| `evaluate_deep.py` | Full accuracy + betting workup on a held-out season: bootstrap CIs on AUC and the logloss edge, calibration, daily top-N hit rates, pick-threshold economics, monthly drift, segment reliability, K/totals/winner deep dives, **model-vs-market ROI (Section 9)**, **in-season recalibration backtest (Section 10)**, and `--set-baseline` regression diffing with per-metric noise bands (Section 11). The DEFAULT run scores the selection suite on 2025 (iterate freely); `--confirm` scores the shipping suite on the confirm-only 2026 holdout. |
-| `artifacts/` | Trained models (`models.joblib`), metrics (`metrics.json`), cached feature frames, and the odds store / eval baselines. |
+| `recalibrate.py` | In-season drift correction: a per-prop log-odds shift fit only on recent in-season games (leakage-free). Stored by `train.py`, backtested in evaluate_deep Section 10, applied at serving with `predict.py --recal` (currently off by default — the backtest says the base calibration is already honest). |
+| `evaluate_deep.py` | Full accuracy + betting workup on a held-out season: bootstrap CIs on AUC and the logloss edge, calibration, daily top-N hit rates, pick-threshold economics, monthly drift, segment reliability, K/totals/winner deep dives, **model-vs-market ROI (Section 9)**, **in-season recalibration backtest (Section 10)**, and `--set-baseline` regression diffing with per-metric noise bands (Section 11) plus `--paired` day-block bootstrap CIs with a Benjamini–Hochberg FDR gate. The DEFAULT run scores the selection suite on 2025 (iterate freely); `--confirm` scores the shipping suite on 2026 — run DELIBERATELY, never by the daily job. |
+| `decay_sweep.py` | One-off sweep that chose `RECENCY_DECAY` (banked runs under `artifacts/decay_sweep/`). |
+| `artifacts/` | Trained models (`models*.joblib`), metrics (`metrics.json`), cached feature frames, selection reports, sim tables/backtests, and the odds store / eval baselines. |
 
 The game-day tools that USE these models live in `Tools/`, numbered in
 run order: `1_get_todays_games.py`, `2_scrape_odds.py`, `3_gui.py` (the
-Tkinter app), `4_grade_results.py`, plus `hit_rate_report.py` and
-`prop_rankings.py`.
+Tkinter app), `4_grade_results.py` (`--all` = the accumulated forward
+record), `5_performance.py` (per-head metrics snapshot for both suites →
+`performance.txt`), and `prop_rankings.py`.
 
-## What the model knows (~575-column batter-game superset; stability selection picks each head's columns)
+## What the model knows (superset: 522 batter / 207 starter / 74 team-game / 55 winner columns; stability selection picks each head's ~20–90)
 
 - **Batter form:** career / season-to-date / rolling 7-15-30-game HR rate,
   ISO, contact, K/BB rates, XBH rate, full OBP (incl. HBP); days rest;
@@ -57,26 +73,38 @@ Tkinter app), `4_grade_results.py`, plus `hit_rate_report.py` and
   season, season vs career; last-5 vs season for the opposing starter).
 - **Contact quality** (Statcast, every tracked ball in play — not just
   homers): shrunk career + 90-day-decayed exit velo, hard-hit%, barrel
-  rate, launch angle, xBA / xwOBA on contact, ground-ball share, and
+  rate, launch angle, xBA / xwOBA on contact, ground-ball share,
   spray-based pull% / pulled-air% (which interact with the park's fence
-  distances) — for the batter AND allowed by the opposing starter. Process
-  stats stabilize in ~40 batted balls vs hundreds of AB for outcomes, so
-  these see skill (and in-season change) far earlier than box-score rates.
+  distances), and damage-on-contact splits by trajectory — for the batter
+  AND allowed by the opposing starter. Process stats stabilize in ~40
+  batted balls vs hundreds of AB for outcomes, so these see skill (and
+  in-season change) far earlier than box-score rates.
 - **Plate discipline** (Statcast, every pitch, stored as daily aggregates):
   the batter's whiff-per-swing and chase rates (career + decayed; chase
   feeds the walk prop, whiff the contact props) and the opposing starter's
   decayed swinging-strike rate.
+- **Pitch-level shape** (raw-pitch archive): the starter's pitch movement
+  profile and usage drift, re-aggregated from stored per-pitch data.
 - **Raw speed** (Statcast sprint leaderboard, prior-season): sprint speed
   and home-to-first time for the SB and run-scored props.
 - **Team defense** (Statcast outs above average, prior-season, per-162):
   the opponent's range quality, for the BABIP-driven hit props and the
   runs model — the unearned-run proxy only ever saw errors.
+- **Battery defense** (Savant catcher leaderboards, team grain,
+  prior-season): opposing-catcher framing runs per called pitch, caught-
+  stealing above average, pop time (era-centered — pop drifted ~0.05s
+  over the sample), and interactions with the batter's take profile and
+  the running game. Player-grain catcher data is scraped but shelved.
+- **Roster availability** (transactions scrape): IL stints and returns,
+  as-of date.
 - **Prop-specific history:** stolen-base rate + success rate (career,
   season, rolling) and the starter's SB-allowed / stop rate for the SB
   prop; the batter's own runs-scored and RBI rates for the run/RBI props;
   IBB rate (feared-hitter marker).
 - **Teammate context (run/RBI props):** as-of career on-base of the two
-  hitters ahead and slugging of the two behind (wrapping the order).
+  hitters ahead and slugging of the two behind (wrapping the order),
+  plus composite traffic/conversion interactions (validated by
+  residualized-probe partial correlations before shipping).
 - **Power quality** (from the homerun log): average exit velo, launch
   angle, average and max **elevation-adjusted** distance of all prior
   career homers; the opposing starter's HR quality *allowed*; an
@@ -84,13 +112,19 @@ Tkinter app), `4_grade_results.py`, plus `hit_rate_report.py` and
   this starter's actual usage); prior-season GO/AO fly-ball tendency for
   both batter and starter.
 - **Opposing starter:** career/season/last-5 HR / K / BB / hits-allowed
-  rates, ERA, strike rate, innings per start, rest.
+  rates, ERA, strike rate, innings per start, rest, expected bullpen
+  handoff (starter-length / bullpen-exposure context).
 - **Arsenal matchup** (Statcast, two-year decay blend): the batter's xSLG /
   xwOBA / whiff / hard-hit vs each pitch type, weighted by how often this
   specific starter throws each pitch; plus the starter's own arsenal
   quality.
+- **Minor-league priors** (MiLB batting/pitching scrapes): translated
+  performance priors that carry information for players with thin MLB
+  histories — rider columns in both frames, kept by selection in 22/24
+  original heads.
 - **Environment:** park dimensions + elevation, empirical park HR factor
-  (as-of), temperature, wind speed/direction, condition, day/night.
+  (as-of), temperature, wind speed/direction (including wind × pull /
+  carry interactions), condition, day/night.
 - **League environment (strikeout model only):** trailing-30-day
   league-wide rates as-of the game date. Tried in the batter and runs
   models as a drift guard; flat-to-negative on the holdout, so only the
@@ -98,7 +132,8 @@ Tkinter app), `4_grade_results.py`, plus `hit_rate_report.py` and
 - **Context:** opposing bullpen HR/K/hit rates, high-leverage bullpen
   quality (save/hold/finishing arms), bullpen fatigue (trailing-3-day
   pitch count), own team offense (overall + home/road split), platoon
-  (handedness matchup), age/height/weight, season, month.
+  (handedness matchup), schedule/travel context, age/height/weight,
+  season, month.
 - **Strikeout model only:** the starter's usage-weighted arsenal whiff /
   K% / put-away (two-year blend), his strike rate, his as-of decayed
   swinging-strike / CSW / chase-induced / zone rates and fastball-velocity
@@ -115,51 +150,68 @@ Tkinter app), `4_grade_results.py`, plus `hit_rate_report.py` and
   quality and rest.
 
 Which columns each head actually trains on is decided by automated
-stability selection alone (`feature_select.py` → `feature_keep.json`); the
-old hand-curated per-prop routing tables were retired 2026-07-10 and
-deleted 2026-07-15 (git history keeps them).
+stability selection alone (`feature_select.py` → `feature_keep.json`).
 
-## Honest evaluation (2026 season = confirm-only holdout)
+## Honest evaluation — data roles are GRADED TIERS, not clean labels
 
-Trained on 2015–2024 (boosters early-stop on a held-out ~10% GamePk slice
-of the training rows, never the calibration year — audit fix #2),
-calibrated on 2025, tested on 2026. **2026 is confirm-only**: iterating
-features/params against its numbers quietly overfits the holdout, so
-day-to-day model selection runs on a separate suite (train ≤2023, cal
-2024, test 2025) that both `train.py` and `evaluate_deep.py` use **by
-default**; 2026 gets one confirming look per finished change via
-`evaluate_deep.py --confirm --set-baseline` — run DELIBERATELY, never by
-the daily job (audit #6).
+There is no untouched "holdout year". Every season that has ever
+influenced a decision is compromised to some degree; the honest statement
+is *how much*:
 
-Data roles are graded tiers, not clean labels: 2015–2024 train / 2025
-calibration + selection + iteration verdicts (heavily mined — treat 2025
-numbers as upper bounds) / 2026 lightly touched / the timestamped forward
-record from 2026-07-15 is the ONLY fully untouched test. `--paired`
-verdicts gate on a Benjamini–Hochberg false-discovery correction
-(`--fdr`, default 0.10) because one read makes 100+ simultaneous CI
-tests (audit #1); repeated reads against the same season remain
+| Tier | Data | Role and contamination level |
+|---|---|---|
+| Training | 2015–2024 | Fit directly (boosters early-stop on a held-out ~10% GamePk slice of the training rows, never the calibration year). |
+| Calibration + selection | 2025 | Calibrators, blend weights, feature selection, and iteration verdicts all read 2025 — **heavily mined; treat 2025 numbers as upper bounds.** Known contamination path: the keep-lists carry shipping-suite SHAP votes measured on cal-2025. |
+| Partial season, lightly touched | 2026 through 07-14 (~59% of games) | Never used for fitting, but it has been LOOKED AT — each decision-influencing look is enumerated below. |
+| **Forward record** | **2026-07-15 onward** | **Timestamped predictions graded after the fact — the ONLY fully untouched test.** |
+
+The enumerated 2026 looks (audit #6 doctrine — every look is deliberate
+and on this ledger, and the daily job can no longer add one):
+
+1. Daily automated `--confirm --set-baseline` refreshes ran until
+   2026-07-14 (closed by audit #6; 2026 snapshots now refresh only on
+   deliberate confirms).
+2. 07-13: SIM_BLEND weights were user-moderated after seeing a 2026 read
+   (ledgered as a violation-in-substance; resolved 07-15 by refitting
+   all three weights on 2025 only).
+3. 07-13: the count-vs-binary pricing shoot-out verdict read both years.
+4. 07-13/14: PA-sim Phase-3 grading (steal-layer w=0, hazard keep) read
+   both years.
+5. 07-14: one confirm of the tier-1-mechanics + MiLB chain.
+6. 07-15: the finish-chain **veto-only** confirm (2026 may veto a shipped
+   change, never tune one) — no veto; plus pa_blend's passive 2026
+   column (no weight was set from it).
+
+`--paired` verdicts gate on a Benjamini–Hochberg false-discovery
+correction (`--fdr`, default 0.10) because one read makes 100+
+simultaneous CI tests; repeated reads against the same season remain
 sequential testing that no correction repairs — hence the forward record.
 
-| Model | Metric | Model | Baseline |
-|---|---|---|---|
-| HR | log loss | **0.3478** | 0.3574 (base rate) |
-| HR | AUC | **0.625** | 0.500 |
-| HR | top-10/day hit rate | **22.2%** | 11.5% (base rate) |
-| Hit | AUC | **0.567** | 0.500 |
-| Strikeouts | MAE | **1.78** | 1.93 (pitcher season rate) |
-| Total runs | MAE | **3.55** | 3.63 (team scoring rates) |
+**Known limitation (Decline ledger #4):** the empirical-Bayes shrinkage
+priors in `features.py` (`SHRINK`) are pooled-era constants computed over
+all years, a second-order leak. The principled fix (sequential as-of
+priors) is queued as a post-ship experiment; expected effect is small but
+nonzero.
 
-The 2025 backtest (train ≤2023) gives nearly identical numbers, so the edge
-is stable across seasons. Binary probabilities are Platt-calibrated
-(`train.py PLATT_CAL` — every binary head + the winner; count heads use
-cal-year per-line logistic calibrators): when the model says 20%, it
-happens ~20% of the time.
+Headline numbers from the 2026 confirm of the shipped model (07-15,
+partial season — see the tier table above for what this number is worth):
 
-The table above is a HISTORIC snapshot (it predates the 2026-07 upgrades:
-3-family ensemble, 24 binary heads, PA-sim blend, 2015+ data) — after
-retraining, `metrics.json` and `python Model/evaluate_deep.py` have the
-current numbers — confidence intervals, drift, segments, betting-threshold
-views, and a `--set-baseline` diff of what a change moved.
+| Output | 2026 confirm | Naive base |
+|---|---|---|
+| HR | AUC 0.635 [0.624, 0.647]; top-10/day 25.5% | 11.6% base rate |
+| 1+ hit | AUC 0.573; top-10/day 72.0% | 60.7% |
+| Stolen base | AUC 0.735; top-10/day 21.0% (3.2x) | 6.5% |
+| 2+ strikeouts | AUC 0.650; top-10/day 42.0% | 21.8% |
+| Strikeouts (starter) | MAE 1.74, dispersion honest (0.98) | — |
+| Total runs | MAE 3.55, dispersion honest | — |
+
+All 33 graded binary heads clear BOTH bankability gates (AUC CI > 0.5
+AND logloss-edge CI > 0) on 2025 and 2026 simultaneously. Binary
+probabilities are calibrated per head by `AUTO_CAL` (Platt / beta /
+isotonic, chosen on the calibration year; count heads use cal-year
+per-line logistic calibrators): when the model says 20%, it happens ~20%
+of the time (ECE ≤ ~0.01 on every head). Current numbers always:
+`metrics.json` and `python Model/evaluate_deep.py`.
 
 ## Reality check for betting
 
@@ -176,7 +228,7 @@ ACTUAL observed game weather, but live slates are served pre-game
 FORECASTS (rotowire/fantasypros/open-meteo) — the model learned the value
 of true temp/wind and gets noisier proxies live, so weather-sensitive
 heads (HR especially) will under-deliver their backtest numbers;
-`1_get_todays_games.py` now archives every served forecast to
+`1_get_todays_games.py` archives every served forecast to
 `Data/mlb_weather_forecast.csv` so this gap becomes measurable against
 the actuals. (2) Backtests always know the HP umpire; live slates often
 don't until near game time (served as neutral league priors).
@@ -201,12 +253,11 @@ python Scrapers/update_all.py
 # check the data files by hand (same validation the pipeline runs)
 python Scrapers/validate_data.py
 
-# retrain manually — selection suite + shipping models (a FULL two-suite
-# retrain on the current ~575-column superset runs ~1.5h; LGBM-only
-# iteration regimes are faster). A run with feature_keep.json present is a
-# KEEP-train and writes the serving artifacts (models*.joblib); without it
-# it is a SUPERSET train and writes models_superset*.joblib — the serving
-# artifacts are never touched by experiments (audit #8).
+# retrain manually — selection suite + shipping models. A run with
+# feature_keep.json present is a KEEP-train and writes the serving
+# artifacts (models*.joblib); without it it is a SUPERSET train and
+# writes models_superset*.joblib — the serving artifacts are never
+# touched by experiments (audit #8).
 python Model/train.py --rebuild
 
 # game day: scrape today's matchups/lineups/weather into an input file
@@ -233,26 +284,33 @@ python Model/evaluate_deep.py                   # Section 11 diff on 2025
 
 # when a change is accepted: retrain everything and confirm ONCE on 2026
 python Model/train.py                           # both suites (frames cached)
-python Model/evaluate_deep.py --confirm
+python Model/evaluate_deep.py --confirm         # veto-only; goes on the ledger
 ```
 
 ## Automated daily refresh (Windows Task Scheduler)
 
 A scheduled task named **"MLB Daily Update"** runs
 `Scrapers/run_daily_update.cmd` every morning at **6:00 AM**, which calls
-`update_all.py --retrain` (rescrape all data, then retrain the models) and
-logs each run to `Logs/update_<date>.log`. `-StartWhenAvailable` means a
-missed run (laptop asleep at 6 AM) fires as soon as the machine is next on.
+`update_all.py --retrain` (rescrape all data, retrain both suites, refresh
+the 2025 selection baseline, warm the prop-rankings cache) and logs each
+run to `Logs/update_<date>.log`. `-StartWhenAvailable` means a missed run
+(laptop asleep at 6 AM) fires as soon as the machine is next on. Per
+audit #6, the daily job **never** touches 2026 — the confirm snapshot
+refreshes only on a deliberate `evaluate_deep.py --confirm --set-baseline`.
 
 Failure guards, in the order they act:
 
+- **Experiment-in-flight guard** — if the Model sources differ from the
+  last `--set-baseline` snapshot (`baseline_code_fp.json`), the daily run
+  goes scrape-only rather than silently retraining and re-baselining an
+  unfinished candidate.
 - **Completed-season caching** — per-year scrapers (season stats, homeruns,
-  arsenals, sprint speed, OAA) serve finished seasons from their own output
-  CSV and only fetch the current season, so an upstream hiccup on
-  historical data (e.g. Savant throttling a 2021 page) can no longer kill a
-  job. A failed current-season fetch falls back to the previous run's rows
-  with a WARNING (harmless for prior-season-consumed leaderboards).
-  `--backfill` on any of them forces a full refetch.
+  arsenals, sprint speed, OAA, catchers) serve finished seasons from their
+  own output CSV and only fetch the current season, so an upstream hiccup
+  on historical data (e.g. Savant throttling a 2021 page) can no longer
+  kill a job. A failed current-season fetch falls back to the previous
+  run's rows with a WARNING (harmless for prior-season-consumed
+  leaderboards). `--backfill` on any of them forces a full refetch.
 - **Schema validation + backup restore** (`validate_data.py`) — a file that
   fails shape checks is restored from `Data/backups/` and the retrain is
   blocked.

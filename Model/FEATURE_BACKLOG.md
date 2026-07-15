@@ -162,7 +162,7 @@ before building; `SCRAPE` = needs data we don't have.
 
 ### Tier 1 additions — 2026-07-14 review pass (no scrape; all inputs already in `Data/`)
 
-15. **Bullpen-exposure share + quality delta** — `BUILD` — *headline.* Every batter prop is
+15. **Bullpen-exposure share + quality delta** — `SHIPPED 2026-07-15` — *headline.* Every batter prop is
     secretly a two-pitcher problem: the model prices the batter against the STARTER, but a
     slot-4 hitter gets 1–2 PAs against the pen, and more when the starter is a 4.2-IP guy.
     Spec: `xpa_pen` = expected share of tonight's PAs coming after the starter exits
@@ -173,7 +173,7 @@ before building; `SCRAPE` = needs data we don't have.
     tb2, hrr2/3, and the atlas says exposure products are already the #1 feature family on
     13/24 heads — this is the same geometry pointed at the late game.
 
-16. **Manager's leash + outing shape** — `BUILD` — the outs head's top features are all
+16. **Manager's leash + outing shape** — `SHIPPED 2026-07-15` — the outs head's top features are all
     workload MEANS (`p_np_l3`, `p_ip_per_start`); give it shape and policy: `p_outs_sd`
     (as-of SD of his outing lengths), `p_short_share` (share of last 10 starts ≤ 12 outs —
     opener/bulk/quick-hook detection; outs is bimodal for these pitchers and a mean feature
@@ -181,20 +181,20 @@ before building; `SCRAPE` = needs data we don't have.
     manager's leash, distinct from the pitcher's own history). Targets: outs, per, pha, k.
     These are the GBM-side siblings of the queued hazard-v2 work — cheap to ride ahead of it.
 
-17. **Layoff / ramp regime flags** — `BUILD` — `p_days_rest` and `p_np_last` are mains; the
+17. **Layoff / ramp regime flags** — `SHIPPED 2026-07-15` — `p_days_rest` and `p_np_last` are mains; the
     regimes are thin-support interactions worth handing over explicitly: first start after a
     15+ day gap (IL return / callup — hard pitch cap), `p_np_last < 60` (ramping, short leash
     today), short rest (≤ 4 days) after a 100+ pitch start. Three indicator/product columns.
     Targets: outs, pha, per, k.
 
-18. **Day-after-night + travel legs** — `BUILD` — Part 1 #3's original spec included a
+18. **Day-after-night + travel legs** — `SHIPPED 2026-07-15` — Part 1 #3's original spec included a
     day-after-night flag; only `g_l7d`/`g_l14d` shipped. Build `day_after_night` (yesterday
     a night game, today a day game — games file has DayNight + dates), `travel_km`
     (yesterday's venue → today's venue great-circle from the ballparks Lat/Lon added in the
     weather batch) and `tz_delta`. Team-grain, merged into the batter frame like park cols.
     Targets: hit/tb2/run and the count means (fatigue-sensitive), total.
 
-19. **Posted-lineup quality gap (B-lineup detector)** — `BUILD` — the model reads each
+19. **Posted-lineup quality gap (B-lineup detector)** — `SHIPPED 2026-07-15` — the model reads each
     batter individually but never asks "is this the A lineup?": posted lineup's mean as-of
     career OBP/SLG minus the team's own `toff_` season norm. Getaway-day and September
     lineups depress totals and flip winners, and the `lu_`/`off_lu_` infrastructure already
@@ -202,17 +202,17 @@ before building; `SCRAPE` = needs data we don't have.
     winner — with the Part 1 #4/#5 small-n caveat: the paired-CI read, not the keep-vote, is
     the arbiter on those frames.
 
-20. **Team cluster-luck regression (BaseRuns residual)** — `BUILD` — trailing-30-day team
+20. **Team cluster-luck regression (BaseRuns residual)** — `SHIPPED 2026-07-15` — trailing-30-day team
     runs minus the BaseRuns expectation from components (H/BB/TB/HR, all in the game logs):
     sequencing luck that regresses. `toff_r_pg` carries the luck fused with the skill; the
     residual separates them — the team-grain sibling of `hit_luck`/`p_hit_luck`. Targets:
     total, winner.
 
-21. **Ump run environment** — `BUILD` — selection (correctly) routed `ump_k/bb` to the K/BB
+21. **Ump run environment** — `SHIPPED 2026-07-15` — selection (correctly) routed `ump_k/bb` to the K/BB
     heads only, so the totals model never sees the ump at all. One column: shrunk as-of
     runs-per-game with this HP ump (same `_ump_shrink` idiom). Targets: total, per.
 
-22. **High-leverage arm availability** — `BUILD` — `pen_np_l3` is aggregate fatigue;
+22. **High-leverage arm availability** — `SHIPPED 2026-07-15` — `pen_np_l3` is aggregate fatigue;
     availability is arm-specific. From the per-reliever game logs: how many of the
     opponent's top save/hold arms pitched BOTH of the last two days (unavailable tonight, by
     bullpen convention), quality-weighted. Pairs with #15: exposure says how many late PAs,
@@ -222,11 +222,11 @@ before building; `SCRAPE` = needs data we don't have.
     the "all #15–32 built" record. USER 2026-07-14: rebuild in the audit wave alongside the
     own-pen leash item (spec in Model/AUDIT_BUILD_SPECS_0714.md).
 
-23. **Starter venue split** — `BUILD` — batters got `vloc_`; starters never did. As-of
+23. **Starter venue split** — `SHIPPED 2026-07-15` — batters got `vloc_`; starters never did. As-of
     home/road ERA / K / HR splits for the opposing starter (`pvloc_`), same shrunk idiom.
     Targets: starter heads, hr/tb2 (road-vulnerable starters), total.
 
-24. **Doubleheader flags** — `BUILD` — `is_dh` + `dh_game2`: two GamePks, same teams+date
+24. **Doubleheader flags** — `SHIPPED 2026-07-15` — `is_dh` + `dh_game2`: two GamePks, same teams+date
     in the games file. Game 2 means backup catchers, spot starters, tired pens — exposure
     and quality dilution the frames currently can't see. Serving: the slate already handles
     per-game times/weather (doubleheader-handling design), so the flag is knowable. Targets:
@@ -234,19 +234,19 @@ before building; `SCRAPE` = needs data we don't have.
 
 ### Raw-pitch archive additions — 2026-07-14 (free re-agg via `--from-raw`, ~4 min)
 
-25. **Pitch sequencing + count-state splits, pitcher side** — `BUILD` — promoted from the
+25. **Pitch sequencing + count-state splits, pitcher side** — `SHIPPED 2026-07-15` — promoted from the
     07-12 log's "remaining ideas" line so they stop living only in a log entry: (a) 0-2
     waste rate and ahead/behind usage shift (does he have a putaway plan, does his mix
     collapse when behind); (b) back-to-back pitch-class transition shares (FF→SL rate — a
     tunneling proxy) as `pd_` columns. The batter two-strike side (`bd_tswh`) already
     exists; this is the pitcher half. Targets: k, bk/bk2/xbk, per.
 
-26. **In-game velo fade slope** — `BUILD` — per-start OLS slope of FF/SI velo against pitch
+26. **In-game velo fade slope** — `SHIPPED 2026-07-15` — per-start OLS slope of FF/SI velo against pitch
     number, decayed across starts (`pd_fbv_fade`). Stamina signature distinct from
     `pd_fbv_sd` (spread, not trajectory) — predicts late-outing collapse. Targets: outs,
     per, pha.
 
-27. **Movement / IVB stuff axes** — `BUILD` — **archive VERIFIED 2026-07-14**: the raw
+27. **Movement / IVB stuff axes** — `SHIPPED 2026-07-15` — **archive VERIFIED 2026-07-14**: the raw
     parquets carry `pfx_x`/`pfx_z`, `api_break_z_with_gravity`/`_x_arm`, `spin_axis`,
     `release_spin_rate`, `release_extension`, `arm_angle` — movement is FREE via
     `--from-raw`, no scrape. Build `pd_ivb_d` (FF induced vertical break, decayed) + a
@@ -287,28 +287,28 @@ head has room to improve**, every column enters the superset, and selection vote
 head. The "Targets" notes below only name where each column physically lives, not who is
 allowed to benefit.
 
-28. **`per` conversion chain** — `BUILD` — earned runs are sequential: baserunners
+28. **`per` conversion chain** — `SHIPPED 2026-07-15` — earned runs are sequential: baserunners
     allowed × damage-on-contact allowed, e.g. `(pc_h_bf + pc_bb_bf) × pbipd_xwoba`
     (+ decayed sibling). Same template as `rbi_conv`/`run_opp`, which both shipped —
     nobody ever pointed it at the starter frame. Targets: per, pha, total.
 
-29. **Ump × lineup for the K head** — `BUILD` — `ump_k_x_pk` (ump × pitcher) exists;
+29. **Ump × lineup for the K head** — `SHIPPED 2026-07-15` — `ump_k_x_pk` (ump × pitcher) exists;
     `ump_k_pct × lu_k_sh` (ump × the actual lineup's K-proneness) doesn't. Completes a
     proven pattern. Targets: k, xbk.
 
-30. **Air density × lineup air profile at game grain** — `BUILD` — `air_fly` exists only
+30. **Air density × lineup air profile at game grain** — `SHIPPED 2026-07-15` — `air_fly` exists only
     at batter grain; the totals model gets `air_dens` as a main effect but can't cross it
     with how fly-ball-heavy tonight's lineups are (lineup mean `bip_pullair`/1−`bip_gb`,
     posted-lineup infra). Game-grain sibling of a shipped feature. Targets: total, winner.
 
-31. **Form-weighted exposure** — `BUILD` — the `xpa_x_*` products use CAREER rates; decayed
+31. **Form-weighted exposure** — `SHIPPED 2026-07-15` — the `xpa_x_*` products use CAREER rates; decayed
     variants (`xpa_slot × d_hr_pa_sh`, `× d_tb_ab_sh`, `× d_k_pct_sh`) price current form ×
     opportunity. One calculated extension of the single most successful template. CAVEAT:
     most exposed to credit-splitting — expect selection to keep either the decayed or the
     career version per head, not both; that's the vote working, not a failure.
 
 32. **Cross-grain arsenal collision (lineup class-whiff × opposing starter usage)** —
-    `BUILD` — promoted from the 07-12 full-surface log's deferred item (a). The
+    `SHIPPED 2026-07-15` — promoted from the 07-12 full-surface log's deferred item (a). The
     highest-value unbuilt composite on the board: the posted lineup's aggregate
     class-whiff (`lu_brkwh`/`lu_offwh`/`lu_fbwh` exist) crossed with the OPPOSING
     starter's actual usage mix — at TEAM grain, for the game heads. Needs the
@@ -357,8 +357,14 @@ line originally kept catcher framing/pop-time SHELVED per #13's serving-input pr
     via the build-time-fitted CSAA~PopC OLS slope, −0.80/s), clips 0.6–1.7 / ±0.12.
     Shared `battery_context`/`battery_adjust` applied identically in pa_backtest +
     pa_serve (engine contract untouched); `STEAL_BATTERY=False` = exact runner-only
-    revert; unit-tested (TestBattery); banked into pa_sim_tables.joblib. Graded at
-    the Phase-3 steal re-sweep.
+    revert; unit-tested (TestBattery); banked into pa_sim_tables.joblib.
+    **GRADED 2026-07-15 (Phase-3 re-sweep, battery live in all 4 backtests):
+    did NOT unlock the steal layer — sb fit-2025 blend weight still 0 (the
+    fit-2026 direction gave 0.10 but its eval-2025 read was negative, and
+    2025-only fitting governs). USER 07-15: sb w stays 0, battery stays live
+    in the engine (clipped, neutral fallbacks, shapes game scores). Its
+    isolated game-head effect is unattributed (would cost a 4-backtest
+    STEAL_BATTERY=False A/B, ~40 min) — candidate for the mid-Aug era audit.**
 
 ---
 
@@ -368,7 +374,18 @@ Distinct from Parts 1–2: these add *outputs*, not columns. The single-train ri
 above does **not** obviously apply (see the open question in #H1) — settle that at
 execution time, not now.
 
-### H1 — Four deep batter binary heads: `bk3`, `tb3`, `tb4`, `hrr4` — `READY, BATCHED`
+### H1 — Four deep batter binary heads: `bk3`, `tb3`, `tb4`, `hrr4` — `SHIPPED 2026-07-15`
+
+**VERDICT (2026-07-15 finish chain, USER-adjudicated).** All four trained, selected,
+swept, calibrated, and wired to the board. Against the pre-registered
+beat-the-banked-count-calibrator bars below: **tb3/tb4 BEAT their bars; bk3/hrr4
+hairline-MISSED** (the bar sits inside each miss's measured CI — e.g. bk3 2026 AUC
+0.683 [0.668, 0.699] vs bar 0.689). The pre-registered mixed-board fallback ("ship the
+miss count-priced") was superseded by the USER: **ship all four binary anyway** — one
+methodology per market family, the exact principle that motivated H1; a hairline CI
+overlap is not the "measured loss" the fallback was written for. Ledgered for the
+mid-Aug era audit: re-read bk3/hrr4 vs their calibrators on accumulated forward data.
+All 4 are bankable standalone (both CI gates, both years — bk3 top-10/day 3.0x lift).
 
 **What.** Dedicated binary heads for 3+ K, 3+ TB, 4+ TB, 4+ H+R+RBI — the four batter
 thresholds the board does not currently sell. Targets are one-liners next to their
@@ -433,7 +450,7 @@ per-inning linescores, which `mlb_games` doesn't carry — small scrape; (2) the
 weights are a week old and the steal layer shipped at w=0 — let the game-head blend earn
 trust through a couple of weekly reads before selling a sim-only market. Parked, not spec'd.
 
-### H3 — `triple` binary head (1+ triple) — `READY` (2026-07-14, user ask)
+### H3 — `triple` binary head (1+ triple) — `SHIPPED 2026-07-15` (2026-07-14, user ask)
 
 Completes the hit-type family: `single` and `double` heads exist; triple doesn't. Target
 is a one-liner next to `y_1b`/`y_2b` in features.py (`y_3b = (3B >= 1)` — the game logs
@@ -450,7 +467,7 @@ superset); add a `park_3b_pg` as-of park factor rider (`park_2b_pg` idiom) so ve
 triple-friendliness (deep gaps, quirky walls) is explicit. Expect selection's MIN_KEEP
 floor to bind (thin positives → weak votes) — designed behavior, not failure.
 
-### H4 — `rbi2` + `run2` binary heads (2+ RBI, 2+ runs) — `READY` (2026-07-14, user ask)
+### H4 — `rbi2` + `run2` binary heads (2+ RBI, 2+ runs) — `SHIPPED 2026-07-15` (2026-07-14, user ask)
 
 Deeper thresholds for two existing props: `rbi` (1+) and `run` (1+) heads exist; the 2+
 lines the books post don't. Targets are one-liners next to their siblings
@@ -462,7 +479,7 @@ exactly their signal and already in the superset. No banked count-calibrator bar
 (no count head prices RBI or R alone), so acceptance = the standing gates. `PLATT_CAL`
 automatic via `set(PROPS)`. Same downstream wiring list as H1/H3.
 
-### H5 — `team_total` head (per-team total runs) — `READY` (2026-07-14, user ask)
+### H5 — `team_total` head (per-team total runs) — `SHIPPED 2026-07-15` (2026-07-14, user ask)
 
 A new OUTPUT head — the underlying GBM already exists and is already evaluated:
 `team_runs_model` predicts per-team
@@ -478,7 +495,7 @@ from final scores (`mlb_games` AwayScore/HomeScore — no new data); (5)
 `prop_rankings`/`Props.txt` entries; (6) evaluate_deep gains a team-total line read next
 to the game-total one.
 
-### H6 — Four new batter count heads: `xh`, `xrun`, `xrbi`, `xbb` — `READY` (2026-07-14, user ask)
+### H6 — Four new batter count heads: `xh`, `xrun`, `xrbi`, `xbb` — `SHIPPED 2026-07-15` (2026-07-14, user ask)
 
 Completes the expected-stat-line: the existing x-heads (`xbk`/`xtb`/`xhrr`) are exactly
 the batter stats with heavy count mass above 1; these four finish the set (xH / xR /
@@ -498,10 +515,60 @@ mean — a batter-grain vs team-grain coherence read evaluate_deep has never had
 (x1b/x2b/x3b) — rare events (P(2+) ≤ 0.7%) where E[X] ≈ P(X≥1): the binary already IS
 the mean; a count head would re-learn it with extra variance.
 
+### H7 — Per-batter SIM_BLEND extension, `bb` first — `IDEA` (2026-07-15 blend evidence)
+
+Surfaced by the 07-15 finish-chain pa_blend rerun (hazard v2 + battery engine): `bb`
+was the ONLY batter head blend-positive in BOTH fit directions — fit-2025 w=0.25 with
+SIM+ verdicts on log-loss (+0.00038) AND AUC (+0.0011) evaluated on 2026, and w=0.30
+positive-tie in the reverse direction. No other batter head cleared a verdict in the
+operative direction. Plausible mechanism: walks are the most matchup/pitch-count-driven
+batter event, exactly what the PA-sim models and the game-grain GBM can't see.
+NOT wired: serving SIM_BLEND is game-level only (`predict._sim_game` → score/total/
+winner); a per-batter blend needs pa_serve to return lineup-slot-keyed sim
+probabilities and predict.py to join + blend them on the batter frame — a real build,
+not a weight edit. If built, re-fit w on 2025 at that day's model (don't carry 0.25
+blind), and read the other batter heads again while there (run/single/bk2 were SIM+
+only in the reverse direction today — noise or asymmetry, undecided).
+
 ---
 
+## Era-audit watch ledger (mid-Aug pass) — seeded 2026-07-15 at ship
+
+Items the 07-15 ship verdict explicitly deferred to the mid-August era audit,
+so they aren't lost to memory:
+
+1. **`double`** — top target. The only decisively HARMED head in the paired ship
+   read (−0.0065 AUC, cal slope 0.83, BH-survived); also floor-short in selection
+   (kept 26 < 40, pre-topup 16). Candidate actions: selection re-run at looser
+   eps for this head, param re-sweep, or accept-as-weak with the board demoting it.
+2. **`bk`/`bk2` edge softness** — marginal negatives in the paired read; watch the
+   forward record before touching.
+3. **`xhrr`/`xtb`/`per` dispersion drift** — flagged "worse" in the 07-15 confirm
+   Section-11 diff; dispersion is serving-relevant (line shading). Re-read on
+   forward data.
+4. **`bk3`/`hrr4` binary-anyway re-test** — user shipped them binary over hairline
+   bar misses (H1 verdict); re-read vs their banked count calibrators on
+   accumulated forward data.
+5. **#35 battery attribution** — sb blend w stayed 0; the battery's isolated
+   game-head effect is unattributed (4-backtest STEAL_BATTERY=False A/B, ~40 min).
+6. **Inert ballast** — ~78 of the ~1,895 kept slots showed zero usage in the
+   shipped train (feature-usage gate read); a selection re-run naturally prunes
+   them, no action needed before one happens for other reasons.
+7. Standing items from the pre-ship ledger: xhrr/xtb accepted-harm ×2, winner
+   keep-list size (18), double shield, hits2 softness, sb repair, Aug bb-recal
+   check.
+
 ## Log
-- 2026-07-15 (adjudications, latest): user picked (1) steal-layer battery modulation →
+- 2026-07-15 PM (ship-out adjudications, latest): user ratified the full new model
+  ("despite the 9 worse" 2026 confirm rows — no CI-clear harm, all same-sign as 2025),
+  then the three Phase-3 blend calls on the fresh pa_blend table (all Claude-rec):
+  (1) SIM_BLEND = fit-2025 verbatim {score .60, total .55, winner .30} — resolves
+  Decline-ledger #8 (first table had a stale-parquet duplication, clean re-fit moved
+  only score .65→.60; see #8's correction note); (2) hazard v2 KEEP (the earning
+  engine; v1 slice stays for rollback); (3) steal layer w=0 + battery stays live
+  in-engine (#35 graded: didn't unlock sb; isolated game-head effect unattributed →
+  era-audit candidate). New: H7 per-batter bb blend idea from the same table.
+- 2026-07-15 (adjudications): user picked (1) steal-layer battery modulation →
   Phase-3 rider (spec at FINISH_PLAN Phase-3 step 2; do NOT build before the blend
   re-sweep) and (2) franchise-rename alias fix NOW → `TEAM_RENAMES`/`_alias_renamed_teams`
   in features.load_raw duplicates pre-rename rows (OAK→ATH) for the two team-keyed
@@ -744,3 +811,15 @@ finish batch and are OWED a proper decision.
    pa_blend, re-decide ALL THREE weights from 2025-only evidence (2026 may
    veto the package, never set a weight). predict.SIM_BLEND carries the
    matching comment.
+   **RESOLVED 2026-07-15 PM (finish-chain Phase-3 re-sweep): pa_blend rerun
+   on the shipped model (hazard v2 + #35 battery live). Fit-2025 weights
+   {score 0.60, total 0.55, winner 0.30}; 2026 confirm-only read = no
+   CI-clear harm (score +0.0058 MAE / winner +0.0010 LL positive-tie, total
+   −0.0034 tie). USER rule = wire the fit-2025 verbatim, no moderation, per
+   the pre-registration. CORRECTION SAME DAY: the first table shown carried
+   a stale-parquet duplication (pa_grade._sim's glob concatenated the
+   superseded 07-14 combined backtest parquets WITH the fresh 07-15 parts,
+   doubling every game); the clean re-fit moved only score (0.65→0.60) —
+   every verdict (total, winner, sb=0, bb SIM+) unchanged. _sim now prefers
+   part files and hard-errors on duplicate keys. Debt cleared;
+   predict.SIM_BLEND comment updated.**

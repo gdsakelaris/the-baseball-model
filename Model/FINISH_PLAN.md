@@ -237,6 +237,17 @@ Per the specs in FEATURE_BACKLOG Part 3 #H1/#H3/#H4/#H5/#H6:
 
 ## Phase 3 — PA-sim finishing
 
+**DONE 2026-07-15 PM.** Backtests ×4 rerun on the shipped model (hazard v2 + #35
+battery live); `pa_blend` fit 2025-only; user calls: SIM_BLEND = {score .60,
+total .55, winner .30} fit-2025 verbatim (Decline-ledger #8 resolved), hazard v2
+KEEP, steal layer w=0 with battery staying live in-engine (#35 graded — see
+FEATURE_BACKLOG). 2026 read = confirm-only, no CI-clear harm. New idea banked: H7
+per-batter `bb` blend (SIM+ both directions, unplumbed). Same-day correction:
+the first blend table double-counted every game (stale 07-14 combined parquets
+matched pa_grade._sim's glob alongside the fresh parts); clean re-fit moved only
+score (.65→.60), all verdicts unchanged, loader hardened (parts preferred +
+duplicate-key error).
+
 1. **Hazard v2** (bf-relative) — the queued outs fix; the single biggest unknown in this
    plan (engine work in `pa_engine`/`pa_sim`, then `pa_backtest` regrade).
 2. **Steal-layer blend re-sweep** — currently w=0; re-sweep after hazard v2 + the new sb

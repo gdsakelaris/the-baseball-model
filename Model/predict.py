@@ -111,18 +111,20 @@ NB_PRICED_TARGETS = {"y_per", "y_so", "total_runs"}
 
 # PA-sim game-level blend (Phase 3, 2026-07-13): w_sim per head, applied
 # to the sim outputs from Model/pa_serve.py — score/total means linear,
-# winner on logits. Evidence (fixed-w day-block CI vs the shipped
-# incumbent, hook engine): score CI-clear SIM+ both years at w=.3
-# (+.0068/+.0046); winner positive-tie both years -> USER call 07-13: in
-# at .30. Empty dict (or missing sim artifacts) = incumbent alone;
-# batter/starter heads and sb stay incumbent (w=0 verdicts).
-# LEDGERED EXCEPTION (audit #7, user decision 2026-07-15): total's 0.20
-# was chosen half-weight AFTER seeing 2026 flat — a 2026-informed tune
-# that predates the "2026 may veto, never tune" rule. Kept as-is,
-# recorded in FEATURE_BACKLOG's Decline/exception ledger, and marked for
-# a 2025-ONLY re-decision when the finish chain reruns pa_blend (the raw
-# 2025 fit was w=0.50).
-SIM_BLEND = {"score": 0.35, "total": 0.20, "winner": 0.30}
+# winner on logits. Empty dict (or missing sim artifacts) = incumbent
+# alone; batter/starter heads and sb stay incumbent (w=0 verdicts —
+# reaffirmed 07-15 with the #35 battery live: sb fit-2025 w still 0).
+# Weights = the 2026-07-15 finish-chain pa_blend fit on 2025 ONLY
+# (hazard v2 engine, battery live), 2026 confirm-only read showed no
+# CI-clear harm; USER decision 07-15 = wire the fit-2025 verbatim. This
+# re-decision RESOLVES the audit-#7 ledgered exception on total (its old
+# 0.20 was a 2026-informed half-weight tune; the fresh 2025-only fit
+# says 0.55). NOTE: the first table shown carried a stale-parquet
+# duplication (pa_grade._sim glob matched the superseded 07-14 combined
+# files alongside the 07-15 parts — fixed in pa_grade); the clean re-fit
+# moved only score (0.65 -> 0.60), and the ratified verbatim rule was
+# applied to the corrected fit.
+SIM_BLEND = {"score": 0.60, "total": 0.55, "winner": 0.30}
 
 
 def _sim_logit(p):

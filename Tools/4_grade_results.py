@@ -44,8 +44,8 @@ After painting, prints a backtest-style day report (2026-07-14): per head,
 n / actual vs stated rate / AUC / logloss / Brier against the day's base
 rate — the same reads evaluate_deep prints per head — plus the over-50%
 pick ledger. One day is a small sample: treat thin-head AUC as directional
-and use Tools/hit_rate_report.py for the across-days accumulation of the
-identical cell surface.
+and use --all for the across-days accumulation of the identical cell
+surface (hit_rate_report.py retired 2026-07-15 — --all replaced it).
 
 The summary above that report also scores the blue picks: how many of the
 light-blue rank-quality cells actually hit (with the purple ones — a
@@ -713,8 +713,8 @@ def day_report(rows, title="Day report: per-head, backtest-style"):
     whole accumulated record — same table, pooled rows).
 
     Per head (in board order, grouped by sheet): graded cells, the
-    actual occurrence rate vs the stated average (gap = actual - stated,
-    hit_rate_report's sign), AUC, and logloss/Brier next to what a
+    actual occurrence rate vs the stated average (gap = actual - stated),
+    AUC, and logloss/Brier next to what a
     constant base-rate forecast scores — the same per-head surface
     evaluate_deep prints for a backtest year. Then the over-50% pick
     ledger. Mean columns have no yes/no event and never enter.

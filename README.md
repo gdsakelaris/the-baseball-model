@@ -82,10 +82,10 @@ metrics, calibration tables, and a 2025 stability backtest live in
 | Path | Role |
 |---|---|
 | `Scrapers/` | 10+ scrapers (MLB Stats API, Baseball Savant, rosters, weather) + `update_all.py` one-command refresh + `seasons.py` (single source of truth for covered seasons — the annual rollover needs no code edits) + `run_daily_update.cmd` (the 6 AM Task Scheduler entry point) |
-| `Tools/` | The manually-run toolkit, numbered in game-day order: `1_get_todays_games.py` (today's lineups/weather), `2_scrape_odds.py` (real closing lines, near game time), `3_gui.py` (the Tkinter app), `4_grade_results.py` / `hit_rate_report.py` (grade finished slates), `prop_rankings.py` (writes the `PROP_RANKINGS.xlsx` quality workbook kept alongside it) |
+| `Tools/` | The manually-run toolkit, numbered in game-day order: `1_get_todays_games.py` (today's lineups/weather), `2_scrape_odds.py` (real closing lines, near game time), `3_gui.py` (the Tkinter app), `4_grade_results.py` (grade finished slates; `--all` = the accumulated forward record), `5_performance.py` (per-head metrics snapshot → `performance.txt`), `prop_rankings.py` (writes the `PROP_RANKINGS.xlsx` quality workbook kept alongside it) |
 | `Data/` | Scraped CSVs (~55 MB, gitignored — regenerate with `update_all.py`); schema documented in `Data/GLOSSARY.md` |
-| `Model/features.py` | Feature engineering: ~200 batter features, starter/game/winner frames, Elo, shared by training and inference |
-| `Model/train.py` | Builds frames, trains all models (14 props, K + count heads, runs, winner) for both suites — model-selection and shipping, with the year splits derived from the data; `--select` stops after the selection suite for fast iteration |
+| `Model/features.py` | Feature engineering: 522-column batter superset + starter/game/winner frames, Elo, shared by training and inference |
+| `Model/train.py` | Builds frames, trains all 36 heads for both suites — model-selection and shipping, with the year splits derived from the data; `--select` stops after the selection suite for fast iteration |
 | `Model/odds.py`, `recalibrate.py` | Odds/de-vig/EV math + odds-store schema; and the leakage-free in-season drift correction |
 | `Model/predict.py` | Prediction engine + Excel reports; `--game` replays history, `--selftest` checks parity, `--recal` applies in-season drift offsets |
 | `Model/evaluate_deep.py` | Full holdout workup: bootstrap CIs, drift, segments, betting thresholds, K/totals/winner, model-vs-market ROI (Section 9), in-season recalibration backtest (Section 10), and `--set-baseline` regression diffing with noise bands (Section 11). Default run scores the selection suite on 2025 (iterate freely); `--confirm` scores shipping on 2026 |

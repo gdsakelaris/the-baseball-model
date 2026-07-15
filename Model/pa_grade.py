@@ -36,8 +36,21 @@ COUNT_MEANS = {"xbk": "xbk", "xhrr": "xhrr", "xtb": "xtb", "k": "xk",
 
 
 def _sim(year, kind):
-    parts = sorted(glob.glob(str(ART / f"sim_backtest_{kind}_{year}*.parquet")))
-    return pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
+    # Prefer part files (pa_backtest --part) over a same-year combined file:
+    # the loose glob once concatenated a superseded combined parquet WITH the
+    # fresh parts, silently doubling every game in the 07-15 blend fit.
+    all_ = sorted(glob.glob(str(ART / f"sim_backtest_{kind}_{year}*.parquet")))
+    parts = [p for p in all_ if "of" in Path(p).stem.rsplit("_", 1)[-1]]
+    use = parts or all_
+    df = pd.concat([pd.read_parquet(p) for p in use], ignore_index=True)
+    keys = [k for k in ("GamePk", "PlayerId", "Home") if k in df.columns]
+    ndup = int(df.duplicated(subset=keys).sum())
+    if ndup:
+        raise RuntimeError(
+            f"sim_backtest_{kind}_{year}: {ndup} duplicate rows across "
+            f"{[Path(p).name for p in use]} — stale/overlapping parquets; "
+            "delete the superseded files and re-run.")
+    return df
 
 
 def _block_delta(dates, inc_rows, sim_rows, stat, y=None):
