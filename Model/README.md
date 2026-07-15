@@ -1,8 +1,10 @@
 # MLB Prediction Model
 
-Gradient-boosted (LightGBM) models trained on the CSVs in `Data/`, predicting
-per game (or per slate of games — the GUI's "Add game to slate" runs many at
-once with one combined, cross-game-ranked board):
+Gradient-boosted ensembles (LightGBM seed bags; XGBoost + CatBoost family
+members in the shipped 3-family configuration — `train.py LGBM_ONLY_TEMP`
+gates a temporary LGBM-only iteration regime) trained on the CSVs in
+`Data/`, predicting per game (or per slate of games — the GUI's "Add game
+to slate" runs many at once with one combined, cross-game-ranked board):
 
 - **Per lineup batter:** calibrated probabilities for 14 props — home
   run (with fair American odds), 1+ hit, 2+ hits, 2+ total bases, run
@@ -32,7 +34,7 @@ once with one combined, cross-game-ranked board):
 | File | Role |
 |---|---|
 | `features.py` | Feature engineering. Everything is **as-of date**: a game on date D only uses data from before D (no leakage). Same definitions serve training (vectorized) and prediction (per-entity); `predict.py --selftest` proves the two paths agree. |
-| `train.py` | Builds frames, trains everything: the model-SELECTION suite (→ `models_bt.joblib`) and then the shipping models (→ `models.joblib`). The train/cal/holdout years are DERIVED from the seasons in the data (`suite_years`), so the annual rollover needs no code edit — currently ≤2023/2024/2025 and ≤2024/2025/2026. The weaker batter props (hit, tb2, run, rbi, hrr2, hrr3 + the xHRR/xTB count heads) are **seed-bagged** — 5 GBMs differing only in seed, predictions averaged (`PROP_BAGS`, `features.MeanBag`) — and run/hrr2 carry heavier-regularization overrides (`PROP_PARAMS`); both changes bought calibration (rbi ECE .0085→.0037 on the 2025 selection year) and shrink retrain jitter on those props. `--rebuild` refreshes cached frames after re-scraping data; `--select` stops after the selection suite (the fast iteration loop). |
+| `train.py` | Builds frames, trains everything. TWO ROLES (2026-07-15): with `feature_keep.json` present it is the KEEP-train and writes the serving artifacts (`models_bt.joblib` selection suite, `models.joblib` shipping suite); without it it is the SUPERSET train and writes `models_superset*.joblib` (feature_select's electorate — cheaper regime: fewer bags + a row sample, documented mismatch). Train/cal/holdout years are DERIVED from the data (`suite_years`) — currently ≤2023/2024/2025 and ≤2024/2025/2026; boosters early-stop on a held-out ~10% GamePk slice of the TRAINING rows (`_es_split`), never the calibration year. Heads are seed-bagged LightGBM (`LGBM_BAGS`) + XGB/CB family members when `LGBM_ONLY_TEMP` is off; per-head overrides in `PROP_PARAMS`. Artifacts carry a `meta_stamp` (role/regime/created) that predict.py's serving guard enforces. `--rebuild` refreshes cached frames; `--select` stops after the selection suite. |
 | `predict.py` | `Predictor.predict_game(spec)`; CLI: `--game <GamePk>` replays a historical game, `--selftest` checks train/serve parity. Every run saves a workbook to `Predictions/`. |
 | `odds.py` | Sportsbook-odds utilities: American↔probability, de-vig, EV/ROI, and the canonical odds-store schema. Bridges the model's fair probabilities to the prices books actually post; shared by `Tools/2_scrape_odds.py` and evaluate_deep Section 9. |
 | `recalibrate.py` | In-season drift correction: a per-prop log-odds shift fit only on recent in-season games (leakage-free). Stored by `train.py`, backtested in evaluate_deep Section 10, applied at serving with `predict.py --recal`. |
@@ -44,7 +46,7 @@ run order: `1_get_todays_games.py`, `2_scrape_odds.py`, `3_gui.py` (the
 Tkinter app), `4_grade_results.py`, plus `hit_rate_report.py` and
 `prop_rankings.py`.
 
-## What the model knows (features, ~100 per batter-game)
+## What the model knows (~575-column batter-game superset; stability selection picks each head's columns)
 
 - **Batter form:** career / season-to-date / rolling 7-15-30-game HR rate,
   ISO, contact, K/BB rates, XBH rate, full OBP (incl. HBP); days rest;
@@ -112,19 +114,31 @@ Tkinter app), `4_grade_results.py`, plus `hit_rate_report.py` and
   home-minus-away differentials for all of the above plus starter/bullpen
   quality and rest.
 
-Feature routing is per-prop (`train.py PROP_EXCLUDE`): specialized groups
-only reach the props they describe (SB features only the SB model, teammate
-context only run/RBI, power-quality only the power props), so thin-signal
-models aren't diluted by irrelevant columns.
+Which columns each head actually trains on is decided by automated
+stability selection alone (`feature_select.py` → `feature_keep.json`); the
+old hand-curated per-prop routing tables were retired 2026-07-10 and
+deleted 2026-07-15 (git history keeps them).
 
 ## Honest evaluation (2026 season = confirm-only holdout)
 
-Trained on 2020–2024, calibrated on 2025, tested on 2026. **2026 is
-confirm-only**: iterating features/params against its numbers quietly
-overfits the holdout, so day-to-day model selection runs on a separate
-suite (train ≤2023, cal 2024, test 2025) that both `train.py` and
-`evaluate_deep.py` use **by default**; 2026 gets one confirming look per
-finished change via `evaluate_deep.py --confirm`.
+Trained on 2015–2024 (boosters early-stop on a held-out ~10% GamePk slice
+of the training rows, never the calibration year — audit fix #2),
+calibrated on 2025, tested on 2026. **2026 is confirm-only**: iterating
+features/params against its numbers quietly overfits the holdout, so
+day-to-day model selection runs on a separate suite (train ≤2023, cal
+2024, test 2025) that both `train.py` and `evaluate_deep.py` use **by
+default**; 2026 gets one confirming look per finished change via
+`evaluate_deep.py --confirm --set-baseline` — run DELIBERATELY, never by
+the daily job (audit #6).
+
+Data roles are graded tiers, not clean labels: 2015–2024 train / 2025
+calibration + selection + iteration verdicts (heavily mined — treat 2025
+numbers as upper bounds) / 2026 lightly touched / the timestamped forward
+record from 2026-07-15 is the ONLY fully untouched test. `--paired`
+verdicts gate on a Benjamini–Hochberg false-discovery correction
+(`--fdr`, default 0.10) because one read makes 100+ simultaneous CI
+tests (audit #1); repeated reads against the same season remain
+sequential testing that no correction repairs — hence the forward record.
 
 | Model | Metric | Model | Baseline |
 |---|---|---|---|
@@ -136,12 +150,13 @@ finished change via `evaluate_deep.py --confirm`.
 | Total runs | MAE | **3.55** | 3.63 (team scoring rates) |
 
 The 2025 backtest (train ≤2023) gives nearly identical numbers, so the edge
-is stable across seasons. Probabilities are isotonic-calibrated: when the
-model says 20%, it happens ~20% of the time (see `metrics.json` calibration
-tables).
+is stable across seasons. Binary probabilities are Platt-calibrated
+(`train.py PLATT_CAL` — every binary head + the winner; count heads use
+cal-year per-line logistic calibrators): when the model says 20%, it
+happens ~20% of the time.
 
-The table above predates the 2026-07 upgrade (dedicated winner model,
-negative-binomial totals, league-environment drift features) — after
+The table above is a HISTORIC snapshot (it predates the 2026-07 upgrades:
+3-family ensemble, 24 binary heads, PA-sim blend, 2015+ data) — after
 retraining, `metrics.json` and `python Model/evaluate_deep.py` have the
 current numbers — confidence intervals, drift, segments, betting-threshold
 views, and a `--set-baseline` diff of what a change moved.
@@ -154,6 +169,17 @@ books price HR props with an 8–15% margin and set lines with more
 information (confirmed lineups, real-time weather, sharp money). Use the
 fair-odds column to find prices that look off, track results against
 closing lines before staking anything, and treat small edges as noise.
+
+**Backtests are structurally rosier than live serving (audit #4).** Two
+named channels beyond the usual caveats: (1) training weather is the
+ACTUAL observed game weather, but live slates are served pre-game
+FORECASTS (rotowire/fantasypros/open-meteo) — the model learned the value
+of true temp/wind and gets noisier proxies live, so weather-sensitive
+heads (HR especially) will under-deliver their backtest numbers;
+`1_get_todays_games.py` now archives every served forecast to
+`Data/mlb_weather_forecast.csv` so this gap becomes measurable against
+the actuals. (2) Backtests always know the HP umpire; live slates often
+don't until near game time (served as neutral league priors).
 
 ## Workflow
 
@@ -175,7 +201,12 @@ python Scrapers/update_all.py
 # check the data files by hand (same validation the pipeline runs)
 python Scrapers/validate_data.py
 
-# retrain manually — selection suite + shipping models (~2 min total)
+# retrain manually — selection suite + shipping models (a FULL two-suite
+# retrain on the current ~575-column superset runs ~1.5h; LGBM-only
+# iteration regimes are faster). A run with feature_keep.json present is a
+# KEEP-train and writes the serving artifacts (models*.joblib); without it
+# it is a SUPERSET train and writes models_superset*.joblib — the serving
+# artifacts are never touched by experiments (audit #8).
 python Model/train.py --rebuild
 
 # game day: scrape today's matchups/lineups/weather into an input file

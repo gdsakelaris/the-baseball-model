@@ -1,20 +1,21 @@
 """Train the MLB prediction models.
 
-Models (all LightGBM):
-  batter props (binary + isotonic calibration):
-    hr, hit, hits2 (2+ hits), tb2 (2+ total bases), run (run scored),
-    rbi (1+ RBI), bb (walk), sb (stolen base), single (1+), double (1+),
-    bk/bk2 (1+/2+ batter strikeouts), hrr2/hrr3 (2+/3+ hits+runs+RBIs)
+Models (LightGBM seed bags; XGBoost + CatBoost family members join when
+LGBM_ONLY_TEMP is False — the shipped 3-family ensemble):
+  batter props (binary, Platt-calibrated): the 24 heads in PROPS below
+    (hit/run/RBI/TB/K/H+R+RBI thresholds, single/double/triple, sb, bb)
   k     starter strikeouts in the game              Poisson regression
-  count heads (starter-K pattern, mean + cal-year NB dispersion):
-    xbk/xhrr (batter K and H+R+RBI means), outs, pbb, pha, per (starter
-    outs / walks allowed / hits allowed / earned runs, with P(over) lines;
-    per also drives a derived expected ERA in predict.py)
-  runs  game total runs                             Poisson regression
+  count heads (mean + cal-year per-line calibrators): batter xSO/xHRR/xTB/
+    xH/xR/xRBI/xBB and starter outs/pbb/pha/per (P(over) lines; per also
+    drives a derived expected ERA in predict.py)
+  runs  game total runs (per-team)                  Poisson regression
+  winner  dedicated home-win classifier, blended with the runs model
 
 Honest evaluation protocol (no leakage):
-  train on every season but the newest two  ->  early-stop & calibrate on
-  the next-to-newest  ->  test on the newest (e.g. 2020-2024 / 2025 / 2026).
+  train on every season but the newest two (boosters early-stop on a
+  held-out ~10% GamePk slice of the TRAINING rows — see _es_split)  ->
+  blend + calibrate on the next-to-newest  ->  test on the newest
+  (e.g. 2015-2024 / 2025 / 2026).
 The split is DERIVED from the seasons present in the data (suite_years), so
 the annual rollover needs no code edit: once a new season accrues real
 games it becomes the holdout, the old holdout graduates to calibration, and
@@ -73,12 +74,13 @@ LGB_POIS = dict(n_estimators=2000, learning_rate=0.03, num_leaves=63,
 # The winner model trains on ~10k games, not ~190k batter-games: batter-scale
 # capacity overfit instantly (v1 early-stopped at 26 trees, test AUC 0.52).
 # Small trees + heavy regularization let boosting actually accumulate signal.
-# mcs 150->300 / rl 10->6 = the 2026-07-13 families-aware sweep's "reg_up"
-# (its largest gated win: ensemble OOF logloss -0.0018, AUC +0.0014); the
-# XGB/CB winner members keep their standing params — the sweep fit them
-# as-is, so the recommendation already accounts for them.
-LGB_WIN = dict(n_estimators=3000, learning_rate=0.02, num_leaves=15,
-               min_child_samples=300, subsample=0.9, subsample_freq=1,
+# num_leaves 15->7 / mcs 300->200 = the 2026-07-15 LGBM-only sweep's "leaves7"
+# (winner's largest single-bag CV win: logloss -0.0016, AUC +0.0023 vs the
+# prior reg_up base). CAVEAT: a single-bag pick for a 5-bag ship on a
+# ~10k-row head — the one most prone to over-regularization — so confirm on
+# the keep-train via evaluate_deep --paired before trusting the deeper cut.
+LGB_WIN = dict(n_estimators=3000, learning_rate=0.02, num_leaves=7,
+               min_child_samples=200, subsample=0.9, subsample_freq=1,
                colsample_bytree=0.7, reg_lambda=6.0, objective="binary",
                verbose=-1)
 
@@ -106,14 +108,24 @@ HR_MONOTONE = {
 # guarantee on odd GUI inputs; keep unless the paired read shows harm.
 MONOTONE = {"hr": HR_MONOTONE}
 
-# Seed bagging (2026-07-08) for the weak/target props: N GBMs differing
-# only in random_state, predictions averaged (features.MeanBag) before the
-# LR blend + isotonic. Variance reduction, not new signal — kept under the
-# strictly-not-worse standard because it also SHRINKS these props' retrain
-# jitter, making every future Section-11 read on them sharper. Bag 0 keeps
-# LightGBM's default seed (the incumbent model exactly).
-PROP_BAGS = {"hit": 5, "tb2": 5, "run": 5, "rbi": 5, "hrr2": 5, "hrr3": 5}
-COUNT_BAGS = {"xhrr": 5, "xtb": 5}
+# LightGBM seed bagging: LGBM_BAGS GBMs differing only in random_state,
+# predictions averaged (features.MeanBag) before the LR blend + isotonic.
+# Variance reduction, not new signal — it also SHRINKS retrain jitter,
+# making every future Section-11 paired read sharper. Bag 0 keeps
+# LightGBM's default seed (the pre-bagging incumbent exactly); bags
+# 1..N-1 reseed.
+# History: added 2026-07-08 at 5 for a hand-picked "weak/target" prop set
+# only (the old PROP_BAGS/COUNT_BAGS dicts); made UNIFORM across EVERY head
+# at 6 on 2026-07-14 (user). The targeted scope predated the full-board
+# family bags (XGB/CB went everywhere 07-10) and left the selection vote
+# coarse for the 27 unbagged heads (a lone LGBM member votes a hard 0/1 in
+# feature_select). Every head carries a multi-member LGBM bag so the feature
+# vote is granular (0/.17/.33/.../1). 2026-07-15 (user): SPLIT by pass — the
+# shipped KEEP-train keeps a 5-member bag (LGBM_BAGS below); the SUPERSET
+# train (no keep-list; feeds only feature_select) drops to 3 bags + a row
+# sample — see the _KEEP_TRAIN block just after FEATURE_KEEP. Set to 1 to
+# revert to a single member.
+LGBM_BAGS = 6   # shipped keep-train (6 bags, user 07-15); superset overridden to 3 below
 
 # Family bagging (2026-07-10 experiment, FULL BOARD per user): XGBoost
 # members appended to every GBM head's bag — binaries, count heads (k
@@ -126,7 +138,15 @@ COUNT_BAGS = {"xhrr": 5, "xtb": 5}
 # ~mu Poisson). XGBoost rejects the ±inf the frames carry (LightGBM
 # tolerates them), hence features.InfSafe. Set XGB_BAGS = 0 to revert to
 # pure-LightGBM everywhere.
-XGB_BAGS = 2  # SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
+#
+# TEMP 2026-07-14 (user): LGBM_ONLY_TEMP drops the XGB+CB families so the
+# FINISH_PLAN build batch can iterate on retrains cheaply (6 LGBM bags per
+# head only). Downstream adapts on its own: feature_select votes only the
+# families present, predict's _force_xgb_cpu no-ops, param_sweep reads
+# these constants. Flip to False before the FINAL two-train chain so the
+# shipped ensemble is 3-family again (LGBM 6 + XGB 2 + CB 2).
+LGBM_ONLY_TEMP = True
+XGB_BAGS = 0 if LGBM_ONLY_TEMP else 2  # 2 = SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
 XGB_CLS = dict(n_estimators=3000, learning_rate=0.03, tree_method="hist",
                grow_policy="lossguide", max_leaves=127, max_depth=0,
                min_child_weight=16, subsample=0.8, colsample_bytree=0.8,
@@ -156,7 +176,7 @@ XGB_WIN = dict(n_estimators=3000, learning_rate=0.02, tree_method="hist",
 # smoke-tested 2026-07-10 but held at 0 for the XGB confirm (CatBoost fits
 # cost 2-4x XGB — a three-family full train couldn't land before the 06:00
 # job); flip to 2 as the next selection-year iteration.
-CB_BAGS = 2  # SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
+CB_BAGS = 0 if LGBM_ONLY_TEMP else 2  # 2 = SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
 CB_CLS = dict(iterations=3000, learning_rate=0.03, depth=8,
               l2_leaf_reg=3.0, loss_function="Logloss",
               eval_metric="Logloss", early_stopping_rounds=150,
@@ -173,228 +193,47 @@ CB_WIN = dict(iterations=3000, learning_rate=0.02, depth=4,
               verbose=0, allow_writing_files=False,
               task_type="GPU", devices="0")
 
-# Per-prop LightGBM overrides — RE-SWEPT 2026-07-13 with param_sweep
-# --ensemble (XGB+CatBoost members fit per fold, the ENSEMBLE's OOF
-# scored — the honest objective now that the bag ships). Verdict: with
-# the families averaging away variance, the 07-10 LGBM-only overrides
-# are mostly REDUNDANT — 19/23 heads returned to the global bases (the
-# 07-10 SHIP CAVEAT anticipated exactly this). Survivors cleared the
-# gates against the raw base on the current 559-col/2015+ regime: run
-# -.0005, hits2 -.0005, hrr2 -.0004 OOF logloss (winner's move lives in
-# LGB_WIN above). Heads not listed = LGB_CLS/LGB_POIS.
+# Per-prop LightGBM overrides — RE-SWEPT 2026-07-15 with param_sweep
+# (LGBM-only, single-bag CV, Season<=2024 with 2025 untouched) on the
+# fresh pi=0.6 keep-lists. The leaner keep-lists shifted every binary
+# head's optimum toward more regularization: 17/21 binary props took a
+# reg_med / reg_med2 / reg_heavy / lr_slow profile (all -0.0005..-0.0016
+# CV logloss vs their raw base); every count head + hr/tb4/triple/run2
+# kept default (default won their CV). winner's move (leaves7) lives in
+# LGB_WIN above. Heads not listed = LGB_CLS/LGB_POIS.
+# CAVEAT: single-bag CV over-prefers regularization vs the 5-bag ship —
+# these are recommendations, confirmed as a package by evaluate_deep
+# --paired on the actual keep-train before they are trusted.
+_REG_MED  = dict(num_leaves=63, min_child_samples=160)
 _REG_MED2 = dict(num_leaves=63, min_child_samples=300,
                  colsample_bytree=0.7, reg_lambda=6.0)
+_REG_HEAVY = dict(num_leaves=31, min_child_samples=300,
+                  colsample_bytree=0.7, reg_lambda=6.0)
 PROP_PARAMS = {
-    "run":    dict(LGB_CLS, min_child_samples=160),        # reg_light
-    "hits2":  dict(LGB_CLS, **_REG_MED2),
+    "run":    dict(LGB_CLS, **_REG_MED2),
+    "rbi":    dict(LGB_CLS, **_REG_MED),
+    "hit":    dict(LGB_CLS, **_REG_MED),
+    "hits2":  dict(LGB_CLS, **_REG_HEAVY),
+    "tb2":    dict(LGB_CLS, **_REG_HEAVY),
+    "single": dict(LGB_CLS, learning_rate=0.02),
+    "double": dict(LGB_CLS, **_REG_MED2),
+    "bb":     dict(LGB_CLS, **_REG_MED),
+    "sb":     dict(LGB_CLS, **_REG_MED2),
+    "bk":     dict(LGB_CLS, **_REG_MED),
+    "bk2":    dict(LGB_CLS, **_REG_MED),
     "hrr2":   dict(LGB_CLS, **_REG_MED2),
+    "hrr3":   dict(LGB_CLS, **_REG_HEAVY),
+    "bk3":    dict(LGB_CLS, **_REG_MED2),
+    "tb3":    dict(LGB_CLS, **_REG_MED),
+    "hrr4":   dict(LGB_CLS, **_REG_MED2),
+    "rbi2":   dict(LGB_CLS, **_REG_HEAVY),
 }
 
-# Per-prop feature routing. The batter frame carries a SUPERSET of columns;
-# each prop trains on the superset minus the groups that don't speak to it.
-# The SB prop is the cautionary tale: it regressed when the platoon-split
-# columns arrived (iteration 2) — models with thin true signal are the most
-# sensitive to dilution, so specialized groups only reach the props they
-# describe. Each prop's actual column list is saved in its artifact, so
-# predict/evaluate pick it up automatically.
-_SB_FEATS = ["c_sb_pa_sh", "s_sb_pa_sh", "r7_sb_pa_sh", "r15_sb_pa_sh",
-             "r30_sb_pa_sh", "d_sb_pa_sh", "c_sb_succ", "psb_sb27",
-             "psb_stop", "tsb_sb_g", "tsb_stop"]
-_RUNRBI = ["c_r_pa_sh", "s_r_pa_sh", "c_rbi_pa_sh", "s_rbi_pa_sh"]
-# rolling/decayed R+RBI form: benched 2026-07-08 on run_ece, RE-ACCEPTED
-# 2026-07-09 (queue Tier B5) with run routed around — excluded everywhere
-# _RUNRBI is, PLUS run; reaches rbi/hrr2/hrr3/xhrr
-_RUNRBI_FORM = list(F.RUNRBI_FORM_COLS)
-# own H+R+RBI threshold-share history: benched 2026-07-08 on hrr2_ece,
-# RE-ACCEPTED 2026-07-09 (queue Tier B6) with hrr2 routed around —
-# excluded from EVERY prop except hrr3 and the xhrr head
-_HRR_HIST = ["c_hrr2_g_sh", "s_hrr2_g_sh", "d_hrr2_g_sh",
-             "c_hrr3_g_sh", "s_hrr3_g_sh", "d_hrr3_g_sh"]
-# league 30-day environment + opposing-starter fatigue on the BATTER side:
-# benched iteration 4, re-tested 2026-07-09 (queue Tier C) — the re-test
-# CONFIRMED the bench: hits2 AUC -0.0019 CI-clear harm + broad negative
-# tilt (hit/bb/sb edges CI-negative) despite huge usage (lg_sb/bb_pa gain
-# 18-21k = dilution, not signal). Excluded from EVERY batter prop except
-# the xbk head, the one CI-clear WINNER (MAE +0.0004 [+0.0001,+0.0007] —
-# league K environment is on-topic for batter strikeouts, same reason the
-# starter-K model keeps lg_k_pa).
-_ENV = list(F.ENV_COLS)
-_PNP = ["p_np_last", "p_np_l3"]
-_TIERC = _ENV + _PNP
-# Productive/unproductive outs (features.SHRINK gidp_pa/sf_pa, 2026-07-09):
-# EB-shrunk career+season GIDP/PA and SF/PA rates. GIDP kills rallies -> hurts
-# both the batter's run and RBI, so it reaches run AND rbi; SF is a run-cashing
-# out (RBI without a hit) that says nothing about the batter scoring, so it
-# reaches rbi ONLY (run excludes _SF). Every other prop excludes _PRODOUT.
-_GIDP = ["c_gidp_pa_sh", "s_gidp_pa_sh"]
-_SF = ["c_sf_pa_sh", "s_sf_pa_sh"]
-_PRODOUT = _GIDP + _SF
-# NOTE: own H+R+RBI joint-threshold history (c/s/d_hrr{2,3}_g_sh, routed
-# here as _HRR_HIST to hrr2/hrr3/xhrr only, 2026-07-08) was BENCHED —
-# hrr2_ece 1.5x past band, AUC/edge/top10 flat everywhere; the features
-# live on in the frames + inference path (see features.HRR_SHRINK note).
-# NOTE: recency form for run/rbi (rolling + decayed own R/RBI rates,
-# routed here as _RUNRBI_FORM, 2026-07-08) was BENCHED — run_ece +.0063
-# marginal (past band), rbi mixed; see features.RUNRBI_FORM_BENCHED.
-# teammates ahead/behind. NOTE: the 90-day-decayed variants (ctx_*_d,
-# 2026-07-08) were tried on run/rbi/hrr and BENCHED — 0/0/76 within noise;
-# they carry ~the same information as the career rates (corr with targets
-# nearly identical). Computed in both paths, out of the superset.
-# ctx_*_d (90-day-decayed variants) re-accept test 2026-07-09 (queue Tier
-# A2, keep-leaning bar): benched 07-08 as 0/0/76 within-noise ballast;
-# keep unless the paired read shows harm.
-_CTX = ["ctx_ahead_obp", "ctx_behind_slg",
-        "ctx_ahead_obp_d", "ctx_behind_slg_d"]
-# rbi_opp_obp (full-order / deeper-order OBP of hitters ahead) BENCHED 2026-07-09
-# after three designs (0.5 & 0.7 full-order decay, 3rd-5th-ahead isolation) all
-# came back flat-to-slightly-negative on rbi/run/hrr — the order beyond the 2
-# men on adds nothing the model can't already infer from ctx_ahead_obp + own
-# rates + team offense. Frame + serving still COMPUTE it (features.RBI_OPP_AHEAD,
-# out of the superset); re-add here + to batter_feature_cols to re-enable.
-_OBP = ["c_obp", "s_obp"]
-_PWR = ["hrpt_score", "phrq_n", "phrq_ev_avg", "hrq_angle_avg",
-        "bat_goao", "pit_goao"]              # power-quality / fly-ball
-_XBH = ["c_xbh_ab", "s_xbh_ab"]
-_IBB = ["c_ibb_pa"]
-_VSH = ["vsh_PA", "vsh_hr_pa_sh", "vsh_tb_ab_sh", "vsh_k_pct_sh"]
-_VLOC = ["vloc_PA", "vloc_hr_pa_sh", "vloc_h_pa_sh", "vloc_tb_ab_sh",
-         "vloc_k_pct_sh"]
-_POS = ["pos_c_share", "pos_dh_share"]
-_PEN2 = ["pen_h_bf", "pen_hl_era", "pen_hl_k_bf", "pen_np_l3"]
-_TLOC = ["toff_loc_hr_pa", "toff_loc_r_pg"]
-_HBF = ["pc_h_bf", "ps_h_bf", "p5_h_bf"]     # starter hit suppression
-# Statcast contact quality (scrape_statcast.py). Split power vs hit-type so
-# the same dilution discipline applies: barrels/EV speak to power props,
-# xBA/xwOBA/GB to anything needing contact, nothing to walks or steals.
-_BIP_PWR = ["bip_ev", "bip_la", "bip_hh", "bip_brl",
-            "bip_pull", "bip_pullair",
-            "bipd_ev", "bipd_brl", "bipd_pullair",
-            "pbip_ev", "pbip_la", "pbip_hh", "pbip_brl",
-            "pbipd_ev", "pbipd_brl"]
-_BIP_HIT = ["bip_n", "bip_xba", "bip_xwoba", "bip_gb",
-            "bipd_n", "bipd_xwoba", "bipd_gb",
-            "pbip_n", "pbip_xba", "pbip_xwoba", "pbip_gb",
-            "pbipd_n", "pbipd_xwoba", "pbipd_gb"]
-_PLATE = ["bd_wsw_c", "bd_wsw_d", "bd_chase_c", "bd_chase_d"]
-# Hand-split contact quality (bvh_*/pvh_*): benched 2026-07-07 (within
-# noise everywhere, tb2 ECE past band), RE-ACCEPTED under the keep-leaning
-# bar 2026-07-09 (queue Tier B4) with a tb2 ROUTE-AROUND — tb2 (and xtb via
-# its exclude) never sees it; everyone else routes like the _BIP siblings
-# (PWR = barrel share, CON = xwOBA-on-contact + sample size). tsb_*
-# (battery SB-allowed, same 07-07 batch) stays: sb-only routing.
-_VHB_PWR = ["bvh_brl", "pvh_brl"]
-_VHB_CON = ["bvh_xwoba", "pvh_xwoba", "bvh_n", "pvh_n"]
-_SPD = ["bat_sprint", "bat_hp1b"]            # raw footspeed: SB + run only
-_DEF = ["opp_oaa"]                           # opponent defense: BABIP props
-_PSW = ["p_swstr_d"]                         # opposing starter whiff form
-_UMP = ["ump_k_pct", "ump_bb_pct"]           # HP-ump zone tendency: K/BB only
-# Multi-dimensional park factors (features._attach_context): as-of per-game
-# R/H/2B/TB rates at the venue — the offensive run-environment the lone HR
-# park factor (park_hr_pg, on every prop) can't carry for doubles/TB/runs.
-# Routed to the OFFENSIVE props only: excluded from bb, sb and the K heads
-# (_BK_EXC) below, where park scoring says nothing about a batter's whiffs.
-# 2026-07-09: also routed to the starter run-environment heads (outs/pha/per)
-# and the team-runs model — the same whiff/walk exclusion applies there via
-# k_cols (starter K) and pbb's st_exclude.
-_PARK_OFF = ["park_r_pg", "park_h_pg", "park_2b_pg", "park_tb_pg"]
-# Statcast bat tracking = swing quality, a fundamental skill that touches
-# essentially every offensive outcome (power, contact/BABIP, whiff, and even
-# walk/steal propensity indirectly). Deliberately routed to ALL batter props
-# (no PROP_EXCLUDE entry) rather than pre-guessing which it helps: it is
-# INERT until ~2027 (2023+ coverage vs the <=2023 selection training window),
-# so broad routing costs nothing now and confounds nothing, and once it
-# activates the standard eval + strictly-not-worse rule prunes any prop it
-# actually dilutes (sb/bb the likeliest candidates) — empirically, not by
-# prior. Kept as a named group so that pruning is a one-line exclude later.
-_BAT = list(F.BAT_TRACK_COLS)
-
-# batter strikeouts: keep only K-flavored signal (k rates, plate discipline,
-# starter/bullpen whiff, arsenal) — everything else is dilution risk
-_BK_EXC = (_SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _IBB + _PWR + _HBF
-           + _PEN2 + _TLOC + _BIP_PWR + _BIP_HIT + _VHB_PWR + _VHB_CON
-           + _SPD + _DEF + _PARK_OFF + _PRODOUT)
-
-# Routing flips (2026-07-08), kept under the strictly-not-worse standard
-# (tsb precedent): hit+footspeed (4/4 metrics tilted positive on 2025),
-# run+plate-discipline (ece -.0022, top10 +.0109), rbi+Statcast-power
-# (auc +.0015, ece -.0027) — all within noise but principled and harmless.
-# tb2+footspeed REVERTED (ece +.0029, 0.97x band, for nothing).
-# _UMP (HP-ump zone tendency) reaches ONLY the K/BB props (bb, bk, bk2, and
-# the xbk head via bk's routing); every other batter prop excludes it.
-# _BAT (bat tracking) appears in NO exclude list -> it reaches every batter
-# prop (see the _BAT note above; inert until ~2027, pruned empirically then).
-# tb2's list is named so the xtb head can extend it (see the "xtb" key)
-_TB2_EXC = (_SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP
-            + _IBB + _UMP + _PRODOUT + _VHB_PWR + _VHB_CON)
-PROP_EXCLUDE = {
-    "hr":    _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _SPD + _DEF + _UMP
-             + _PRODOUT,
-    # hit keeps footspeed (beat-out grounders, like single). hits2 stays speed-
-    # free (2-hit game is contact, not legs — SPD tested 2026-07-09, flat).
-    # tb2 GAINED footspeed 2026-07-09 (KEPT: tb2 AUC +0.0009, xtb MAE +0.0012 —
-    # legs stretch singles / turn outs into extra total bases).
-    "hit":   _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _IBB + _PWR
-             + _BIP_PWR + _VHB_PWR + _UMP + _PRODOUT,
-    # hits2+_BIP_PWR tested 2026-07-09 and REVERTED (flat: AUC +0.0002
-    # [-0.0012,+0.0017] — hard contact added nothing hits2's contact
-    # features don't carry; 4th of 5 flat routing gaps)
-    "hits2": _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _IBB + _PWR
-             + _BIP_PWR + _VHB_PWR + _SPD + _UMP + _PRODOUT,
-    # tb2 route-around: the 07-07 hand-split bench was tb2_ece alone
-    "tb2":   _TB2_EXC,
-    # run keeps plate discipline (chase feeds OBP -> runs); GIDP suppresses
-    # runs (batter erased), but SF cashes OTHERS' runs, not his -> exclude _SF
-    # run also excludes _VHB_CON (2026-07-09 re-accept read: run AUC -0.0009
-    # CI-clear harm with the contact half in; route-around per policy v2)
-    # and _RUNRBI_FORM (its 07-08 bench was run_ece — same route-around)
-    "run":   _SB_FEATS + _PWR + _XBH + _IBB + _BIP_PWR + _VHB_PWR + _VHB_CON
-             + _RUNRBI_FORM + _HRR_HIST + _TIERC + _UMP + _SF,
-    # rbi keeps Statcast power (own HR = automatic RBI; hard contact cashes
-    # runners) — box-score ISO alone lags it. (_PWR + _PLATE tested 2026-07-09,
-    # both flat — reverted.) KEEPS _PRODOUT (GIDP kills RBI, SF is an RBI).
-    "rbi":   _SB_FEATS + _PWR + _SPD + _PLATE + _UMP + _HRR_HIST + _TIERC,
-    # bb KEEPS _UMP (a tight zone drives walks)
-    "bb":    _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _PWR + _XBH + _HBF + _PEN2 + _TLOC
-             + _BIP_PWR + _BIP_HIT + _VHB_PWR + _VHB_CON + _SPD + _DEF
-             + _PARK_OFF + _PRODOUT,
-    "sb":    _VSH + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _PWR + _XBH + _IBB + _PEN2
-             + _TLOC + _HBF + _VLOC + _POS + _BIP_PWR + _BIP_HIT + _VHB_PWR
-             + _VHB_CON + _DEF + _PLATE + _PSW + _UMP + _PARK_OFF + _PRODOUT,
-    # singles = contact + footspeed (beat-out grounders), no power groups
-    "single": _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _XBH + _IBB + _PWR
-              + _BIP_PWR + _VHB_PWR + _UMP + _PRODOUT,
-    # doubles = gap power + speed (stretching); HR-log quality stays out
-    # (_PWR tested 2026-07-09, FAILED: double AUC -0.0017 — BIP_PWR already
-    # carries double's power, HR-log just diluted the weakest prop).
-    "double": _SB_FEATS + _RUNRBI + _RUNRBI_FORM + _HRR_HIST + _TIERC + _CTX + _OBP + _IBB + _PWR + _UMP + _PRODOUT,
-    # bk/bk2 KEEP _UMP (a generous zone drives strikeouts)
-    "bk":    _BK_EXC,
-    "bk2":   _BK_EXC,
-    # H+R+RBI is a broad, high-base-rate target (tb2-like robustness):
-    # only the steal columns clearly don't speak to it; ump is zone-only
-    # hrr2 routes around _HRR_HIST (its 07-08 bench was hrr2_ece); hrr3
-    # and the xhrr head keep it
-    "hrr2":  _SB_FEATS + _UMP + _PRODOUT + _HRR_HIST + _TIERC,
-    "hrr3":  _SB_FEATS + _UMP + _PRODOUT + _TIERC,
-    # not a batter prop: COUNT_HEADS routing key for the xhrr head, which
-    # normally inherits hrr2's list. Split 2026-07-09 so re-accepts can stay
-    # ON the binary hrr props but OFF this Tweedie head, whose mean keeps
-    # taking CI-clear MAE harm from hrr-adjacent additions (hand-split
-    # -0.0010, HRR-history -0.0006) the binary thresholds tolerate. The
-    # batter prop training loop iterates PROPS, so this key is ignored there.
-    "xhrr":  _SB_FEATS + _UMP + _PRODOUT + _VHB_PWR + _VHB_CON + _HRR_HIST
-             + _ENV + _PNP,
-    # same lean-diet insurance for the other Tweedie mean-head (see the
-    # xhrr note): xtb = tb2's routing plus the Tier-C groups kept off
-    "xtb":   _TB2_EXC + _ENV + _PNP,
-    # xbk: the ONE Tier-C keep — bk's routing minus the _TIERC exclusion
-    # (league K environment reaches the batter-K count head only)
-    "xbk":   [c for c in _BK_EXC if c not in set(_TIERC)],
-}
-# NUCLEAR PROBE 2026-07-10 (user): routing machinery OFF — every batter
-# prop AND every x-head sees the full superset (benched features are back
-# in via features.batter_feature_cols). The curated table above is kept
-# intact; delete this one line to restore it.
+# Per-prop feature routing was REMOVED 2026-07-15 (audit fix #11). The
+# hand-curated PROP_EXCLUDE tables had been dead code since the 2026-07-10
+# probe emptied this dict and made automated stability selection
+# (feature_keep.json) the sole decider of what each head trains on. Git
+# history (pre-338e91a) keeps the tables and their bench/re-accept notes.
 PROP_EXCLUDE = {}
 
 # Stability-selection include-lists (feature_select.py --write): with
@@ -415,10 +254,59 @@ def _feature_keep():
     if not (SELECT_FEATURES and p.exists()):
         return {}
     import json
-    return {k: set(v) for k, v in json.loads(p.read_text()).items()}
+    keep = {k: set(v) for k, v in json.loads(p.read_text()).items()}
+    # Since the 2026-07-15 top-up restriction (audit #3), heads may sit
+    # legitimately below feature_select.MIN_KEEP; only an EMPTY entry is a
+    # corrupt file. Sub-floor counts print informationally.
+    from feature_select import MIN_KEEP
+    empty = [k for k, v in keep.items() if not v]
+    if empty:
+        print(f"WARNING: feature_keep.json has EMPTY entries for {empty} — "
+              f"corrupt file? Those heads would train on nothing.", flush=True)
+    small = {k: len(v) for k, v in keep.items() if 0 < len(v) < MIN_KEEP}
+    if small:
+        print(f"note: keep-list heads below the old {MIN_KEEP}-column floor "
+              f"(legitimate since the 07-15 top-up restriction): {small}",
+              flush=True)
+    return keep
 
 
 FEATURE_KEEP = _feature_keep()
+
+# 2026-07-15 (user): two-pass bag/row split. A keep-list present => this run is
+# the shipped KEEP-train (high fidelity: full bags, all rows). Absent => the
+# SUPERSET train, whose only consumer is feature_select's stability vote, so it
+# runs cheap: 3 bags + a 120k train-row sample per head.
+# KNOWN REGIME MISMATCH (audit #3, user re-affirmed the cheap electorate
+# 2026-07-15): the models that VOTE on feature stability are trained on ~a
+# tenth of the rows and half the bags of the model that SHIPS, so votes may
+# not perfectly transfer. Accepted for chain speed; feature_select.py reads
+# the meta_stamp below and records both regimes in selection_report.json so
+# every regen carries the caveat.
+_KEEP_TRAIN = bool(FEATURE_KEEP)
+if not _KEEP_TRAIN:
+    LGBM_BAGS = 3
+_SUPERSET_SAMPLE = 0 if _KEEP_TRAIN else 120_000   # train-row cap; 0 = all rows
+
+# Early-stopping holdout (2026-07-15, audit fix #2): boosters used to
+# early-stop on the CALIBRATION year, so the same rows chose each head's
+# iteration count AND its blend weight, calibrator, and held-out SHAP votes —
+# leaving cal-year predictions systematically optimistic. Boosters now fit on
+# ~90% of the training rows and early-stop on the held-out ~10%, split by
+# GamePk (deterministic, row-order independent, and a game never straddles
+# the line). The calibration year is only touched AFTER the boosters are
+# frozen, so the blend/calibrator/SHAP reads are clean of iteration choice.
+# NOTE: changes every retrain vs pre-07-15 baselines — re-baseline after the
+# first train with this in (the chain does that anyway).
+ES_MOD, ES_BUCKET = 10, 3
+
+
+def _es_split(tr):
+    """(fit_rows, early_stop_rows): GamePk-bucketed ~10% early-stop slice."""
+    es = (tr["GamePk"] % ES_MOD) == ES_BUCKET
+    if not es.any() or es.all():        # degenerate tiny frame -> no split
+        return tr, tr
+    return tr[~es], tr[es]
 
 
 def _apply_keep(name, cols):
@@ -441,6 +329,17 @@ PROPS = {
     "bk2": ("y_bk2", "2+ batter strikeouts"),
     "hrr2": ("y_hrr2", "2+ hits+runs+RBIs"),
     "hrr3": ("y_hrr3", "3+ hits+runs+RBIs"),
+    # 2026-07-14 finish batch — H1 deep binaries (must beat their banked
+    # count-calibrator bars, count_vs_binary.py table in the backlog; a
+    # loser ships count-priced instead), H3 triple (1.21% base rate —
+    # thinnest board binary, Platt load-bearing), H4 deeper thresholds
+    "bk3": ("y_bk3", "3+ batter strikeouts"),
+    "tb3": ("y_tb3", "3+ total bases"),
+    "tb4": ("y_tb4", "4+ total bases"),
+    "hrr4": ("y_hrr4", "4+ hits+runs+RBIs"),
+    "triple": ("y_3b", "1+ triple"),
+    "rbi2": ("y_rbi2", "2+ RBIs"),
+    "run2": ("y_run2", "2+ runs scored"),
 }
 
 # Calibration-layer stacking for the thin-signal props: a logistic on
@@ -475,10 +374,9 @@ PLATT_CAL = set(PROPS) | {"winner"}
 # calibrators fit on the calibration year (predict.count_over). Batter heads
 # exist for the MEANS (xSO, xHRR) — their half-point lines are priced by the
 # calibrated binary heads above; starter heads price their own lines.
-# `exclude` names the PROP_EXCLUDE entry supplying the column routing (batter
-# heads); `st_exclude` drops columns from the shared starts col set (starter
-# heads) — used to keep the HP-ump zone tendency on K/walks but off the
-# outs/hits/earned-run heads it doesn't speak to.
+# `exclude` names the PROP_EXCLUDE entry supplying the column routing (inert
+# while routing is retired — every head sees the full superset minus its
+# keep-list; see the PROP_EXCLUDE note above).
 COUNT_HEADS = {
     "xbk":  dict(frame="bat", target="bk_count", exclude="xbk",
                  lines=[0.5, 1.5, 2.5], desc="batter strikeouts"),
@@ -491,34 +389,73 @@ COUNT_HEADS = {
     "xtb":  dict(frame="bat", target="tb_count", exclude="xtb",
                  tweedie=1.3, lines=[1.5, 2.5, 3.5], desc="total bases"),
     "outs": dict(frame="starts", target="y_outs", exclude=None,
-                 st_exclude=_UMP,
                  lines=[14.5, 15.5, 16.5, 17.5, 18.5],
                  desc="starter outs recorded"),
-    # pbb keeps _UMP (zone tendency drives walks) but drops the park run
-    # environment (_PARK_OFF says nothing about walks — batter-bb precedent);
-    # outs/pha/per keep _PARK_OFF (venue run/hit environment is directly
-    # on-target for how deep a starter goes and what he allows).
     "pbb":  dict(frame="starts", target="y_pbb", exclude=None,
-                 st_exclude=_PARK_OFF,
                  lines=[0.5, 1.5, 2.5], desc="starter walks allowed"),
     "pha":  dict(frame="starts", target="y_pha", exclude=None,
-                 st_exclude=_UMP,
                  lines=[3.5, 4.5, 5.5, 6.5], desc="starter hits allowed"),
     "per":  dict(frame="starts", target="y_per", exclude=None,
-                 st_exclude=_UMP,
                  lines=[1.5, 2.5, 3.5, 4.5], desc="starter earned runs"),
+    # 2026-07-14 finish batch — H6: the rest of the expected-stat-line.
+    # MEANS ONLY: their per-line calibrators are banked by fit_line_cals
+    # but never ship as prices (binaries own the batter lines, 07-13
+    # shoot-out). xrbi runs over-dispersed (var/mean 1.61 measured 2025)
+    # -> Tweedie 1.3 like xhrr/xtb; the others stay Poisson.
+    "xh":   dict(frame="bat", target="h_count", exclude="hit",
+                 lines=[0.5, 1.5, 2.5], desc="hits"),
+    "xrun": dict(frame="bat", target="run_count", exclude="run",
+                 lines=[0.5, 1.5], desc="runs scored"),
+    "xrbi": dict(frame="bat", target="rbi_count", exclude="rbi",
+                 tweedie=1.3, lines=[0.5, 1.5, 2.5], desc="RBIs"),
+    "xbb":  dict(frame="bat", target="bb_count", exclude="bb",
+                 lines=[0.5, 1.5], desc="walks"),
 }
-# NUCLEAR PROBE 2026-07-10 (user, expanded scope): starter-side routing OFF
-# too — every starter head sees the full starts superset (park run
-# environment back on pbb, HP-ump tendency back on outs/pha/per; the K
-# model's park exclusion is lifted at its k_cols line). Delete this loop
-# to restore the starter diets above.
-for _ch in COUNT_HEADS.values():
-    _ch.pop("st_exclude", None)
 
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+# Shadow-calibrated eps (2026-07-14, 1F selection upgrade — Boruta-lite):
+# shuffled copies of representative superset columns ride the SUPERSET
+# train at zero marginal cost; feature_select.py sets each head's eps to a
+# high quantile of its shadow-column SHAP shares — the "essentially unused"
+# floor becomes empirical per head instead of the fixed EPS constant.
+# Deterministic (fixed seed + fixed donor stride), so both suites and any
+# re-run see identical shadow values; keep-lists are written shadow-free
+# (feature_select strips the prefix), so the keep train drops them and
+# NOTHING shadow-flavored can ever ship.
+SHADOW_PREFIX = "shdw_"
+# tg/wf bumped 10/8 -> 16 (07-14 A2b): the thin frames' pooled shadow
+# pools were the noisiest p95 estimates on the board; bf/sf stay put so
+# the cached frames (which carry their shadows) remain valid. tg/wf
+# shadows are added after the cache loads, so this needs no rebuild —
+# feature_select re-derives them from the same SHADOW_N, staying in sync.
+SHADOW_N = {"bf": 20, "sf": 12, "tg": 16, "wf": 16}
+
+
+def add_shadow_cols(frame, cols, n, seed=0):
+    """Append n shuffled copies of evenly-spaced numeric superset columns.
+    Idempotent (skips if shadows already present, e.g. a cached frame)."""
+    if any(c.startswith(SHADOW_PREFIX) for c in frame.columns):
+        return [c for c in frame.columns if c.startswith(SHADOW_PREFIX)]
+    num = [c for c in cols if c in frame.columns and c not in F.CAT_COLS
+           and pd.api.types.is_numeric_dtype(frame[c])]
+    if not num or n <= 0:
+        return []
+    donors = [num[int(i * len(num) / n) % len(num)] for i in range(n)]
+    rng = np.random.default_rng(seed)
+    out = []
+    for i, c in enumerate(donors):
+        name = f"{SHADOW_PREFIX}{i}_{c}"
+        frame[name] = rng.permutation(frame[c].to_numpy())
+        out.append(name)
+    return out
+
+
+def shadow_cols_of(frame):
+    return [c for c in frame.columns if c.startswith(SHADOW_PREFIX)]
 
 
 def set_categories(df, cat_levels):
@@ -547,33 +484,37 @@ def _fit_logistic(tr, cols, target):
 def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
                    params=None, n_bags=1, n_xgb=0, n_cb=0):
     tr = df[df["Season"].isin(train_yrs)]
+    if _SUPERSET_SAMPLE and len(tr) > _SUPERSET_SAMPLE:   # superset train only
+        tr = tr.sample(n=_SUPERSET_SAMPLE, random_state=0)
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr]
+    fit, es = _es_split(tr)         # cal year never picks iteration counts
     models = []
     for b in range(n_bags):
         p = dict(params or LGB_CLS)
         if b:                       # bag 0 = the incumbent default seed
             p["random_state"] = b
         m = lgb.LGBMClassifier(**p)
-        m.fit(tr[cols], tr[target],
-              eval_set=[(ca[cols], ca[target])],
+        m.fit(fit[cols], fit[target],
+              eval_set=[(es[cols], es[target])],
               eval_metric="binary_logloss",
               callbacks=[lgb.early_stopping(150, verbose=False)])
         models.append(m)
     for b in range(n_xgb):          # family members join AFTER the LGBM bag
         m = F.InfSafe(xgb_lib.XGBClassifier(**XGB_CLS, random_state=b))
-        m.fit(tr[cols], tr[target],
-              eval_set=[(ca[cols], ca[target])], verbose=False)
+        m.fit(fit[cols], fit[target],
+              eval_set=[(es[cols], es[target])], verbose=False)
         models.append(m)
     cat_here = [c for c in cols if c in F.CAT_COLS]
     for b in range(n_cb):
         m = F.CatSafe(CatBoostClassifier(**CB_CLS, random_seed=b,
                                          cat_features=cat_here), cat_here)
-        m.fit(tr[cols], tr[target], eval_set=[(ca[cols], ca[target])])
+        m.fit(fit[cols], fit[target], eval_set=[(es[cols], es[target])])
         models.append(m)
     model = F.MeanBag(models) if len(models) > 1 else models[0]
 
     # diverse second learner + blend weight chosen on the calibration year
+    # (the LR has no early stopping, so it may use the full training slice)
     lr, num_cols = _fit_logistic(tr, cols, target)
     g_cal = model.predict_proba(ca[cols])[:, 1]
     l_cal = lr.predict_proba(ca[num_cols])[:, 1]
@@ -644,22 +585,27 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
     tr = wf[wf["Season"].isin(train_yrs)]
     ca = wf[wf["Season"] == cal_yr]
     te = wf[wf["Season"] == test_yr]
+    fit, es = _es_split(tr)         # cal year never picks iteration counts
     members = []
-    m0 = lgb.LGBMClassifier(**LGB_WIN)
-    m0.fit(tr[cols], tr[target],
-           eval_set=[(ca[cols], ca[target])], eval_metric="binary_logloss",
-           callbacks=[lgb.early_stopping(150, verbose=False)])
-    members.append(m0)
+    for b in range(LGBM_BAGS):      # bag 0 = the pre-bagging incumbent seed
+        p = dict(LGB_WIN)
+        if b:
+            p["random_state"] = b
+        m = lgb.LGBMClassifier(**p)
+        m.fit(fit[cols], fit[target],
+              eval_set=[(es[cols], es[target])], eval_metric="binary_logloss",
+              callbacks=[lgb.early_stopping(150, verbose=False)])
+        members.append(m)
     for b in range(XGB_BAGS):       # family members join AFTER the incumbent
         m = F.InfSafe(xgb_lib.XGBClassifier(**XGB_WIN, random_state=b))
-        m.fit(tr[cols], tr[target],
-              eval_set=[(ca[cols], ca[target])], verbose=False)
+        m.fit(fit[cols], fit[target],
+              eval_set=[(es[cols], es[target])], verbose=False)
         members.append(m)
     cat_here = [c for c in cols if c in F.CAT_COLS]
     for b in range(CB_BAGS):
         m = F.CatSafe(CatBoostClassifier(**CB_WIN, random_seed=b,
                                          cat_features=cat_here), cat_here)
-        m.fit(tr[cols], tr[target], eval_set=[(ca[cols], ca[target])])
+        m.fit(fit[cols], fit[target], eval_set=[(es[cols], es[target])])
         members.append(m)
     model = F.MeanBag(members) if len(members) > 1 else members[0]
     lr, num_cols = _fit_logistic(tr, cols, target)
@@ -731,8 +677,11 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
     run ~2x Poisson variance — instead of leaning entirely on the post-hoc
     cal-year dispersion. Serving is unchanged: .predict() still returns E[y]."""
     tr = df[df["Season"].isin(train_yrs)]
+    if _SUPERSET_SAMPLE and len(tr) > _SUPERSET_SAMPLE:   # superset train only
+        tr = tr.sample(n=_SUPERSET_SAMPLE, random_state=0)
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr].copy()
+    fit, es = _es_split(tr)         # cal year never picks iteration counts
     tweedie = tweedie_power is not None
     models = []
     for b in range(n_bags):
@@ -743,8 +692,8 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
         if b:                       # bag 0 = the incumbent default seed
             p["random_state"] = b
         m = lgb.LGBMRegressor(**p)
-        m.fit(tr[cols], tr[target],
-              eval_set=[(ca[cols], ca[target])],
+        m.fit(fit[cols], fit[target],
+              eval_set=[(es[cols], es[target])],
               eval_metric=("tweedie" if tweedie else "poisson"),
               callbacks=[lgb.early_stopping(150, verbose=False)])
         models.append(m)
@@ -755,8 +704,8 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
                      tweedie_variance_power=tweedie_power,
                      eval_metric=f"tweedie-nloglik@{tweedie_power}")
         m = F.InfSafe(xgb_lib.XGBRegressor(**p, random_state=b))
-        m.fit(tr[cols], tr[target],
-              eval_set=[(ca[cols], ca[target])], verbose=False)
+        m.fit(fit[cols], fit[target],
+              eval_set=[(es[cols], es[target])], verbose=False)
         models.append(m)
     cat_here = [c for c in cols if c in F.CAT_COLS]
     for b in range(n_cb):
@@ -767,7 +716,7 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
         m = F.CatSafe(CatBoostRegressor(**p, random_seed=b,
                                         cat_features=cat_here),
                       cat_here, exponent=True)
-        m.fit(tr[cols], tr[target], eval_set=[(ca[cols], ca[target])])
+        m.fit(fit[cols], fit[target], eval_set=[(es[cols], es[target])])
         models.append(m)
     model = F.MeanBag(models) if len(models) > 1 else models[0]
     pred = model.predict(te[cols])
@@ -812,13 +761,16 @@ def fit_line_cals(mu_cal, y_cal, lines):
 
 
 def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
-    """Fit the full model suite (8 batter props, starter K, team runs, winner)
-    on one train/cal/test split. Returns (artifacts, metrics) with the same
+    """Fit the full model suite (every PROPS binary head, the count heads,
+    starter K, team runs, winner) on one train/cal/test split. Returns (artifacts, metrics) with the same
     artifact keys regardless of split, so evaluate_deep can score either the
     shipping suite or the selection suite identically."""
-    bat_cols = F.batter_feature_cols()
-    st_cols = F.starts_feature_cols()
-    tg_cols = _apply_keep("total", F.team_game_feature_cols())
+    # shadow columns (1F) join every superset; _apply_keep drops them on a
+    # keep train because keep-lists are written shadow-free
+    bat_cols = F.batter_feature_cols() + shadow_cols_of(bf)
+    st_cols = F.starts_feature_cols() + shadow_cols_of(sf)
+    tg_cols = _apply_keep("total",
+                          F.team_game_feature_cols() + shadow_cols_of(tg))
     metrics, props = {}, {}
 
     for name, (target, _desc) in PROPS.items():
@@ -833,7 +785,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         prop, m = fit_classifier(bf, cols, target,
                                  train_yrs, cal_yr, test_yr, name.upper(),
                                  params=params,
-                                 n_bags=PROP_BAGS.get(name, 1),
+                                 n_bags=LGBM_BAGS,
                                  n_xgb=XGB_BAGS, n_cb=CB_BAGS)
         prop["cols"] = cols
         props[name] = prop
@@ -875,16 +827,12 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         per_start = te["ps_k_bf"] * (te["ps_BF"] / te["p_starts_season"])
         return per_start.fillna(league).clip(0, 15)
 
-    # the K model keeps its whiff-only diet: the multi-dim park run
-    # environment reaches outs/pha/per + the runs model, but venue scoring
-    # says nothing about strikeouts (same reasoning as _BK_EXC). k_cols is
-    # what the artifact ships as st_cols — the K model's serving contract.
-    # NUCLEAR PROBE 2026-07-10: park run-environment back ON the K model
-    # (full starts superset). Restore the exclusion to revert:
-    # k_cols = [c for c in st_cols if c not in _PARK_OFF]
+    # k_cols is what the artifact ships as st_cols — the K model's serving
+    # contract (full starts superset minus the keep-list; routing retired).
     k_cols = _apply_keep("k", list(st_cols))
     k_model, m = fit_poisson(sf, k_cols, "y_so", train_yrs, cal_yr, test_yr,
-                             "K", k_baseline, n_xgb=XGB_BAGS, n_cb=CB_BAGS)
+                             "K", k_baseline, n_bags=LGBM_BAGS,
+                             n_xgb=XGB_BAGS, n_cb=CB_BAGS)
     metrics[f"k_{test_yr}"] = m
 
     # Starter-K dispersion on the CALIBRATION year (never the holdout): real K
@@ -911,8 +859,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         frame = bf if ch["frame"] == "bat" else sf
         cols = ([c for c in bat_cols
                  if c not in PROP_EXCLUDE.get(ch["exclude"], ())]
-                if ch["frame"] == "bat"
-                else [c for c in st_cols if c not in ch.get("st_exclude", ())])
+                if ch["frame"] == "bat" else list(st_cols))
         cols = _apply_keep(cname, cols)
         tr_mean = frame.loc[frame["Season"].isin(train_yrs),
                             ch["target"]].mean()
@@ -936,7 +883,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
 
         model, m = fit_poisson(frame, cols, ch["target"], train_yrs, cal_yr,
                                test_yr, cname.upper(), cbase,
-                               n_bags=COUNT_BAGS.get(cname, 1),
+                               n_bags=LGBM_BAGS,
                                tweedie_power=ch.get("tweedie"),
                                n_xgb=XGB_BAGS, n_cb=CB_BAGS)
         ca = frame[frame["Season"] == cal_yr]
@@ -963,6 +910,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
 
     team_runs_model, m = fit_poisson(tg, tg_cols, "y_runs", train_yrs, cal_yr,
                                      test_yr, "TEAM RUNS", team_baseline,
+                                     n_bags=LGBM_BAGS,
                                      n_xgb=XGB_BAGS, n_cb=CB_BAGS)
     metrics[f"team_runs_{test_yr}"] = m
 
@@ -986,6 +934,19 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     total_line_cals = fit_line_cals(per_game["mu"].to_numpy(),
                                     per_game["y"].to_numpy(), TOTAL_LINES)
 
+    # H5 team_total head-ification (2026-07-14): the per-TEAM line surface
+    # off the same runs model. TEAM-level cal-year NB dispersion (the game
+    # total's ~2.3 does NOT transfer — team variance is its own number) +
+    # per-line calibrators for the team-total lines the books post.
+    from predict import TEAM_TOTAL_LINES
+    team_total_disp = float(np.mean((tg_cal["y_runs"].to_numpy()
+                                     - pr_cal) ** 2) / np.mean(pr_cal))
+    metrics[f"team_total_dispersion_{cal_yr}"] = round(team_total_disp, 4)
+    log(f"team-total dispersion ({cal_yr} cal year): {team_total_disp:.2f} "
+        f"(Poisson assumes 1.00)")
+    team_line_cals = fit_line_cals(pr_cal, tg_cal["y_runs"].to_numpy(),
+                                   TEAM_TOTAL_LINES)
+
     # dedicated winner model, blended with the runs-model Poisson win prob.
     # The suite's own runs model never trains on cal_yr (it early-stops
     # there), so the mu_map is safe for the blend-weight fit — see the
@@ -995,7 +956,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
                             "Home": tg["Home"].to_numpy(), "mu": mu_all})
               .pivot_table(index="GamePk", columns="Home", values="mu")
               .rename(columns={0: "mu_away", 1: "mu_home"}))
-    win_cols = _apply_keep("winner", F.win_feature_cols())
+    win_cols = _apply_keep("winner",
+                           F.win_feature_cols() + shadow_cols_of(wf))
     win_model, m = fit_winner(wf, win_cols, "y_home_win", mu_map,
                               train_yrs, cal_yr, test_yr, "WINNER")
     win_model["cols"] = win_cols
@@ -1005,11 +967,42 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         f"{m['acc_home_baseline']:.3f}")
     metrics[f"winner_{test_yr}"] = m
 
+    # guard (07-14 F3): on a keep train NOTHING shadow-flavored may persist
+    # in a booster's serving column list. The live hazard is a head MISSING
+    # from feature_keep.json (e.g. a new head added after the last selection
+    # regen): it trains unrestricted on the shadowed superset here, then
+    # serving NaN-fills the absent shdw_ columns (predict._prep) — silent
+    # train/serve skew. bat_cols stays exempt: it is only the frame-prep
+    # superset; every booster reads its own per-head list.
+    if FEATURE_KEEP:
+        serving_lists = {**{n: p["cols"] for n, p in props.items()},
+                         **{n: cm["cols"] for n, cm in count_models.items()},
+                         "k": k_cols, "total": tg_cols, "winner": win_cols}
+        shadowed = sorted(n for n, cols in serving_lists.items()
+                          if any(c.startswith(SHADOW_PREFIX) for c in cols))
+        assert not shadowed, (
+            f"shadow columns persist in the serving column lists of "
+            f"{shadowed} — these heads are missing from feature_keep.json; "
+            f"regenerate it over all heads (feature_select.py --write) or "
+            f"set SELECT_FEATURES = False")
+
     artifacts = {
+        # role/version stamp (2026-07-15, audit #8/#16): predict.py refuses
+        # role="superset" (and any shdw_ serving contract), so a superset
+        # intermediate can never silently serve again.
+        "meta_stamp": {
+            "artifact_version": 2,
+            "role": "keep" if _KEEP_TRAIN else "superset",
+            "lgbm_only_temp": LGBM_ONLY_TEMP,
+            "bags": {"lgbm": LGBM_BAGS, "xgb": XGB_BAGS, "cb": CB_BAGS},
+            "superset_sample": _SUPERSET_SAMPLE,
+            "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
         "props": props,
         "k_model": k_model, "team_runs_model": team_runs_model,
         "win_model": win_model, "total_disp": total_disp, "k_disp": k_disp,
         "k_line_cals": k_line_cals, "total_line_cals": total_line_cals,
+        "team_total_disp": team_total_disp, "team_line_cals": team_line_cals,
         "count_models": count_models,
         # st_cols = the K model's column contract (predict/evaluate feed it
         # to k_model); the count heads carry their own cols. k_cols drops
@@ -1040,73 +1033,6 @@ def suite_years(bf, min_rows=2000):
     return seasons[:-2], seasons[-2], seasons[-1]
 
 
-# --------- routing audit: features a prop's siblings get but it doesn't --------
-# The batter frame is a superset; PROP_EXCLUDE drops groups from each prop. This
-# audit prints the group x prop routing and flags "sibling gaps" — a group most
-# of a prop-family receives but some members exclude — so Agenda-A candidates
-# surface automatically instead of by hand. It changes nothing; it just
-# generates a list to run through evaluate_deep.py --paired.
-FEATURE_GROUPS = {
-    "SB": _SB_FEATS, "RUNRBI": _RUNRBI, "CTX": _CTX, "OBP": _OBP, "PWR": _PWR,
-    "XBH": _XBH, "IBB": _IBB, "VSH": _VSH, "VLOC": _VLOC, "POS": _POS,
-    "PEN2": _PEN2, "TLOC": _TLOC, "HBF": _HBF, "BIP_PWR": _BIP_PWR,
-    "BIP_HIT": _BIP_HIT, "PLATE": _PLATE, "SPD": _SPD, "DEF": _DEF,
-    "PSW": _PSW, "UMP": _UMP, "PARK_OFF": _PARK_OFF, "BAT": _BAT,
-}
-
-# Semantic clusters of batter props. A group some members get and others exclude
-# is flagged as a testable gap. Props may sit in several families (tb2 is both a
-# contact and an extra-base prop) — each family is judged on its own.
-PROP_FAMILIES = {
-    "contact/hits":   ["hit", "hits2", "single", "tb2", "double"],
-    "extra-base":     ["hr", "tb2", "double"],
-    "run-production": ["run", "rbi", "hrr2", "hrr3"],
-    "K/discipline":   ["bb", "bk", "bk2"],
-}
-
-# Deliberately minimal props (dilution-sensitive — see the _SB_FEATS/_BK_EXC
-# notes): a gap whose only missing members are these is by design, so the audit
-# suppresses it to keep the candidate list about genuinely under-fed props.
-LEAN_PROPS = {"sb", "bk", "bk2"}
-
-
-def _group_status(prop, cols):
-    """incl (prop trains on the whole group) / excl (none) / part (some)."""
-    ex = set(PROP_EXCLUDE.get(prop, ()))
-    kept = sum(c not in ex for c in cols)
-    return "incl" if kept == len(cols) else "excl" if kept == 0 else "part"
-
-
-def audit_routing():
-    props = list(PROPS)
-    print("=== Feature-group routing (batter props): ok = trains on it, "
-          ". = excluded, ~ = partial ===\n")
-    print("  " + "group".ljust(9) + "".join(p[:4].rjust(6) for p in props))
-    mark = {"incl": "ok", "excl": ".", "part": "~"}
-    for g, cols in FEATURE_GROUPS.items():
-        print("  " + g.ljust(9)
-              + "".join(mark[_group_status(p, cols)].rjust(6) for p in props))
-
-    print("\n=== Sibling routing gaps: a group most of a family gets, but "
-          "some members exclude ===")
-    print("  (candidates to test via evaluate_deep.py --paired; nothing is "
-          "applied here)\n")
-    found = 0
-    for fam, members in PROP_FAMILIES.items():
-        for g, cols in FEATURE_GROUPS.items():
-            got = [p for p in members if _group_status(p, cols) == "incl"]
-            missing = [p for p in members if _group_status(p, cols) == "excl"
-                       and p not in LEAN_PROPS]
-            if got and missing:
-                found += 1
-                print(f"  [{fam:<14}] {g:<8} has: {', '.join(got):<26} "
-                      f"GAP: {', '.join(missing)}")
-    if not found:
-        print("  (no sibling gaps — every group is all-in or all-out per family)")
-    print("\n  Count heads inherit their base prop's routing (xtb<-tb2, "
-          "xhrr<-hrr2, xbk<-bk), so a base-prop gap propagates to its head.")
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true",
@@ -1116,15 +1042,20 @@ def main():
                          "back from shipping) — the fast iteration loop. "
                          "The default run trains it too, then the shipping "
                          "models on top.")
-    ap.add_argument("--audit-routing", action="store_true",
-                    help="print the feature-group x prop routing matrix and "
-                         "flag sibling gaps (Agenda-A candidates), then exit; "
-                         "trains nothing")
     args = ap.parse_args()
 
-    if args.audit_routing:
-        audit_routing()
-        return
+    # role banner (audit #8): superset runs write models_superset*.joblib and
+    # never touch the serving artifacts; the temp-regime flag prints loudly so
+    # a forgotten flip can't silently ship an LGBM-only ensemble.
+    role = "keep" if _KEEP_TRAIN else "superset"
+    log(f"run role: {role.upper()} "
+        + ("(keep-list applied; writes models_bt.joblib / models.joblib)"
+           if _KEEP_TRAIN else
+           "(no keep-list; writes models_superset_bt.joblib / "
+           "models_superset.joblib — serving artifacts untouched)"))
+    if LGBM_ONLY_TEMP:
+        log("!! LGBM_ONLY_TEMP is ON: XGB/CB families disabled (cheap "
+            "iteration regime). Flip it False before the FINAL ship chain.")
 
     cache = ART / "frames.joblib"
     if cache.exists() and not args.rebuild:
@@ -1141,11 +1072,20 @@ def main():
         sf = F.build_starts_frame(raw, bf)
         log(f"starts frame: {len(sf):,} rows")
         log("building game frame")
-        gf = F.build_game_frame(raw)
+        # bf also supplies the posted-lineup quality/style aggregates
+        # (2026-07-14 #19/#30/#32)
+        gf = F.build_game_frame(raw, bf)
         log(f"game frame: {len(gf):,} rows")
+        # shadow columns (1F): persisted in the cache so feature_select's
+        # held-out SHAP pass sees the exact columns the boosters trained on
+        add_shadow_cols(bf, F.batter_feature_cols(), SHADOW_N["bf"])
+        add_shadow_cols(sf, F.starts_feature_cols(), SHADOW_N["sf"])
         frames = {"bf": bf, "sf": sf, "gf": gf}
         joblib.dump(frames, cache, compress=3)
     bf, sf, gf = frames["bf"], frames["sf"], frames["gf"]
+    # cached pre-1F frames: add the (deterministic) shadows on the fly
+    add_shadow_cols(bf, F.batter_feature_cols(), SHADOW_N["bf"])
+    add_shadow_cols(sf, F.starts_feature_cols(), SHADOW_N["sf"])
 
     # exclude 7-inning doubleheaders from training grain
     bf = bf[~bf["ShortGame"].fillna(False)].copy()
@@ -1169,9 +1109,12 @@ def main():
     tg = tg.dropna(subset=["y_runs"])
     tg = tg.sort_values(["GamePk", "Home"]).reset_index(drop=True)
     set_categories(tg, cat_levels)
+    add_shadow_cols(tg, F.team_game_feature_cols(), SHADOW_N["tg"])
 
     wf = gf[~gf["ShortGame"].fillna(False)].dropna(subset=["y_home_win"])
     wf = wf.sort_values("GamePk").reset_index(drop=True)  # canonical order
+    wf = wf.copy()
+    add_shadow_cols(wf, F.win_feature_cols(), SHADOW_N["wf"])
 
     # season splits derived from the data — no code edit at the annual
     # rollover; the holdout promotes itself once the new season has games
@@ -1187,10 +1130,14 @@ def main():
     sel_art["trained_on"] = (f"selection suite: {sel_tr[0]}-{sel_tr[-1]}, "
                              f"calibrated {sel_cal}, tested {sel_te} "
                              f"({hold_yr} untouched)")
-    joblib.dump(sel_art, ART / "models_bt.joblib", compress=3)
-    with open(ART / "metrics_select.json", "w") as f:
+    sel_path = ART / ("models_bt.joblib" if _KEEP_TRAIN
+                      else "models_superset_bt.joblib")
+    sel_metrics_path = ART / ("metrics_select.json" if _KEEP_TRAIN
+                              else "metrics_select_superset.json")
+    joblib.dump(sel_art, sel_path, compress=3)
+    with open(sel_metrics_path, "w") as f:
         json.dump(sel_metrics, f, indent=2)
-    log(f"saved selection artifacts to {ART / 'models_bt.joblib'}")
+    log(f"saved selection artifacts to {sel_path}")
     if args.select:
         log(f"next: python Model/evaluate_deep.py   (scores this suite on "
             f"{sel_te})")
@@ -1216,25 +1163,31 @@ def main():
         brier_score_loss(te["y_hr"], nb))
 
     # In-season drift offsets for serving: a per-prop log-odds shift fit on
-    # the holdout-year games available at train time, so the daily retrain
-    # keeps it current as the run environment drifts (evaluate_deep Section
-    # 4). STORED, not applied here — evaluate_deep scores the raw props so
-    # the holdout stays honest; the Predictor uses these only under --recal,
-    # and Section 10 is the leakage-free backtest that says whether they
-    # actually help.
-    import recalibrate as R
-    from predict import predict_prop as _predict_prop
-    te_hold = bf[bf["Season"] == hold_yr]
-    inseason_offsets = {}
-    for name, (target, _desc) in PROPS.items():
-        y_h = te_hold[target].to_numpy()
-        if len(y_h) > 200 and 0 < y_h.mean() < 1:
-            p_h = _predict_prop(props[name], te_hold[bat_cols])
-            inseason_offsets[name] = round(float(R.fit_logit_offset(p_h, y_h)), 4)
-        else:
-            inseason_offsets[name] = 0.0
-    metrics["inseason_offsets"] = inseason_offsets
-    log(f"in-season drift offsets ({hold_yr}): {inseason_offsets}")
+    # the current (holdout) season's PAST games. 2026-07-15 (audit #16):
+    # written to artifacts/inseason_offsets.json, NOT into models.joblib —
+    # the serving artifact stays free of holdout-fit parameters; predict.py
+    # reads the sidecar only under --recal. Keep-trains only (a superset
+    # model's offsets would describe a model that never serves).
+    if _KEEP_TRAIN:
+        import recalibrate as R
+        from predict import predict_prop as _predict_prop
+        te_hold = bf[bf["Season"] == hold_yr]
+        inseason_offsets = {}
+        for name, (target, _desc) in PROPS.items():
+            y_h = te_hold[target].to_numpy()
+            if len(y_h) > 200 and 0 < y_h.mean() < 1:
+                p_h = _predict_prop(props[name], te_hold[bat_cols])
+                inseason_offsets[name] = round(
+                    float(R.fit_logit_offset(p_h, y_h)), 4)
+            else:
+                inseason_offsets[name] = 0.0
+        metrics["inseason_offsets"] = inseason_offsets
+        (ART / "inseason_offsets.json").write_text(json.dumps(
+            {"year": int(hold_yr), "offsets": inseason_offsets,
+             "created": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=1))
+        log(f"in-season drift offsets ({hold_yr}) -> inseason_offsets.json")
+    else:
+        log("superset run: in-season offsets skipped (keep-trains only)")
 
     # multi-HR correction: E[HR | HR>=1], for expected-HR outputs
     tr_hr = bf[bf["Season"].isin(train_yrs) & (bf["hr_count"] >= 1)]
@@ -1243,15 +1196,18 @@ def main():
     artifacts.update({
         "multi_hr": multi_hr,
         "slot_pa": slot_pa, "league_hr_pa": league_hr_pa,
-        "inseason_offsets": inseason_offsets,
         "metrics": metrics,
         "trained_on": (f"{train_yrs[0]}-{train_yrs[-1]}, calibrated "
                        f"{cal_yr}, holdout-tested {hold_yr} YTD"),
     })
-    joblib.dump(artifacts, ART / "models.joblib", compress=3)
-    with open(ART / "metrics.json", "w") as f:
+    ship_path = ART / ("models.joblib" if _KEEP_TRAIN
+                       else "models_superset.joblib")
+    ship_metrics_path = ART / ("metrics.json" if _KEEP_TRAIN
+                               else "metrics_superset.json")
+    joblib.dump(artifacts, ship_path, compress=3)
+    with open(ship_metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
-    log(f"saved artifacts to {ART}")
+    log(f"saved artifacts to {ship_path}")
 
     # feature importances for the HR model (top 25). Family bags have no
     # blended importances — read the incumbent LGBM member (bag 0).

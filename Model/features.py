@@ -4,8 +4,9 @@ Builds leakage-free features: every feature for a game on date D uses only
 data from strictly before D. Two paths share the same definitions:
 
   - build_batter_frame / build_starts_frame / build_game_frame:
-      vectorized, over all of 2020-2026, for training (cumsum/rolling
-      shifted by one game so the current game never sees itself).
+      vectorized, over every season since Scrapers/seasons.FIRST_SEASON
+      (2015), for training (cumsum/rolling shifted by one game so the
+      current game never sees itself).
   - Stores.asof_*:
       per-entity, for an arbitrary future/hypothetical game, for inference.
 
@@ -49,7 +50,7 @@ DECAY_HL_DAYS = 90.0
 DECAY_LAM = np.log(2.0) / DECAY_HL_DAYS
 DECAY_EPOCH = pd.Timestamp("2020-01-01")
 DECAY_STATS = ["PA", "AB", "H", "HR", "TB", "SO", "BB", "SB", "R", "RBI",
-               "HBP", "HRR2", "HRR3"]
+               "HBP", "HRR2", "HRR3", "HRR4", "RBI2", "RUN2", "LOB"]
 DECAY_SHRINK = ("hr_pa", "tb_ab", "k_pct", "bb_pct", "sb_pa",
                 "r_pa", "rbi_pa")
 
@@ -239,6 +240,30 @@ def height_to_inches(ht):
     return int(m.group(1)) * 12 + int(m.group(2)) if m else np.nan
 
 
+# franchise renames (2026-07-15): the team-keyed PRIOR-season files miss
+# across an abbreviation change — 2025 ATH games look up 2024 rows keyed
+# OAK and get NaN (y-2 misses the same way). Pre-rename rows are duplicated
+# under the successor abbrev at LOAD time so every consumer (vectorized
+# joins and the serving Stores) sees the aliased table — parity by
+# construction, and the on-disk files stay the untouched source of truth.
+# One entry per rename: successor abbrev -> pre-rename abbrev.
+TEAM_RENAMES = {"ATH": "OAK"}                   # 2025 A's
+
+
+def _alias_renamed_teams(tab):
+    """Duplicate pre-rename team rows under the successor abbreviation so
+    prior-season joins land across a franchise rename (see TEAM_RENAMES)."""
+    if tab is None:
+        return None
+    extra = []
+    for new, old in TEAM_RENAMES.items():
+        rows = tab[tab["Team"] == old].copy()
+        if len(rows):
+            rows["Team"] = new
+            extra.append(rows)
+    return pd.concat([tab, *extra], ignore_index=True) if extra else tab
+
+
 def load_raw():
     games = _read("mlb_games.csv", parse_dates=["Date"])
     gb = _read("mlb_game_batting.csv", parse_dates=["Date"])
@@ -249,6 +274,13 @@ def load_raw():
     _hrr = gb["H"] + gb["R"] + gb["RBI"]
     gb["HRR2"] = (_hrr >= 2).astype("float64")
     gb["HRR3"] = (_hrr >= 3).astype("float64")
+    # audit wave 2026-07-14: deeper thresholds for the new heads (rbi2/
+    # run2/hrr4 shipped without the own-target history their hrr2/hrr3
+    # siblings have; RBI runs var/mean 1.64 so the mean rate can't price
+    # the tail)
+    gb["HRR4"] = (_hrr >= 4).astype("float64")
+    gb["RBI2"] = (gb["RBI"] >= 2).astype("float64")
+    gb["RUN2"] = (gb["R"] >= 2).astype("float64")
     gp = _read("mlb_game_pitching.csv", parse_dates=["Date"])
     gp["Outs"] = ip_to_outs(gp["IP"])
     gp["NP"] = pd.to_numeric(gp["NP"], errors="coerce")
@@ -359,18 +391,47 @@ def load_raw():
                   "brk_n", "brk_sw", "brk_wh", "off_n", "off_sw", "off_wh",
                   "edge_n", "fp_n", "fp_sw", "fp_s",
                   "ts_n", "ts_sw", "ts_wh",
-                  "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh"):
+                  "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh",
+                  # v7 audit wave (2026-07-14): 2K x breaking cell
+                  "ts_brk_n", "ts_brk_sw", "ts_brk_wh",
+                  # v8 damage-on-contact wave (2026-07-15): xwOBA-per-BBE
+                  # sums by velo band / pitch class + the 2K x elite-velo
+                  # cell — NaN under a pre-v8 file like every schema wave
+                  "con_n", "con_xw",
+                  "fblo_bip", "fblo_xw", "fbmid_bip", "fbmid_xw",
+                  "fb95_bip", "fb95_xw",
+                  "brk_bip", "brk_xw", "off_bip", "off_xw",
+                  "ts_fb95_n", "ts_fb95_sw", "ts_fb95_wh"):
             if c not in d.columns:
                 d[c] = np.nan
         # fastball-bucket swings/whiffs are derived (NaN pre-backfill)
         d["fbk_sw"] = d["sw_n"] - d["brk_sw"] - d["off_sw"]
         d["fbk_wh"] = d["wh_n"] - d["brk_wh"] - d["off_wh"]
+        # v8: fastball-remainder class damage, derived the same way
+        d["fbk_bip"] = d["con_n"] - d["brk_bip"] - d["off_bip"]
+        d["fbk_xw"] = d["con_xw"] - d["brk_xw"] - d["off_xw"]
     if pdp is not None:                # pitcher-only v5 dispersion sums
-        for c in ("fb_v2", "rp_n", "rp_x", "rp_x2", "rp_z", "rp_z2"):
+        for c in ("fb_v2", "rp_n", "rp_x", "rp_x2", "rp_z", "rp_z2",
+                  # v6 sequencing/count-state/movement sums (2026-07-14):
+                  # NaN under a pre-v6 file so every derived feature gates
+                  # to NaN the same way as the earlier schema waves
+                  "c02_n", "c02_w", "ah_n", "ah_brk", "ah_off",
+                  "bh_n", "bh_brk", "bh_off", "tr_n", "tr_same", "tr_fbbrk",
+                  "ivb_n", "ivb_sum", "fade_w", "fade_num",
+                  # v7 audit wave (2026-07-14): stretch split, perceived
+                  # velo, per-class release centroids, breaking movement
+                  "fbstr_n", "fbstr_v", "fbe_n", "fbe_sum",
+                  "rpf_n", "rpf_x", "rpf_z", "rpf_x2", "rpf_z2",
+                  "rpb_n", "rpb_x", "rpb_z", "rpb_x2", "rpb_z2",
+                  "brkmov_n", "brkmov_sum"):
             if c not in pdp.columns:
                 pdp[c] = np.nan
+        # spin (breaking+offspeed) usage by count state — the derived sums
+        # the ahsp/bhsp shrinkage reads (csw_n idiom)
+        pdp["_ah_sp"] = pdp["ah_brk"] + pdp["ah_off"]
+        pdp["_bh_sp"] = pdp["bh_brk"] + pdp["bh_off"]
     sprint = _opt("mlb_sprint_speed.csv")
-    oaa = _opt("mlb_oaa.csv")
+    oaa = _alias_renamed_teams(_opt("mlb_oaa.csv"))
     oaa_players = _opt("mlb_oaa_players.csv")   # per-fielder OAA (2016+)
     baserun = _opt("mlb_baserunning.csv")       # runner run value (2016+)
     weather = _opt("mlb_weather.csv")           # humidity/pressure per game
@@ -379,6 +440,24 @@ def load_raw():
             weather[c] = pd.to_numeric(weather[c], errors="coerce")
     umps = _opt("mlb_umpires.csv", parse_dates=["Date"])
     bat_track = _opt("mlb_bat_tracking.csv")   # bat speed / swing (2023+ only)
+    # team battery quality (2026-07-15): playing-time-weighted catcher
+    # framing / CS value / pop time per (Year, Team) — the serving-safe
+    # grain (tonight's catcher is unknown; the team battery is)
+    cat = _opt("mlb_catchers_team.csv")
+    if cat is not None:
+        # era-centered pop time (league mean per Year): pop improved
+        # ~0.05s 2015->2025 — comparable to the cross-team spread — so the
+        # SB-chain collision needs the same prior-season-league centering
+        # as sb_chain_env's lg_sb27_prior (regime drift must not flip the
+        # product's sign era-wide). Computed HERE so both paths share it —
+        # and BEFORE the rename aliasing, so duplicated rows can't
+        # double-count a franchise in the league mean.
+        cat["PopC"] = (cat["PopTime"]
+                       - cat.groupby("Year")["PopTime"].transform("mean"))
+        cat = _alias_renamed_teams(cat)
+    # paired IL stints (2026-07-15): the layoff CAUSE the days-rest gap
+    # features cannot see
+    il = _opt("mlb_il.csv", parse_dates=["PlaceDate", "ActDate"])
     # MiLB translated priors — a joblib artifact, not a CSV; optional like
     # bip so a tree without the PA-sim program still builds frames
     milb_path = Path(__file__).resolve().parent / "artifacts" / \
@@ -407,7 +486,7 @@ def load_raw():
                bat_season=bat_season, pit_season=pit_season, bip=bip,
                pdp=pdp, pdb=pdb, sprint=sprint, oaa=oaa,
                oaa_players=oaa_players, baserun=baserun, weather=weather,
-               umps=umps, bat_track=bat_track, milb=milb)
+               umps=umps, bat_track=bat_track, milb=milb, cat=cat, il=il)
     raw["gb"] = annotate_opp_hand(gb, gp, hands)
     return raw
 
@@ -428,8 +507,10 @@ def annotate_opp_hand(gb, gp, hands):
 
 BAT_STATS = ["PA", "AB", "H", "HR", "TB", "SO", "BB",
              "SB", "CS", "R", "RBI", "2B", "3B", "HBP", "IBB",
-             "HRR2", "HRR3", "GIDP", "SF"]
-PIT_STATS = ["BF", "HR", "SO", "BB", "Outs", "ER", "H", "Strikes", "NP"]
+             "HRR2", "HRR3", "GIDP", "SF",
+             "HRR4", "RBI2", "RUN2", "LOB"]     # audit wave 2026-07-14
+PIT_STATS = ["BF", "HR", "SO", "BB", "Outs", "ER", "H", "Strikes", "NP",
+             "WP", "BK", "HBP"]                 # audit wave: chaos channel
 VSH_STATS = ["PA", "HR", "TB", "SO"]  # platoon splits track these
 LOC_STATS = ["PA", "H", "HR", "TB", "SO"]  # home/away venue splits
 ROLL_STATS = ["PA", "HR", "H", "TB", "SO", "SB", "R", "RBI"]  # rolling sums
@@ -530,7 +611,7 @@ def _starter_asof(gp):
     st["p_starts_season"] = gs.cumcount()
     for s in PIT_STATS:
         st[f"ps_{s}"] = gs[s].cumsum() - st[s]
-    for s in ["BF", "HR", "SO", "BB", "H"]:
+    for s in ["BF", "HR", "SO", "BB", "H", "WP", "BK", "HBP"]:
         st[f"p5_{s}"] = g[s].transform(
             lambda x: x.shift(1).rolling(5, min_periods=1).sum())
     st["p_days_rest"] = g["Date"].diff().dt.days
@@ -538,13 +619,41 @@ def _starter_asof(gp):
     st["p_np_last"] = g["NP"].shift(1)
     st["p_np_l3"] = g["NP"].transform(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean())
+    # outing shape (2026-07-14 #16): career as-of sum of Outs^2 (with
+    # pc_Outs/p_starts_career it rebuilds the outing-length SD via the
+    # shared outs_sd_from_sums) and the share of the last SHORT_SHARE_WIN
+    # starts at <= SHORT_START_OUTS outs (opener/bulk/quick-hook detection)
+    _o2 = st["Outs"] ** 2
+    st["_c_Outs2"] = _o2.groupby(st["PlayerId"]).cumsum() - _o2
+    _short = (st["Outs"] <= SHORT_START_OUTS).astype(float)
+    st["p_short_share"] = _short.groupby(st["PlayerId"]).transform(
+        lambda x: x.shift(1).rolling(SHORT_SHARE_WIN,
+                                     min_periods=SHORT_SHARE_MIN).mean())
+    # starter venue splits (2026-07-14 #23): career as-of sums in home vs
+    # road starts (batter _loc idiom); the shrunk pvloc_* rates for THIS
+    # start's venue context are derived after the day-start snap
+    for flag in (0, 1):
+        mask = st["Home"] == flag
+        for s in PVLOC_STATS:
+            tmp = st[s].where(mask, 0)
+            st[f"_ploc{flag}_{s}"] = tmp.groupby(st["PlayerId"]).cumsum() - tmp
     # a pitcher can't start twice in a day, but snap anyway so any data quirk
     # (suspended/resumed games) can't break train/serve parity
     asof_cols = (["p_starts_career", "p_starts_season", "p_days_rest",
-                  "p_np_last", "p_np_l3"]
+                  "p_np_last", "p_np_l3", "_c_Outs2", "p_short_share"]
                  + [f"pc_{s}" for s in PIT_STATS] + [f"ps_{s}" for s in PIT_STATS]
-                 + [f"p5_{s}" for s in ["BF", "HR", "SO", "BB", "H"]])
+                 + [f"p5_{s}" for s in ["BF", "HR", "SO", "BB", "H",
+                                        "WP", "BK", "HBP"]]
+                 + [f"_ploc{f}_{s}" for f in (0, 1) for s in PVLOC_STATS])
     st[asof_cols] = _snap_to_day_start(st, ["PlayerId"], asof_cols)
+    st["p_outs_sd"] = outs_sd_from_sums(st["p_starts_career"], st["pc_Outs"],
+                                        st["_c_Outs2"])
+    for s in PVLOC_STATS:
+        st[f"_pv_{s}"] = np.where(st["Home"] == 1, st[f"_ploc1_{s}"],
+                                  st[f"_ploc0_{s}"])
+    for k, v in pvloc_from_sums(st["_pv_BF"], st["_pv_HR"], st["_pv_SO"],
+                                st["_pv_ER"], st["_pv_Outs"]).items():
+        st[k] = v
     return st
 
 
@@ -565,7 +674,10 @@ def _daily_cum(df, keys, stats, date_col="Date"):
 
 
 def _team_offense_table(gb):
-    return _daily_cum(gb, ["Team", "Season"], ["PA", "HR", "R", "SO", "BB"])
+    # AB/H/TB/HBP joined 2026-07-14 (#19): the team's season OBP/SLG norm is
+    # the baseline the posted-lineup quality gap is measured against
+    return _daily_cum(gb, ["Team", "Season"],
+                      ["PA", "HR", "R", "SO", "BB", "AB", "H", "TB", "HBP"])
 
 
 def _team_offense_loc_table(gb):
@@ -612,11 +724,146 @@ def _pen_fatigue_table(gp):
     return out
 
 
+def _pen_unavail_table(gp):
+    """Backlog #22 (audit-wave rebuild): per (Team, Date) — quality-
+    weighted share of the team's high-leverage relief capacity likely
+    UNAVAILABLE tonight: arms that pitched on BOTH of the two previous
+    calendar days (bullpen convention — almost never a third straight
+    day). Weight = the arm's as-of season SV+HLD; denominator = the
+    team's as-of season total, so the value is a [0,1] share (NaN until
+    the team banks any saves/holds — early April). The daily index runs a
+    week past the last data date so tomorrow's slate resolves
+    (pen-fatigue idiom); pen_np_l3 is aggregate fatigue, this is
+    arm-specific availability."""
+    pen = gp[gp["GS"] == 0].copy()
+    pen["_hl"] = (pd.to_numeric(pen["SV"], errors="coerce").fillna(0.0)
+                  + pd.to_numeric(pen["HLD"], errors="coerce").fillna(0.0))
+    # per (arm, day) appearance rows with the arm's strictly-prior season
+    # SV+HLD weight (weight travels with a traded arm; clip below guards
+    # the cross-team edge)
+    day = (pen.groupby(["PlayerId", "Team", "Season", "Date"],
+                       as_index=False).agg(_hl=("_hl", "sum")))
+    day = day.sort_values(["PlayerId", "Season", "Date"])
+    g = day.groupby(["PlayerId", "Season"], sort=False)
+    day["_w"] = g["_hl"].cumsum() - day["_hl"]
+    # arms that pitched BOTH of the two previous days, keyed to tonight
+    a1 = day[["Team", "Season", "PlayerId", "Date", "_w"]].copy()
+    a1["Date"] = a1["Date"] + pd.Timedelta(days=1)
+    a2 = day[["Team", "Season", "PlayerId", "Date"]].copy()
+    a2["Date"] = a2["Date"] + pd.Timedelta(days=2)
+    both = a1.merge(a2, on=["Team", "Season", "PlayerId", "Date"])
+    num = (both.groupby(["Team", "Date"], as_index=False)
+           .agg(_unav=("_w", "sum")))
+    # team's strictly-prior season SV+HLD on a full daily index (+7d)
+    tw = pen.pivot_table(index="Date", columns="Team", values="_hl",
+                         aggfunc="sum")
+    idx = pd.date_range(tw.index.min(),
+                        tw.index.max() + pd.Timedelta(days=7), freq="D")
+    tw = tw.reindex(idx).fillna(0.0)
+    prior = tw.groupby(tw.index.year).cumsum() - tw
+    out = prior.stack().rename("_team_w").reset_index()
+    out.columns = ["Date", "Team", "_team_w"]
+    out = out.merge(num, on=["Team", "Date"], how="left")
+    out["pen_hl_unavail"] = ((out["_unav"].fillna(0.0)
+                              / out["_team_w"].where(out["_team_w"] > 0))
+                             .clip(0.0, 1.0))
+    return out[["Date", "Team", "pen_hl_unavail"]]
+
+
 def _team_defense_table(gp):
     """Unearned-run rate allowed, per team-season (as-of): (R - ER) * 27 /
     outs across the whole staff. The only defense-quality signal in the
     data; everything else assumes all gloves are equal."""
     return _daily_cum(gp, ["Team", "Season"], ["R", "ER", "Outs"])
+
+
+def _team_starter_outs_table(gp):
+    """The manager's leash (2026-07-14 #16): the TEAM's as-of season average
+    starter outs per game — organizational quick-hook/bulk policy, distinct
+    from any one pitcher's own history."""
+    return _daily_cum(gp[gp["GS"] == 1], ["Team", "Season"], ["Outs"])
+
+
+def _team_sched_table(games, parks):
+    """Per (GamePk, Team): schedule context off the team's PREVIOUS game on
+    an earlier DATE (day-start convention, so game 2 of a doubleheader sees
+    the same 'previous game' the serving path can see): day_after_night,
+    travel_km (great-circle between venues), tz_delta (approx hours, east
+    positive) — plus the doubleheader flags is_dh / dh_game2 (two GamePks,
+    same team+date; game 2 = the higher GamePk of the day). 2026-07-14
+    #18/#24."""
+    dn = games["DayNight"].astype(str).str.strip().str.title().str[:1]
+    dn = dn.where(dn.isin(("D", "N")), "")     # matches the scalar _dn1
+    rows = []
+    for tc in ("AwayTeam", "HomeTeam"):
+        rows.append(pd.DataFrame({
+            "GamePk": games["GamePk"], "Team": games[tc],
+            "Date": games["Date"], "Venue": games["Venue"],
+            "DayNight": dn}))
+    t = pd.concat(rows, ignore_index=True).sort_values(
+        ["Team", "Date", "GamePk"], kind="mergesort").reset_index(drop=True)
+    # doubleheader flags: games per (Team, Date), ordered by GamePk
+    grp_day = t.groupby(["Team", "Date"], sort=False)
+    n_day = grp_day["GamePk"].transform("size")
+    t["is_dh"] = (n_day >= 2).astype(float)
+    t["dh_game2"] = (grp_day.cumcount() >= 1).astype(float)
+    # previous game on an EARLIER date: take each team-day's FIRST row's
+    # previous row (day-start), so both DH games share one predecessor
+    g = t.groupby("Team", sort=False)
+    for c in ("Date", "Venue", "DayNight"):
+        t[f"_prev_{c}"] = g[c].shift(1)
+    prev_cols = ["_prev_Date", "_prev_Venue", "_prev_DayNight"]
+    t[prev_cols] = _snap_to_day_start(t, ["Team"], prev_cols)
+    coords = parks.set_index("Ballpark")[["Lat", "Lon"]]
+    la_p = t["_prev_Venue"].map(coords["Lat"])
+    lo_p = t["_prev_Venue"].map(coords["Lon"])
+    la_n = t["Venue"].map(coords["Lat"])
+    lo_n = t["Venue"].map(coords["Lon"])
+    t["travel_km"] = haversine_km(la_p, lo_p, la_n, lo_n)
+    t["tz_delta"] = (lo_n - lo_p) / _TZ_DEG_PER_HR
+    gap1 = (t["Date"] - t["_prev_Date"]).dt.days == 1
+    known = (t["_prev_DayNight"].isin(("D", "N"))
+             & t["DayNight"].isin(("D", "N")))
+    t["day_after_night"] = np.where(
+        known & t["_prev_Date"].notna(),
+        (gap1 & (t["_prev_DayNight"] == "N")
+         & (t["DayNight"] == "D")).astype(float), np.nan)
+    return t[["GamePk", "Team", "day_after_night", "travel_km", "tz_delta",
+              "is_dh", "dh_game2"]]
+
+
+# BaseRuns team-run expectation from trailing components — the sequencing-
+# luck residual's denominator model. Standard BsR: A = baserunners,
+# B = advancement, C = outs, D = HR; E[R] = A*B/(B+C) + D.
+def _baseruns(h, bb, hbp, tb, hr, ab):
+    a = h + bb + hbp - hr
+    b = 1.02 * (1.4 * tb - 0.6 * h - 3.0 * hr + 0.1 * (bb + hbp))
+    c = ab - h
+    return a * b / (b + c) + hr
+
+
+def _team_bsr_table(gb):
+    """Per (Team, Date): trailing-30-day cluster-luck residual — actual runs
+    minus the BaseRuns expectation from components, per game, strictly
+    before the date (2026-07-14 #20). Positive = the offense has been
+    sequencing-lucky and is due to regress. NaN under BSR_MIN_G games. The
+    index runs a week past the last data date so tomorrow's slate resolves
+    (pen-fatigue idiom)."""
+    stats = ["H", "BB", "HBP", "TB", "HR", "AB", "R"]
+    day = gb.groupby(["Team", "Date"])[stats].sum()
+    day["G"] = gb.groupby(["Team", "Date"])["GamePk"].nunique()
+    wide = day.unstack("Team")
+    idx = pd.date_range(wide.index.min(),
+                        wide.index.max() + pd.Timedelta(days=7), freq="D")
+    wide = wide.reindex(idx).fillna(0.0)
+    roll = wide.rolling("30D").sum().shift(1)
+    bsr = _baseruns(roll["H"], roll["BB"], roll["HBP"], roll["TB"],
+                    roll["HR"], roll["AB"])
+    luck = (roll["R"] - bsr) / roll["G"]
+    luck = luck.where(roll["G"] >= BSR_MIN_G)
+    out = luck.stack().rename("bsr_luck").reset_index()   # NaN rows drop;
+    out.columns = ["Date", "Team", "bsr_luck"]            # merges re-NaN them
+    return out
 
 
 def _team_sb_allowed_table(gb):
@@ -632,13 +879,41 @@ def _team_sb_allowed_table(gb):
 
 def _park_table(gb, games):
     # per-game venue totals for the park factors: HR (legacy) plus runs, hits,
-    # doubles and total bases, so the offensive props get the run-environment
-    # signal a lone HR factor misses.
-    stats = ["HR", "R", "H", "2B", "TB"]
+    # doubles, triples (2026-07-14, the H3 triple head's venue rider — deep
+    # gaps and quirky walls) and total bases, so the offensive props get the
+    # run-environment signal a lone HR factor misses.
+    stats = ["HR", "R", "H", "2B", "3B", "TB"]
     per_game = gb.groupby("GamePk", as_index=False)[stats].sum()
     gv = games.merge(per_game, on="GamePk", how="left")
     gv[stats] = gv[stats].fillna(0)
-    return _daily_cum(gv, ["Venue"], stats)
+    # audit wave (rank 32): per-game runs SUM-OF-SQUARES so consumers can
+    # rebuild the venue variance-to-mean ratio (the second moment of runs —
+    # nothing else in the pipeline encodes one) from cumulative sums.
+    gv["R2"] = gv["R"] ** 2
+    return _daily_cum(gv, ["Venue"], stats + ["R2"])
+
+
+# audit wave (rank 32): venue run variance-to-mean ratio, EB-shrunk toward
+# the league VMR. The trait is real but weak (split-half ~0.15), so the
+# shrinkage is heavy (measured noise/signal implies K~900, not the K~300
+# the proposal guessed). VMR0 = pooled league VMR measured on the file.
+PARK_VMR0, PARK_VMR_K, PARK_VMR_MIN_N = 2.278, 900.0, 30
+
+
+def park_vmr_from_sums(n, r, r2):
+    """Venue runs variance-to-mean ratio from cumulative (n games, sum R,
+    sum R^2), EB-shrunk toward the league VMR0. Shared by the game frame
+    and Stores.park so both paths compute identically; NaN under
+    PARK_VMR_MIN_N games."""
+    n = np.asarray(n, dtype="float64")
+    r = np.asarray(r, dtype="float64")
+    r2 = np.asarray(r2, dtype="float64")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = r / n
+        var = r2 / n - mean ** 2
+        vmr_raw = var / mean
+        shr = (n * vmr_raw + PARK_VMR_K * PARK_VMR0) / (n + PARK_VMR_K)
+    return np.where(n >= PARK_VMR_MIN_N, shr, np.nan)
 
 
 def _park_hand_hr_table(gb, games, hands):
@@ -876,9 +1151,16 @@ BIP_SHRINK = {
     # measure (the HR log only records each batter's best contact); the
     # pitcher mirror = how far he gets hit in the air. Prior measured.
     "flyd":  (315.0, 40, "fld_sum", "fld_n"),
+    # audit wave (rank 13): the oppo-side spray bins (mirror of pull;
+    # a stable independent skill the one-sided encoding missed) and the
+    # 105+ EV tail share. Priors measured on the full BIP file.
+    "oppo":    (0.282, 60, "oppo_n", "hc_n"),      # oppo-side share
+    "oppoair": (0.161, 80, "oppoair_n", "hc_n"),   # oppo fly/line share
+    "ev105":   (0.084, 80, "ev105_n", "ev_n"),     # crushed share (EV>=105)
 }
 # 90-day decayed too; xba joined 07-12 for the starter BABIP-luck residual
-BIP_DECAYED = ("ev", "brl", "xwoba", "gb", "pullair", "ld", "xba", "flyd")
+BIP_DECAYED = ("ev", "brl", "xwoba", "gb", "pullair", "ld", "xba", "flyd",
+               "oppoair", "ev105")
 
 # pitch-level daily aggregates (scrape_pitches.py): swing-and-miss and
 # plate discipline. Same (prior, K, numerator, denominator) convention;
@@ -924,12 +1206,64 @@ PD_SHRINK = {
     "tswh": (0.225, 100, "ts_wh", "ts_sw"),     # two-strike whiff/swing
     "f32z": (0.575, 60, "f32_z", "f32_n"),      # 3-2 zone share
     "f32b": (0.224, 60, "f32_b", "f32_n"),      # 3-2 ball (=walk) share
+    # v6 sequencing / count-state / movement (2026-07-14 #25-27; priors
+    # MEASURED on the full re-aggregated 2015-2026 pitcher file):
+    # 0-2 waste rate (share of located 0-2 pitches beyond the shadow band —
+    # a putaway plan vs nibbling), ahead/behind spin (brk+off) usage —
+    # each side shrinks to ITS OWN league prior so no-history lands on the
+    # league's usage shift, not zero — same-class back-to-back share
+    # (predictability), fastball->breaking transition share (the tunneling
+    # pair), and FF induced vertical break in inches (ride).
+    "w02":  (0.540, 80, "c02_w", "c02_n"),      # 0-2 waste rate
+    "ahsp": (0.497, 150, "_ah_sp", "ah_n"),     # spin share when ahead
+    "bhsp": (0.329, 150, "_bh_sp", "bh_n"),     # spin share when behind
+    "trsame": (0.504, 150, "tr_same", "tr_n"),  # same-class repeat share
+    "trfbbrk": (0.156, 150, "tr_fbbrk", "tr_n"),  # fb->breaking share
+    "ivb":  (15.96, 100, "ivb_sum", "ivb_n"),   # FF induced vert break (in)
+    # v7 audit wave (2026-07-14): the passivity axis (zone-swing +
+    # two-strike swing — called-K/walk path; priors measured on the full
+    # batter file), the two-strike x breaking putaway cell, perceived-velo
+    # premium (effective minus release on FF/SI; league prior fits the
+    # Hawk-Eye era, drift absorbed by the trees), and breaking-ball
+    # movement magnitude (cause axis; ivb idiom, shrink handles thin n)
+    "zsw":  (0.672, 120, "z_sw", "z_n"),        # in-zone swing share
+    "tssw": (0.604, 100, "ts_sw", "ts_n"),      # two-strike swing share
+    "tsbrkwh": (0.30, 80, "ts_brk_wh", "ts_brk_sw"),  # 2K whiff vs breaking
+    "effprem": (0.15, 200, "fbe_sum", "fbe_n"),  # perceived-velo premium
+    "brkmov": (10.7, 100, "brkmov_sum", "brkmov_n"),  # breaking break (in)
+    # v8 damage-on-contact wave (2026-07-15): xwOBA per BBE by velo band /
+    # pitch class — the contact half of the velo-band axis (the whiff half
+    # shipped v4). K = 60 BBE matching BIP_SHRINK's xwoba; a median batter
+    # season has only ~18 BBE vs 95+, so the DECAYED reads are shrink-
+    # dominated by design — the career reads carry the collision features.
+    # Priors MEASURED on the re-aggregated 2015-2026 batter file
+    # (2026-07-15; damage falls as velo rises, lowest on offspeed).
+    "fbloxw": (0.389, 60, "fblo_xw", "fblo_bip"),   # xwOBA/BBE vs <92
+    "fbmidxw": (0.385, 60, "fbmid_xw", "fbmid_bip"),  # xwOBA/BBE 92-95
+    "fb95xw": (0.372, 60, "fb95_xw", "fb95_bip"),   # xwOBA/BBE vs 95+
+    "brkxw": (0.355, 60, "brk_xw", "brk_bip"),      # xwOBA/BBE vs breaking
+    "offxw": (0.343, 60, "off_xw", "off_bip"),      # xwOBA/BBE vs offspeed
+    "fbkxw": (0.381, 60, "fbk_xw", "fbk_bip"),      # xwOBA/BBE vs fastballs
+    "tsfb95wh": (0.187, 80, "ts_fb95_wh", "ts_fb95_sw"),  # 2K whiff vs 95+
 }
 
 # velo-dispersion / release-scatter gates: effective sample below which
 # the sd reads are noise, not skill
 FBSD_MIN_N = 30.0
 RELSD_MIN_N = 100.0
+# in-game velo-fade slope (v6 #26): effective fastballs of per-start-slope
+# weight below which the decayed mean slope is noise
+FADE_MIN_W = 30.0
+
+
+def fbv_fade_from_sums(w, num):
+    """Decayed weighted-mean per-start velo-fade slope from (weight, slope x
+    weight) sums — shared by both paths; NaN under FADE_MIN_W."""
+    w = np.asarray(w, dtype="float64")
+    num = np.asarray(num, dtype="float64")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        slope = num / w
+    return np.where(w >= FADE_MIN_W, slope, np.nan)
 
 
 def velo_sd_from_sums(n, v, v2):
@@ -959,15 +1293,72 @@ def release_scatter_from_sums(n, x, x2, z, z2):
         sd = np.sqrt(np.clip(vx, 0.0, None) + np.clip(vz, 0.0, None))
     return np.where(n >= RELSD_MIN_N, sd, np.nan)
 
+
+# v7 audit wave (2026-07-14): base-out conditional velo + per-class
+# release geometry, from the v7 scrape sums. Both are shared-by-both-paths
+# helpers like velo_sd_from_sums.
+STRETCH_K = 300.0            # shrink of the stretch-windup delta toward 0
+RELSEP_MIN_N = 30.0          # per-class pitches before centroids mean much
+RELSEP_PRIOR, RELSEP_K = 0.165, 100.0   # league-mean separation (ft)
+
+
+def stretch_vdelta_from_sums(fb_n, fb_v, fbstr_n, fbstr_v):
+    """FF/SI velo pitching from the STRETCH (runners on) minus from the
+    windup, shrunk toward 0 by stretch-side support — conditional stuff on
+    run-scoring states (base-out appears nowhere else in the pipeline).
+    Sign = stretch minus windup (league mean ~ +0.08 mph). NaN when either
+    split is empty."""
+    sn = np.asarray(fbstr_n, dtype="float64")
+    sv = np.asarray(fbstr_v, dtype="float64")
+    wn = np.asarray(fb_n, dtype="float64") - sn
+    wv = np.asarray(fb_v, dtype="float64") - sv
+    with np.errstate(invalid="ignore", divide="ignore"):
+        delta = sv / sn - wv / wn
+    delta = np.where((sn > 0) & (wn > 0), delta, np.nan)
+    return delta * sn / (sn + STRETCH_K)
+
+
+def release_sep_from_sums(fn, fx, fz, bn, bx, bz):
+    """Between-class release-centroid separation (fastball-remainder vs
+    breaking classes), K-shrunk toward the league-mean separation — the
+    arm-slot deception trait the pooled rp_ scatter confounds (r=0.34 with
+    it). NaN unless BOTH classes clear RELSEP_MIN_N (centroid gate, lower
+    than RELSD_MIN_N since means need less n than SDs)."""
+    fn = np.asarray(fn, dtype="float64")
+    bn = np.asarray(bn, dtype="float64")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sep = np.hypot(
+            np.asarray(bx, dtype="float64") / bn
+            - np.asarray(fx, dtype="float64") / fn,
+            np.asarray(bz, dtype="float64") / bn
+            - np.asarray(fz, dtype="float64") / fn)
+    w = np.minimum(fn, bn)
+    shr = (sep * w + RELSEP_K * RELSEP_PRIOR) / (w + RELSEP_K)
+    return np.where((fn >= RELSEP_MIN_N) & (bn >= RELSEP_MIN_N),
+                    shr, np.nan)
+
 # the batter-side plate-discipline set (career + decay both built) and the
 # pitcher-side decayed set — shared by the vectorized frame builders and
 # the serving Stores so the two paths can never drift apart
 PD_BATTER = ("wsw", "chase", "zwsw", "fb95wh", "brkwh", "offwh", "fbwh",
-             "fpsw", "fblowh", "fbmidwh", "tswh", "f32b")
+             "fpsw", "fblowh", "fbmidwh", "tswh", "f32b",
+             # v7 audit wave: passivity axis + 2K x breaking putaway cell
+             "zsw", "tssw", "tsbrkwh",
+             # v8 damage-on-contact: xwOBA/BBE by band + class, 2K x 95+
+             "fbloxw", "fbmidxw", "fb95xw", "brkxw", "offxw", "fbkxw",
+             "tsfb95wh")
 PD_PITCHER_D = ("swstr", "csw", "wsw", "chase", "zone", "fbv", "zwsw",
                 "brkwh", "offwh", "fbwh", "brk", "off", "edge", "fps",
                 "fb95wh", "fblowh", "fbmidwh", "fblou", "fbmidu", "fb95u",
-                "tswh", "f32z", "f32b")
+                "tswh", "f32z", "f32b",
+                # v6 (2026-07-14): 0-2 waste, ahead/behind spin usage (the
+                # shift is derived in add_starter_derived), transition
+                # shares, FF ride
+                "w02", "ahsp", "bhsp", "trsame", "trfbbrk", "ivb",
+                # v7 audit wave: perceived-velo premium + breaking movement
+                "effprem", "brkmov",
+                # v8 damage-on-contact: xwOBA/BBE ALLOWED by band + class
+                "fbloxw", "fbmidxw", "fb95xw", "brkxw", "offxw", "fbkxw")
 
 # spray-angle pull cutoff: hit coordinates -> signed degrees off center
 # (negative = LF); a RHB pull = LF side, LHB = RF. Verified empirically:
@@ -996,14 +1387,20 @@ def pd_feats(get, pre, names=None):
 
 
 def _spray_flags(b):
-    """(pull, pull-air) booleans per batted ball from hit coordinates and
-    batter side. Shared by both paths so the cutoff math is identical."""
+    """(pull, pull-air, oppo, oppo-air) booleans per batted ball from hit
+    coordinates and batter side. Shared by both paths so the cutoff math
+    is identical. Oppo (audit wave rank 13) = the mirror bin: beyond
+    PULL_DEG toward the opposite field — a stable independent skill
+    (YoY 0.51, corr -0.46 with pullair) the pull-only encoding missed."""
     ang = np.degrees(np.arctan2(b["HcX"] - 125.42, 198.27 - b["HcY"]))
     pull = np.where(b["Stand"] == "R", ang < -PULL_DEG,
                     np.where(b["Stand"] == "L", ang > PULL_DEG, False))
     pull = pull & b["HcX"].notna().to_numpy()
+    oppo = np.where(b["Stand"] == "R", ang > PULL_DEG,
+                    np.where(b["Stand"] == "L", ang < -PULL_DEG, False))
+    oppo = oppo & b["HcX"].notna().to_numpy()
     air = b["BBType"].isin(("fly_ball", "line_drive")).to_numpy()
-    return pull, pull & air
+    return pull, pull & air, oppo, oppo & air
 
 
 def _bip_day_sums(bip, id_col):
@@ -1013,7 +1410,7 @@ def _bip_day_sums(bip, id_col):
     b = bip.dropna(subset=[id_col]).copy()
     b[id_col] = b[id_col].astype("int64")
     ev, la = b["ExitVelo"], b["LaunchAngle"]
-    pull, pullair = _spray_flags(b)
+    pull, pullair, oppo, oppoair = _spray_flags(b)
     day = pd.DataFrame({
         id_col: b[id_col], "Date": b["Date"],
         "n": 1.0,
@@ -1034,6 +1431,12 @@ def _bip_day_sums(bip, id_col):
         "hc_n": b["HcX"].notna().astype(float),
         "pull_n": pull.astype(float),
         "pullair_n": pullair.astype(float),
+        # audit wave (rank 13): oppo spray bin + the 105+ EV tail (a
+        # distinct order statistic — hh saturates at 37.5% of contact,
+        # brl is LA-window-gated, the mean is mishit-contaminated)
+        "oppo_n": oppo.astype(float),
+        "oppoair_n": oppoair.astype(float),
+        "ev105_n": (ev >= 105).astype(float),
     })
     return day.groupby([id_col, "Date"], as_index=False).sum()
 
@@ -1304,7 +1707,13 @@ def _asof_merge(left, right, by, date_col="Date"):
 # ------------------------------------------------------- matchup features
 
 ARS_B_METRICS = {"xSLG": "m_xslg", "xwOBA": "m_xwoba",
-                 "Whiff %": "m_whiff", "Hard Hit %": "m_hh"}
+                 "Whiff %": "m_whiff", "Hard Hit %": "m_hh",
+                 # audit wave (rank 19): the K dimension of the batter-vs-
+                 # arsenal join — K%-per-PA is not whiff-per-swing (called
+                 # strikes, foul-offs, count management) and PutAway% is
+                 # type-grain two-strike conversion (ARS_K_METRICS treats
+                 # them as additive pitcher-side already)
+                 "K%": "m_kpct", "Put Away %": "m_paway"}
 ARS_P_METRICS = {"xSLG": "pars_xslg", "Whiff %": "pars_whiff",
                  "Hard Hit %": "pars_hh", "RV/100": "pars_rv100"}
 # K-model view of a starter's arsenal: the strikeout-predictive metrics
@@ -1404,6 +1813,76 @@ def pitcher_arsenal_feats(pitchers, ars_p):
     return _blend_years(one(1), one(2), cols).reset_index()
 
 
+ARS_DYN_COLS = ["pars_entropy", "pars_rv_trend", "pars_whiff_trend",
+                "pars_new_usage"]
+
+
+def _arsenal_dynamics(ars_p):
+    """Per (PitcherId, serve Season): arsenal breadth + trajectory that the
+    0.7/0.3 LEVEL blend hides (audit wave rank 22). Leakage-safe — a serve
+    season S reads only arsenal Years <= S-1. Shared by the frame builders
+    and the serving Store so the two paths compute identically.
+      pars_entropy      Shannon entropy of the renormalized pitch-mix
+                        (breadth/unpredictability), 0.7/0.3 blend S-1/S-2
+      pars_rv_trend     usage-weighted RV/100 change S-1 vs S-2 (stuff
+                        up/down; delta clipped +/-10 vs tiny-sample types)
+      pars_whiff_trend  same for Whiff % (clip +/-25)
+      pars_new_usage    share of S-1 usage on pitch types absent in S-2
+                        (new-pitch adoption; NaN if no S-2 arsenal at all)
+    """
+    a = ars_p.dropna(subset=["PlayerId", "Year", "PitchType"]).copy()
+    a["PlayerId"] = a["PlayerId"].astype("int64")
+    a["Year"] = a["Year"].astype(int)
+    for c in ("%", "RV/100", "Whiff %", "Pitches"):
+        a[c] = pd.to_numeric(a[c], errors="coerce")
+    # entropy per (PlayerId, Year), renormalizing usage (Statcast omits
+    # rarely-thrown types so the raw shares under-sum on ~5% of rows)
+    g = a.groupby(["PlayerId", "Year"])
+    usum = g["%"].transform("sum")
+    p = a["%"] / usum.where(usum > 0)
+    a["_plnp"] = -(p * np.log(p.where(p > 0)))
+    ent = g.agg(_H=("_plnp", "sum"), _usum=("%", "sum")).reset_index()
+    ent["H"] = ent["_H"].where(ent["_usum"] >= 50)   # thin-mix rows -> NaN
+    e1 = ent.assign(Season=ent["Year"] + 1).rename(columns={"H": "H1"})
+    e2 = ent.assign(Season=ent["Year"] + 2).rename(columns={"H": "H2"})
+    ent_s = e1[["PlayerId", "Season", "H1"]].merge(
+        e2[["PlayerId", "Season", "H2"]], on=["PlayerId", "Season"],
+        how="outer")
+    b = ARS_W1 * ent_s["H1"] + ARS_W2 * ent_s["H2"]
+    ent_s["pars_entropy"] = b.fillna(ent_s["H1"]).fillna(ent_s["H2"])
+    ent_s = ent_s[["PlayerId", "Season", "pars_entropy"]]
+    # year-over-year dynamics: shared pitch types, >=50 pitches both years
+    a1 = a[a["Pitches"] >= 50][["PlayerId", "Year", "PitchType", "%",
+                                "RV/100", "Whiff %"]]
+    y1 = a1.rename(columns={"%": "u1", "RV/100": "rv1", "Whiff %": "wh1"})
+    y1 = y1.assign(Season=y1["Year"] + 1)
+    y2 = a1.rename(columns={"%": "u2", "RV/100": "rv2", "Whiff %": "wh2"})
+    y2 = y2.assign(Season=y2["Year"] + 2)
+    j = y1.merge(y2[["PlayerId", "Season", "PitchType", "u2", "rv2", "wh2"]],
+                 on=["PlayerId", "Season", "PitchType"], how="left")
+    sh = j[j["u2"].notna()].copy()
+    sh["_rvw"] = sh["u1"] * (sh["rv1"] - sh["rv2"]).clip(-10, 10)
+    sh["_whw"] = sh["u1"] * (sh["wh1"] - sh["wh2"]).clip(-25, 25)
+    tr = sh.groupby(["PlayerId", "Season"]).agg(
+        _rvw=("_rvw", "sum"), _whw=("_whw", "sum"),
+        _u=("u1", "sum")).reset_index()
+    tr["pars_rv_trend"] = tr["_rvw"] / tr["_u"].where(tr["_u"] > 0)
+    tr["pars_whiff_trend"] = tr["_whw"] / tr["_u"].where(tr["_u"] > 0)
+    # new-pitch usage: needs a S-2 arsenal to define "new" (else NaN)
+    has2 = (y2.groupby(["PlayerId", "Season"]).size()
+            .rename("_n2").reset_index())
+    newu = (j[j["u2"].isna()].groupby(["PlayerId", "Season"])["u1"].sum()
+            .rename("_newu").reset_index())
+    nu = has2.merge(newu, on=["PlayerId", "Season"], how="left")
+    nu["pars_new_usage"] = nu["_newu"].fillna(0.0) / 100.0
+    out = ent_s.merge(
+        tr[["PlayerId", "Season", "pars_rv_trend", "pars_whiff_trend"]],
+        on=["PlayerId", "Season"], how="outer")
+    out = out.merge(nu[["PlayerId", "Season", "pars_new_usage"]],
+                    on=["PlayerId", "Season"], how="outer")
+    return out
+
+
 # ------------------------------------------------------------ rate helpers
 
 # Empirical-Bayes shrinkage of batter rate stats toward league priors.
@@ -1412,6 +1891,12 @@ def pitcher_arsenal_feats(pitchers, ars_p):
 # large-sample rate barely moves. Denoises the most important features
 # (early-season and rolling windows) without leaking. Constants are fixed
 # league averages so the training and inference paths compute identically.
+# KNOWN LIMITATION (2026-07-14 audit): these priors (and the BIP/PD ones
+# below) were measured on the pooled files, so the future league level
+# faintly informs past features. Not target leakage, and shared identically
+# by both arms of every paired read (relative verdicts unaffected), but a
+# rigorous absolute backtest would fit priors as-of. Kept frozen: parity
+# between the two code paths requires fixed constants.
 #   name -> (prior, K, numerator stat, denominator stat)
 SHRINK = {
     "hr_pa":  (0.032, 170, "HR", "PA"),
@@ -1430,6 +1915,19 @@ SHRINK = {
     # rates measured off the full game-batting log (GIDP/PA 0.018, SF/PA 0.007).
     "gidp_pa": (0.018,  200, "GIDP", "PA"),
     "sf_pa":   (0.0067, 250, "SF",   "PA"),
+    # hit-type rates (audit wave 2026-07-14): the triple head's own history
+    # — 3B/AB is a stable skill (y2y r=0.45) trees can't rebuild from the
+    # fused iso/xbh/tb blends. Priors measured on the full game-batting log
+    # (1B/AB 0.160, 2B/AB 0.049, 3B/AB 0.0046); Ks by convention, strong
+    # for the thin 3B rate. 1B numerator = H-2B-3B-HR (iso precedent).
+    "1b_ab":  (0.160,  460, None, "AB"),
+    "2b_ab":  (0.049,  300, "2B", "AB"),
+    "3b_ab":  (0.0046, 500, "3B", "AB"),
+    # RBI conversion (audit wave, rank 14): realized cash-in rate per
+    # driving-in opportunity — RBI/(RBI+LOB), the only column separating
+    # realized opportunity from conversion (LOB had zero consumers).
+    # Prior = league RBI/(RBI+LOB) measured on the game-batting log.
+    "rbi_conv": (0.232, 40, "RBI", None),   # denominator = RBI + LOB
 }
 SHRINK_ROLL = ("hr_pa", "tb_ab", "k_pct", "sb_pa",
                "r_pa", "rbi_pa")  # rolling: PA denominator
@@ -1446,6 +1944,15 @@ SHRINK_ROLL = ("hr_pa", "tb_ab", "k_pct", "sb_pa",
 # (the ece casualty) never sees them. Coverage 100%, parity 1.7e-16,
 # target corr ~+0.11.
 HRR_SHRINK = {"hrr2_g": (0.395, 40.0), "hrr3_g": (0.250, 40.0)}
+# audit wave 2026-07-14: deeper thresholds for the heads that shipped
+# without their own-target history (rbi2/run2/hrr4). Priors measured on
+# the <=2024 game-batting log (hrr4 0.139, rbi2 0.085, run2 0.064), K=40
+# by convention like the hrr pair. THRESH_HIST maps cum/decay sum keys to
+# the output stems the shared helper emits.
+THRESH_SHRINK = {**HRR_SHRINK, "hrr4_g": (0.139, 40.0),
+                 "rbi2_g": (0.085, 40.0), "run2_g": (0.064, 40.0)}
+THRESH_HIST = {"HRR2": "hrr2_g", "HRR3": "hrr3_g", "HRR4": "hrr4_g",
+               "RBI2": "rbi2_g", "RUN2": "run2_g"}
 
 # Home-plate umpire zone tendency: his career K% and BB% per batter-faced
 # over PRIOR games (both teams' pitching lines), EB-shrunk toward the league
@@ -1455,6 +1962,114 @@ HRR_SHRINK = {"hrr2_g": (0.395, 40.0), "hrr3_g": (0.250, 40.0)}
 # bites for an ump's first handful of games — they accrue ~75 BF/game and
 # hundreds of games across the dataset, so the estimate is otherwise firm.
 UMP_K_PRIOR, UMP_BB_PRIOR, UMP_K = 0.226, 0.085, 400.0
+# ... and his run environment (2026-07-14 #21): shrunk as-of total runs per
+# game with this HP ump — the totals/earned-run view of the same authority
+# signal the K/BB split can't carry. Prior = measured league R/G (both
+# teams, 2015-2026 games file); K in games.
+UMP_RG_PRIOR, UMP_RG_K = 9.0, 40.0
+
+# Starter venue splits (2026-07-14 #23): as-of home/road K / HR / ERA for a
+# starter, EB-shrunk like the batter vloc_* family. Priors are league
+# starter rates per BF (ERA per out); Ks set by convention (BIP_SHRINK
+# precedent, not swept).
+PVLOC_K_PRIOR, PVLOC_K_K = 0.222, 200.0      # K per BF
+PVLOC_HR_PRIOR, PVLOC_HR_K = 0.030, 300.0    # HR per BF
+PVLOC_ER_PRIOR, PVLOC_ER_K = 4.30 / 27.0, 150.0   # ER per out, K in outs
+PVLOC_STATS = ["BF", "HR", "SO", "ER", "Outs"]
+
+# audit wave (rank 21): the chaos channel — wild pitches + balks (free
+# advancement invisible to the bb/h/era decomposition) and hit batsmen
+# (a baserunner channel outside BB). ~1.8% of BF combined, so shrunk per
+# the pvloc convention (plain pc_* rates stay unshrunk); priors measured
+# on the 2015-2026 starter game logs.
+CHAOS_PRIOR, CHAOS_K = 0.0082, 200.0      # (WP+BK) per BF
+HBP_PRIOR, HBP_K = 0.0097, 200.0          # HBP per BF
+
+# audit wave (rank 25): pitch-economy budget — league NP per out (stable
+# 5.34-5.60 across years), K-shrunk so early-career pc_Outs=0 lands on the
+# constant. p_exp_outs = recent budget / this ratio.
+NP_PER_OUT_PRIOR, NP_PER_OUT_K = 5.48, 100.0
+
+# Outing-shape gates (2026-07-14 #16): starts needed before the outing-
+# length SD / short-start share mean anything
+OUTS_SD_MIN_STARTS = 5
+SHORT_START_OUTS = 12        # <= 12 outs = a short start (opener/quick hook)
+SHORT_SHARE_WIN, SHORT_SHARE_MIN = 10, 3
+
+# Layoff / ramp regime cutoffs (2026-07-14 #17)
+GAP_DAYS = 15                # 15+ days = IL return / call-up regime
+RAMP_NP = 60                 # last start under 60 pitches = ramping
+SHORT_REST_DAYS, HEAVY_NP = 4, 100   # short rest after a heavy start
+
+# BaseRuns cluster-luck residual (2026-07-14 #20): trailing-30-day team
+# runs minus the BaseRuns expectation from components — sequencing luck
+# that regresses. NaN under BSR_MIN_G games in the window (early April).
+BSR_MIN_G = 10
+
+# schedule/travel (2026-07-14 #18): tz approximation — degrees of
+# longitude per hour; good enough for a fatigue feature and computable
+# from the ballparks file alone at serve time
+_TZ_DEG_PER_HR = 15.0
+EARTH_R_KM = 6371.0
+
+
+def _dn1(v):
+    """Normalize a DayNight value ('night', 'Day', 'N', ...) to 'D'/'N'/''.
+    Scalar; the vectorized table applies the same rule via .str ops."""
+    s = str(v).strip().title()[:1] if v is not None and pd.notna(v) else ""
+    return s if s in ("D", "N") else ""
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km; NaN inputs propagate. Vectorized."""
+    p1, p2 = np.radians(lat1), np.radians(lat2)
+    dp = np.radians(np.asarray(lat2) - np.asarray(lat1))
+    dl = np.radians(np.asarray(lon2) - np.asarray(lon1))
+    a = np.sin(dp / 2.0) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2.0) ** 2
+    return 2.0 * EARTH_R_KM * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+
+def sched_from_prev(prev_date, prev_venue, prev_dn, date, dn, venue, coords):
+    """Schedule-context features off a team's PREVIOUS game (strictly
+    earlier DATE — day-start convention): day-after-night flag, great-circle
+    travel km between venues, and the approximate timezone shift in hours
+    (signed, east positive). One scalar implementation shared by the
+    serving path; the vectorized table computes the same formulas.
+    `coords` maps venue -> (lat, lon)."""
+    if prev_date is None or pd.isna(prev_date):
+        return {"day_after_night": np.nan, "travel_km": np.nan,
+                "tz_delta": np.nan}
+    dan = np.nan
+    if prev_dn in ("D", "N") and dn in ("D", "N"):
+        dan = float(prev_dn == "N" and dn == "D"
+                    and (pd.Timestamp(date) - pd.Timestamp(prev_date)).days == 1)
+    la1, lo1 = coords.get(prev_venue, (np.nan, np.nan))
+    la2, lo2 = coords.get(venue, (np.nan, np.nan))
+    return {"day_after_night": dan,
+            "travel_km": float(haversine_km(la1, lo1, la2, lo2)),
+            "tz_delta": float((lo2 - lo1) / _TZ_DEG_PER_HR)}
+
+
+def pvloc_from_sums(bf, hr, so, er, outs):
+    """Shrunk starter venue-split rates from raw sums — the single
+    definition both paths call (batter vloc_* idiom)."""
+    return {"pvloc_k_bf": (so + PVLOC_K_K * PVLOC_K_PRIOR) / (bf + PVLOC_K_K),
+            "pvloc_hr_bf": (hr + PVLOC_HR_K * PVLOC_HR_PRIOR)
+            / (bf + PVLOC_HR_K),
+            "pvloc_era": (er + PVLOC_ER_K * PVLOC_ER_PRIOR)
+            / (outs + PVLOC_ER_K) * 27.0}
+
+
+def outs_sd_from_sums(n, s, s2):
+    """As-of SD of a starter's outing lengths from (starts, sum, sum-of-
+    squares); NaN under OUTS_SD_MIN_STARTS. Shared by both paths."""
+    n = np.asarray(n, dtype="float64")
+    s = np.asarray(s, dtype="float64")
+    s2 = np.asarray(s2, dtype="float64")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        var = s2 / n - (s / n) ** 2
+        sd = np.sqrt(np.clip(var, 0.0, None))
+    return np.where(n >= OUTS_SD_MIN_STARTS, sd, np.nan)
 
 # Statcast bat tracking (scrape_bat_tracking.py, 2023+): raw CSV column ->
 # feature name. Prior-season, routed to the power props (train._BAT). BANKED
@@ -1471,8 +2086,17 @@ BAT_TRACK_COLS = list(BAT_TRACK_REN.values())
 # EXACT-season (not _merge_prior_season). OUT is dropped (rates sum to 1).
 MILB_REN = {"t_K": "k", "t_BB": "bb", "t_HBP": "hbp", "t_1B": "b1",
             "t_2B": "b2", "t_3B": "b3", "t_HR": "hr"}
-MILB_BAT_COLS = [f"milb_{v}" for v in MILB_REN.values()] + ["milb_n"]
-MILB_PIT_COLS = [f"pmilb_{v}" for v in MILB_REN.values()] + ["pmilb_n"]
+# audit wave 2026-07-14 (rank 28): fit-free v1 extras already carrying
+# their final feature names in the serve tables — bat steal prior (rookie
+# speed axis; every MLB speed column is NaN exactly at debut) and pit
+# workload pedigree (starter-role outs/start + GS share; all workload
+# mains are MLB-history-only).
+MILB_BAT_EXTRA = ["milb_att", "milb_sb_succ"]
+MILB_PIT_EXTRA = ["pmilb_outs_ps", "pmilb_gs_share"]
+MILB_BAT_COLS = ([f"milb_{v}" for v in MILB_REN.values()] + ["milb_n"]
+                 + MILB_BAT_EXTRA)
+MILB_PIT_COLS = ([f"pmilb_{v}" for v in MILB_REN.values()] + ["pmilb_n"]
+                 + MILB_PIT_EXTRA)
 
 
 def _milb_cols(serve, prefix):
@@ -1480,12 +2104,24 @@ def _milb_cols(serve, prefix):
     t = serve.rename(columns={k: f"{prefix}{v}" for k, v in MILB_REN.items()})
     t[f"{prefix}n"] = np.log1p(t["n_eff"])
     cols = [f"{prefix}{v}" for v in MILB_REN.values()] + [f"{prefix}n"]
-    return t[["PlayerId", "Season", *cols]]
+    extras = [c for c in MILB_BAT_EXTRA + MILB_PIT_EXTRA if c in t.columns]
+    return t[["PlayerId", "Season", *cols, *extras]]
 
 # stolen-base success rate: prior ~ league SB% ; small K (fast to stabilize)
 SB_SUCC_PRIOR, SB_SUCC_K = 0.75, 20.0
 TSB_STOP_PRIOR = 1.0 - SB_SUCC_PRIOR  # league share of attempts cut down
 PSB_MIN_ATT = 5  # attempts needed before a pitcher's stop-rate means much
+# audit wave (rank 4): the sb opportunity chain — reach-first rate and
+# attempt-per-opportunity, both K-shrunk. Priors measured on the full
+# game-batting log (ob1 0.238; attempts 0.09 per the POST-2023 rules
+# regime — league jumped 0.067 -> 0.104 at the rule change). ST_REACH is
+# the centering constant for the starter-traffic product (league starter
+# H/BF + BB/BF); CTX_BSLG_MEAN centers the protection product (rank 31,
+# frame mean of ctx_behind_slg_d).
+OB1_PRIOR, OB1_K = 0.24, 100.0
+SB_ATT_PRIOR, SB_ATT_K = 0.09, 30.0
+ST_REACH_PRIOR = 0.31
+CTX_BSLG_MEAN = 0.41
 SHRINK_COLS = ([f"c_{n}_sh" for n in SHRINK] + [f"s_{n}_sh" for n in SHRINK]
                + [f"r{w}_{n}_sh" for w in ROLL_WINDOWS for n in SHRINK_ROLL])
 
@@ -1511,8 +2147,18 @@ def shrunk_from_sums(sums, pre, roll=False):
     names = SHRINK_ROLL if roll else SHRINK
     for name in names:
         _, _, num_s, den_s = SHRINK[name]
-        numer = (sums["TB"] - sums["H"]) if name == "iso" else sums[num_s]
-        denom = sums["PA"] if roll else sums[den_s]
+        if name == "iso":
+            numer = sums["TB"] - sums["H"]
+        elif name == "1b_ab":   # composite numerator (iso precedent)
+            numer = sums["H"] - sums["2B"] - sums["3B"] - sums["HR"]
+        else:
+            numer = sums[num_s]
+        if roll:
+            denom = sums["PA"]
+        elif name == "rbi_conv":   # opportunity denominator = RBI + LOB
+            denom = sums["RBI"] + sums["LOB"]
+        else:
+            denom = sums[den_s]
         out[f"{pre}_{name}_sh"] = _shrink(numer, denom, name)
     return out
 
@@ -1529,25 +2175,28 @@ def decayed_feats(sums):
 
 
 def hrr_hist_feats(sums, den, pre):
-    """Shrunk H+R+RBI threshold shares from {HRR2, HRR3} sums and a game
-    count. Shared by the vectorized (Series) and inference (scalar) paths so
-    both compute identically; zero sums land exactly on the league prior."""
+    """Shrunk per-game threshold shares (hrr2/3/4, rbi2, run2) from the
+    THRESH_HIST sum keys and a game count. Shared by the vectorized
+    (Series) and inference (scalar) paths so both compute identically;
+    zero sums land exactly on the league prior."""
     out = {}
-    for line in (2, 3):
-        prior, k = HRR_SHRINK[f"hrr{line}_g"]
-        out[f"{pre}_hrr{line}_g_sh"] = (sums[f"HRR{line}"] + k * prior) / (den + k)
+    for key, stem in THRESH_HIST.items():
+        prior, k = THRESH_SHRINK[stem]
+        out[f"{pre}_{stem}_sh"] = (sums[key] + k * prior) / (den + k)
     return out
 
 
 def _ump_game_totals(gp):
-    """Per-game strikeout / walk / batters-faced totals (both teams'
+    """Per-game strikeout / walk / batters-faced / runs totals (both teams'
     pitching lines) — the raw material for a home-plate ump's zone
-    tendency. Shared by the vectorized frame and the inference store."""
-    g = gp[["GamePk", "SO", "BB", "BF"]].copy()
-    for c in ("SO", "BB", "BF"):
+    tendency and run environment. Shared by the vectorized frame and the
+    inference store."""
+    g = gp[["GamePk", "SO", "BB", "BF", "R"]].copy()
+    for c in ("SO", "BB", "BF", "R"):
         g[c] = pd.to_numeric(g[c], errors="coerce")
     return g.groupby("GamePk").agg(g_SO=("SO", "sum"), g_BB=("BB", "sum"),
-                                   g_BF=("BF", "sum")).reset_index()
+                                   g_BF=("BF", "sum"),
+                                   g_R=("R", "sum")).reset_index()
 
 
 def _ump_shrink(so, bb, bf):
@@ -1555,6 +2204,12 @@ def _ump_shrink(so, bb, bf):
     definition both paths call so training and serving agree exactly."""
     return ((so + UMP_K * UMP_K_PRIOR) / (bf + UMP_K),
             (bb + UMP_K * UMP_BB_PRIOR) / (bf + UMP_K))
+
+
+def _ump_rg_shrink(runs, games):
+    """Shrunk runs-per-game with this HP ump (2026-07-14 #21) — shared by
+    both paths; zero history lands on the league prior."""
+    return (runs + UMP_RG_K * UMP_RG_PRIOR) / (games + UMP_RG_K)
 
 
 def _ump_asof(umps, gp):
@@ -1567,7 +2222,7 @@ def _ump_asof(umps, gp):
     u["HpUmpId"] = pd.to_numeric(u["HpUmpId"], errors="coerce")
     u = u.dropna(subset=["HpUmpId"]).copy()
     u["HpUmpId"] = u["HpUmpId"].astype("int64")
-    for s in ("g_SO", "g_BB", "g_BF"):
+    for s in ("g_SO", "g_BB", "g_BF", "g_R"):
         u[s] = pd.to_numeric(u[s], errors="coerce").fillna(0.0)
     u = u.sort_values(["HpUmpId", "Date", "GamePk"]).reset_index(drop=True)
     g = u.groupby("HpUmpId", sort=False)
@@ -1575,7 +2230,11 @@ def _ump_asof(umps, gp):
     cbb = g["g_BB"].cumsum() - u["g_BB"]
     cbf = g["g_BF"].cumsum() - u["g_BF"]
     u["ump_k_pct"], u["ump_bb_pct"] = _ump_shrink(cso, cbb, cbf)
-    return u[["GamePk", "ump_k_pct", "ump_bb_pct"]]
+    # run environment (#21): shrunk as-of R/G over his prior games
+    crun = g["g_R"].cumsum() - u["g_R"]
+    cn = g.cumcount().astype(float)
+    u["ump_r_g"] = _ump_rg_shrink(crun, cn)
+    return u[["GamePk", "ump_k_pct", "ump_bb_pct", "ump_r_g"]]
 
 
 def _merge_ump(df, raw):
@@ -1586,6 +2245,7 @@ def _merge_ump(df, raw):
                         how="left")
     df["ump_k_pct"] = np.nan
     df["ump_bb_pct"] = np.nan
+    df["ump_r_g"] = np.nan
     return df
 
 
@@ -1633,8 +2293,18 @@ def _bat_rates_shrunk(d, pre):
     out = {}
     for name in SHRINK:
         _, _, num_s, den_s = SHRINK[name]
-        numer = (d[f"{pre}_TB"] - d[f"{pre}_H"]) if name == "iso" else d[f"{pre}_{num_s}"]
-        out[f"{pre}_{name}_sh"] = _shrink(numer, d[f"{pre}_{den_s}"], name)
+        if name == "iso":
+            numer = d[f"{pre}_TB"] - d[f"{pre}_H"]
+        elif name == "1b_ab":   # composite numerator (iso precedent)
+            numer = (d[f"{pre}_H"] - d[f"{pre}_2B"]
+                     - d[f"{pre}_3B"] - d[f"{pre}_HR"])
+        else:
+            numer = d[f"{pre}_{num_s}"]
+        if name == "rbi_conv":   # opportunity denominator = RBI + LOB
+            denom = d[f"{pre}_RBI"] + d[f"{pre}_LOB"]
+        else:
+            denom = d[f"{pre}_{den_s}"]
+        out[f"{pre}_{name}_sh"] = _shrink(numer, denom, name)
     return pd.DataFrame(out)
 
 
@@ -1648,6 +2318,11 @@ def _pit_rates(d, pre):
         f"{pre}_h_bf": d[f"{pre}_H"] / bf,
         f"{pre}_era": d[f"{pre}_ER"] * 27 / outs,
         f"{pre}_strike_pct": d[f"{pre}_Strikes"] / d[f"{pre}_NP"],
+        # audit wave (rank 21): shrunk chaos + HBP channels
+        f"{pre}_chaos_bf": ((d[f"{pre}_WP"] + d[f"{pre}_BK"]
+                             + CHAOS_K * CHAOS_PRIOR) / (bf + CHAOS_K)),
+        f"{pre}_hbp_bf": ((d[f"{pre}_HBP"] + HBP_K * HBP_PRIOR)
+                          / (bf + HBP_K)),
     })
 
 
@@ -1684,6 +2359,19 @@ def _pitcher_season_table(pit_season):
     return out.reset_index()
 
 
+def _league_sb27_table(pit_season):
+    """Per serve-Season: PRIOR-season league SB allowed per 27 outs — the
+    regime-aware centering constant for the steal-permissiveness products
+    (the 2023 rules moved league SB/27 from ~0.52 to ~0.73; a fixed
+    constant would mis-center every era). Audit wave ranks 4/24."""
+    t = pit_season.dropna(subset=["Year"]).groupby("Year").agg(
+        SB=("SB", "sum"), Outs=("Outs", "sum"))
+    out = pd.DataFrame({"lg_sb27_prior": t["SB"] * 27.0
+                        / t["Outs"].replace(0, np.nan)}).reset_index()
+    out["Season"] = out["Year"].astype(int) + 1
+    return out[["Season", "lg_sb27_prior"]]
+
+
 def _merge_prior_season(df, tab, id_col, cols):
     """Attach prior-season values by (id, Season-1), falling back to
     Season-2 when the player has no line the season before (injury year,
@@ -1699,6 +2387,84 @@ def _merge_prior_season(df, tab, id_col, cols):
     return df
 
 
+# IL stints (2026-07-15): return-from-injury features off the paired
+# transactions file. Beyond IL_RET_MAX days the "recent return" framing is
+# meaningless — those rows go NaN (GBM imputes). ret21/szn default to 0.0
+# for a KNOWN player with no recent stint (that absence is real pregame
+# information, unlike an unknown starter, which stays NaN).
+IL_RET_MAX = 365.0
+
+
+def _il_stint_table(il):
+    """Completed stints sorted by activation, with season-cumulative IL
+    days — the shared as-of source for both paths."""
+    s = il.dropna(subset=["ActDate"]).copy()
+    s["StintDays"] = pd.to_numeric(s["StintDays"], errors="coerce")
+    s = s.sort_values(["PlayerId", "ActDate"], kind="mergesort")
+    s["_szn"] = s["ActDate"].dt.year
+    s["_szn_days"] = s.groupby(["PlayerId", "_szn"])["StintDays"].cumsum()
+    return s
+
+
+def il_feats_from_stint(date, act_date, stint_days, rehab, szn_days,
+                        pre=""):
+    """Shared feature math from the last stint activated on/before `date`
+    (NaT act_date = no stint). allow_exact_matches is deliberate: roster
+    moves are announced before the game, so a player activated this
+    morning plays tonight with ret_days = 0."""
+    gap = ((date - act_date).days
+           if pd.notna(act_date) else np.nan)
+    ok = pd.notna(act_date) and gap <= IL_RET_MAX
+    return {
+        f"{pre}il_ret_days": float(gap) if ok else np.nan,
+        f"{pre}il_last_len": float(stint_days) if ok else np.nan,
+        f"{pre}il_ret21": (1.0 if (pd.notna(act_date) and gap <= 21)
+                           else 0.0),
+        f"{pre}il_szn_days": (float(szn_days)
+                              if pd.notna(act_date)
+                              and act_date.year == date.year else 0.0),
+        f"{pre}il_rehab": float(rehab) if ok else np.nan,
+    }
+
+
+IL_FEATS = ("il_ret_days", "il_last_len", "il_ret21", "il_szn_days",
+            "il_rehab")
+
+
+def _il_asof(df, il, key, pre):
+    """Vectorized twin of il_feats_from_stint: as-of last-activation merge
+    per `key` (PlayerId / StarterId). Rows with a NaN key (unknown
+    starter) stay NaN across the board."""
+    cols = [f"{pre}{c}" for c in IL_FEATS]
+    if il is None:
+        for c in cols:
+            df[c] = np.nan
+        return df
+    s = _il_stint_table(il)
+    t = (s[["PlayerId", "ActDate", "StintDays", "Rehab", "_szn_days"]]
+         .rename(columns={"PlayerId": key})
+         .sort_values("ActDate", kind="mergesort"))
+    d = df[[key, "Date"]].reset_index()
+    dm = d[d[key].notna()].copy()
+    t[key] = t[key].astype(dm[key].dtype)
+    dm = dm.sort_values("Date", kind="mergesort")
+    m = pd.merge_asof(dm, t, left_on="Date", right_on="ActDate", by=key,
+                      direction="backward", allow_exact_matches=True)
+    gap = (m["Date"] - m["ActDate"]).dt.days.astype("float64")
+    ok = gap <= IL_RET_MAX                       # False where gap is NaN
+    res = pd.DataFrame({
+        cols[0]: gap.where(ok),
+        cols[1]: pd.to_numeric(m["StintDays"], errors="coerce").where(ok),
+        cols[2]: (gap <= 21).astype(float),
+        cols[3]: m["_szn_days"].astype("float64").where(
+            m["ActDate"].dt.year == m["Date"].dt.year, 0.0),
+        cols[4]: pd.to_numeric(m["Rehab"], errors="coerce").where(ok),
+    }).set_index(m["index"])
+    for c in cols:
+        df[c] = res[c].reindex(df.index)
+    return df
+
+
 # --------------------------------------------------------- frame assembly
 
 
@@ -1711,11 +2477,13 @@ def _attach_context(rows, raw, team_tab, pen_tab, park_tab,
         games[["GamePk", "Venue", "DayNight", "Temp", "Condition",
                "WindSpeed", "WindDir", "ShortGame"]], on="GamePk", how="left")
     if raw.get("weather") is not None:
-        rows = rows.merge(raw["weather"][["GamePk", "Humidity", "Pressure"]],
+        rows = rows.merge(raw["weather"][["GamePk", "Humidity", "Pressure",
+                                          "Precip"]],
                           on="GamePk", how="left")
     else:
         rows["Humidity"] = np.nan
         rows["Pressure"] = np.nan
+        rows["Precip"] = np.nan
     parks = raw["parks"].rename(columns={"Ballpark": "Venue"})
     rows = rows.merge(parks[["Venue", "LF", "CF", "RF", "Elevation_ft"]],
                       on="Venue", how="left")
@@ -1748,6 +2516,9 @@ def _attach_context(rows, raw, team_tab, pen_tab, park_tab,
     rows["pen_hr_bf"] = rows["pen_cum_HR"] / rows["pen_cum_BF"]
     rows["pen_k_bf"] = rows["pen_cum_SO"] / rows["pen_cum_BF"]
     rows["pen_h_bf"] = rows["pen_cum_H"] / rows["pen_cum_BF"]
+    # audit wave (rank 1): the pen's walk rate — raw cum ratio like its
+    # siblings; feeds xpen_bb (late-PA walk exposure)
+    rows["pen_bb_bf"] = rows["pen_cum_BB"] / rows["pen_cum_BF"]
     rows["pen_era"] = rows["pen_cum_ER"] * 27 / rows["pen_cum_Outs"]
     # per-game venue rates over all PRIOR games, gated at 30 games so a new or
     # renamed park (Rate/Daikin) falls back to NaN. park_hr_pg reaches every
@@ -1757,7 +2528,7 @@ def _attach_context(rows, raw, team_tab, pen_tab, park_tab,
     ok = rows["park_cum_n"] >= 30
     for stat, col in (("HR", "park_hr_pg"), ("R", "park_r_pg"),
                       ("H", "park_h_pg"), ("2B", "park_2b_pg"),
-                      ("TB", "park_tb_pg")):
+                      ("3B", "park_3b_pg"), ("TB", "park_tb_pg")):
         rows[col] = np.where(ok, rows[f"park_cum_{stat}"] / rows["park_cum_n"],
                              np.nan)
     return rows
@@ -2067,6 +2838,9 @@ def add_batter_derived(df):
     df["mix_hit"] = df["c_h_ab_sh"] * df["pc_h_bf"]
     df["mix_gb"] = df["bip_gb"] * df["pbip_gb"]       # rally-killer/GIDP side
     df["mix_ld"] = df["bipd_ld"] * df["pbipd_ld"]     # line-drive collision
+    # audit wave (rank 5): the pull-air collision — pulled air runs 18.4%
+    # HR per air ball vs 5.1% other; both sides' tendencies compound
+    df["mix_pullair"] = df["bip_pullair"] * df["pbip_pullair"]
     # ---- conversion chains: run production is a product of sequential
     # events, not a sum
     df["rbi_conv"] = df["rbi_opp_obp"] * df["c_tb_ab_sh"]  # runners on x drive
@@ -2076,6 +2850,123 @@ def add_batter_derived(df):
     # starter K-BB rate: the classic single-number pitcher skill — trees
     # can't subtract any more than they can multiply
     df["p_kbb"] = df["pc_k_bf"] - df["pc_bb_bf"]
+    # ---- bullpen exposure (2026-07-14 #15): every batter prop is secretly
+    # a two-pitcher problem. The starter faces ~BF_st batters (his season
+    # BF per start); the batter at slot s takes his k-th PA at team-PA
+    # number s + 9(k-1), so his expected PAs against the PEN are whatever
+    # xpa_slot exceeds the count that fits under BF_st. Collision columns
+    # price WHO those late PAs meet: pen-minus-starter K/HR/H rate deltas.
+    _bf_st = df["ps_BF"] / df["p_starts_season"]
+    _pa_vs_st = np.clip(np.floor((_bf_st - df["slot"]) / 9.0) + 1.0,
+                        0.0, None)
+    df["xpa_pen"] = np.clip(df["xpa_slot"] - _pa_vs_st, 0.0, None)
+    df["xpen_k"] = df["xpa_pen"] * (df["pen_k_bf"] - df["ps_k_bf"])
+    df["xpen_hr"] = df["xpa_pen"] * (df["pen_hr_bf"] - df["ps_hr_bf"])
+    df["xpen_h"] = df["xpa_pen"] * (df["pen_h_bf"] - df["ps_h_bf"])
+    # ---- form-weighted exposure (2026-07-14 #31): the xpa_x_* products
+    # use CAREER rates; the decayed variants price current form x
+    # opportunity. Credit-splitting with the career versions is expected —
+    # the selection vote keeps whichever carries each head.
+    df["xpa_x_hr_d"] = df["xpa_slot"] * df["d_hr_pa_sh"]
+    df["xpa_x_tb_d"] = df["xpa_slot"] * df["d_tb_ab_sh"]
+    df["xpa_x_k_d"] = df["xpa_slot"] * df["d_k_pct_sh"]
+    # ---- ride collisions (2026-07-14 #27): high-IVB fastballs live at the
+    # top of the zone — whiffs for fastball-vulnerable swings, air balls
+    # for flyball swings. Centered at the league IVB prior.
+    _ivb_c = df["p_ivb_d"] - PD_SHRINK["ivb"][0]
+    df["ride_matchup"] = _ivb_c * (df["bd_fbwh_d"] - PD_SHRINK["fbwh"][0])
+    df["ride_air"] = _ivb_c * (1.0 - df["bip_gb"])
+    # ---- audit wave (2026-07-14, Model/AUDIT_BUILD_SPECS_0714.md) ----
+    # rank 1: exposure completion — the #1 feature family (xpa_x_*) had no
+    # bb/sb member and the new xbb head shipped with zero exposure
+    # coverage; xpen_bb prices late-PA walk exposure against the pen
+    df["xpa_x_bb"] = df["xpa_slot"] * df["c_bb_pct_sh"]
+    df["xpa_x_sb"] = df["xpa_slot"] * df["c_sb_pa_sh"]
+    df["xpa_x_bb_d"] = df["xpa_slot"] * df["d_bb_pct_sh"]
+    df["xpa_x_sb_d"] = df["xpa_slot"] * df["d_sb_pa_sh"]
+    df["xpen_bb"] = df["xpa_pen"] * (df["pen_bb_bf"] - df["ps_bb_bf"])
+    # rank 3: park hit-type products — park_x_hr's proven template for the
+    # two hit types that never got it (the triple head's park geometry)
+    df["park_x_2b"] = df["park_2b_pg"] * df["c_2b_ab_sh"]
+    df["park_x_3b"] = df["park_3b_pg"] * df["c_3b_ab_sh"]
+    # rank 4: sb opportunity chain — exposure x reach-first x intent, and
+    # the chain against tonight's starter's steal permissiveness (centered
+    # on the PRIOR-season league SB/27 so the 2023 rules regime shift
+    # doesn't flip the sign era-wide); plus the traffic cross for run heads
+    df["sb_chain"] = df["xpa_slot"] * df["ob1_sh"] * df["sb_att1"]
+    df["sb_chain_env"] = df["sb_chain"] * (df["psb_sb27"]
+                                           - df["lg_sb27_prior"])
+    df["ob1_x_st"] = ((df["ob1_sh"] - OB1_PRIOR)
+                      * (df["ps_h_bf"] + df["ps_bb_bf"] - ST_REACH_PRIOR))
+    # rank 7: passivity collisions — a two-strike taker facing an edge-
+    # painter is the called-strike-three geometry; a taker under a
+    # K-leaning ump compounds
+    df["called_k_matchup"] = ((PD_SHRINK["tssw"][0] - df["bd_tssw_d"])
+                              * (df["p_edge_d"] - PD_SHRINK["edge"][0]))
+    df["ump_k_x_take"] = df["ump_k_pct"] * (1.0 - df["bd_tssw_d"])
+    # rank 13: oppo-side spray geometry — the fence the pull-only encoding
+    # cannot see (13.2% of HRs are oppo)
+    df["oppo_fence"] = np.where(df["eff_hand"] == "L", df["LF"],
+                                np.where(df["eff_hand"] == "R", df["RF"],
+                                         np.nan))
+    df["oppo_air_porch"] = (330.0 - df["oppo_fence"]) * df["bip_oppoair"]
+    # rank 14: realized RBI opportunity/conversion — LOB finally consumed.
+    # Decayed conversion minus career = running hot/cold cashing runners
+    # (hit_luck sibling); d_rob_pa = realized traffic per PA.
+    _p0, _k0 = SHRINK["rbi_conv"][0], SHRINK["rbi_conv"][1]
+    _dconv = ((df["_dk_RBI"] + _k0 * _p0)
+              / (df["_dk_RBI"] + df["_dk_LOB"] + _k0))
+    df["rbi_conv_gap"] = _dconv - df["c_rbi_conv_sh"]
+    df["d_rob_pa"] = ((df["_dk_RBI"] + df["_dk_LOB"])
+                      / df["_dk_PA"].where(df["_dk_PA"] > 0))
+    # rank 23: ump x batter walk cell — completes the ump-matchup 2x2
+    # (shrunk rate, matching mix_bb; the K-cell's unshrunk choice is the
+    # noisier one)
+    df["ump_bb_x_bb"] = df["ump_bb_pct"] * df["c_bb_pct_sh"]
+    # rank 31: protection — measured POSITIVE interaction (protection
+    # modulates walks mostly for NON-sluggers); deliberately unclipped
+    df["pitch_around"] = ((df["c_iso_sh"] - SHRINK["iso"][0])
+                          * (df["ctx_behind_slg_d"] - CTX_BSLG_MEAN))
+    # rank 27: the two-strike x breaking putaway cell crossed with the
+    # starter's breaking usage — the joint cell sits at its own level
+    # (0.302 vs marginals 0.250/0.329), unreachable from the marginals
+    df["ts_brk_matchup"] = ((df["bd_tsbrkwh_d"] - PD_SHRINK["tsbrkwh"][0])
+                            * (df["p_brk_d"] - PD_SHRINK["brk"][0]))
+    # ---- v8 damage-on-contact collisions (2026-07-15): the damage
+    # siblings of bat_velo_matchup / velo_band_whiff / arsenal_whiff —
+    # whiff says he misses 95+; these price what happens when he doesn't.
+    # Batter side rides the CAREER reads (bd_*xw_c): a median season has
+    # ~18 BBE vs 95+, so the decayed band rates are shrink-dominated and
+    # the collision would collapse toward prior x velo (see PD_SHRINK).
+    df["bat_velo_damage"] = (df["bd_fb95xw_c"]
+                             * (df["p_fbv_d"] - PD_SHRINK["fbv"][0]))
+    df["velo_band_damage"] = (df["p_fblou_d"] * df["bd_fbloxw_c"]
+                              + df["p_fbmidu_d"] * df["bd_fbmidxw_c"]
+                              + df["p_fb95u_d"] * df["bd_fb95xw_c"])
+    df["arsenal_damage"] = (_fb_share * df["bd_fbkxw_c"]
+                            + df["p_brk_d"] * df["bd_brkxw_c"]
+                            + df["p_off_d"] * df["bd_offxw_c"])
+    # elite-velo damage cell, mix_ (log5) form: his contact quality vs 95+
+    # x how hard the starter's 95+ gets hit when it's touched
+    df["mix_fb95xw"] = df["bd_fb95xw_c"] * df["p_fb95xw_d"]
+    # 2K x elite-velo putaway collision (ts_brk_matchup's velocity mirror)
+    df["ts_fb95_matchup"] = ((df["bd_tsfb95wh_d"]
+                              - PD_SHRINK["tsfb95wh"][0])
+                             * (df["p_fb95u_d"] - PD_SHRINK["fb95u"][0]))
+    # ---- battery collisions (2026-07-15): the opposing catchers' framing
+    # x a two-strike taker (called-strike-three geometry — ump_k_x_take's
+    # battery sibling), and the SB opportunity chain against the battery's
+    # ERA-CENTERED pop time (slower than that season's league =
+    # permissive; see the PopC note in load_raw) — the catcher half
+    # sb_chain_env's pitcher half never had
+    df["frame_x_take"] = df["opp_cat_frame"] * (1.0 - df["bd_tssw_d"])
+    df["sb_cat_env"] = df["sb_chain"] * df["opp_cat_popc"]
+    # rank 33: the batter's platoon edges vs his own career baseline, both
+    # TB/PA-shrunk (denominator-clean) — lineup_aggregates averages these
+    # per posted lineup into the team frame's off_lu_vsh_edge/kedge
+    df["_vsh_tb_edge"] = (df["vsh_tb_ab_sh"]
+                          - _shrink(df["c_TB"], df["c_PA"], "tb_ab"))
+    df["_vsh_k_edge"] = df["vsh_k_pct_sh"] - df["c_k_pct_sh"]
     return df
 
 
@@ -2104,10 +2995,34 @@ def build_batter_frame(raw):
     st = _starter_asof(gp)
     st_feats = st[["GamePk", "PlayerId", "p_starts_career", "p_starts_season",
                    "p_days_rest", "p_np_last", "p_np_l3",
+                   # the opposing starter's venue split for TONIGHT's
+                   # context (2026-07-14 #23; his Home = 1 - batter's)
+                   "pvloc_era", "pvloc_k_bf", "pvloc_hr_bf",
+                   # audit wave (rank 11): outing-length dispersion + short-
+                   # start share — xpa_pen is a convex clip of starter
+                   # length, so dispersion shifts pen exposure at fixed mean
+                   "p_outs_sd", "p_short_share",
                    *[f"pc_{s}" for s in PIT_STATS], *[f"ps_{s}" for s in PIT_STATS],
                    *[f"p5_{s}" for s in ["BF", "HR", "SO", "BB", "H"]]]].rename(
         columns={"PlayerId": "StarterId"})
     df = df.merge(st_feats, on=["GamePk", "StarterId"], how="left")
+
+    # audit wave (rank 17): the opposing starter's MiLB-translated priors —
+    # for debut/thin-history starters every pc_/ps_/p5_/pd_/pars_ main is
+    # NaN by construction; this is the only pitcher description available
+    # exactly there (89% coverage on debut starts). Exact-season join.
+    if raw.get("milb") is not None:
+        df = df.merge(_milb_cols(raw["milb"]["pit"], "pmilb_").rename(
+            columns={"PlayerId": "StarterId"}),
+            on=["StarterId", "Season"], how="left")
+    else:
+        for c in MILB_PIT_COLS:
+            df[c] = np.nan
+
+    # schedule context (2026-07-14 #18/#24): the batter's TEAM's previous-
+    # game travel/day-night fatigue + tonight's doubleheader flags
+    df = df.merge(_team_sched_table(raw["games"], raw["parks"]),
+                  on=["GamePk", "Team"], how="left")
 
     team_tab = _team_offense_table(gb)
     pen_tab = _bullpen_table(gp)
@@ -2116,6 +3031,12 @@ def build_batter_frame(raw):
                          pen_hl_tab=_bullpen_hl_table(gp),
                          pen_fat_tab=_pen_fatigue_table(gp))
     df = df.merge(_league_env_table(gb), on="Date", how="left")
+    # audit wave (rank 15): own team's trailing-30-day BaseRuns sequencing-
+    # luck residual — the regression-candidate discount term fused inside
+    # toff_r_pg (shipped at team+winner grain, never reached this frame)
+    df = df.merge(_team_bsr_table(gb).rename(
+        columns={"bsr_luck": "toff_bsr_luck"}), on=["Team", "Date"],
+        how="left")
 
     # own team's offense in TODAY's venue context (home or road split)
     loc = _team_offense_loc_table(gb)
@@ -2229,7 +3150,15 @@ def build_batter_frame(raw):
              "dk_brk_n", "dk_off_n", "dk_edge_n", "dk_fp_n", "dk_fp_s",
              "dk_fblo_n", "dk_fbmid_n", "dk_fb95_n",
              "dk_ts_wh", "dk_ts_sw", "dk_f32_b", "dk_f32_n", "dk_fb_v2",
-             "dk_rp_n", "dk_rp_x", "dk_rp_x2", "dk_rp_z", "dk_rp_z2"]
+             "dk_rp_n", "dk_rp_x", "dk_rp_x2", "dk_rp_z", "dk_rp_z2",
+             "dk_ivb_n", "dk_ivb_sum",
+             "dk_fbstr_n", "dk_fbstr_v", "dk_fbe_n", "dk_fbe_sum",
+             "dk_rpf_n", "dk_rpf_x", "dk_rpf_z",
+             "dk_rpb_n", "dk_rpb_x", "dk_rpb_z",
+             "dk_brkmov_n", "dk_brkmov_sum",
+             "dk_fblo_bip", "dk_fblo_xw", "dk_fbmid_bip", "dk_fbmid_xw",
+             "dk_fb95_bip", "dk_fb95_xw", "dk_brk_bip", "dk_brk_xw",
+             "dk_off_bip", "dk_off_xw", "dk_fbk_bip", "dk_fbk_xw"]
         ].rename(
             columns={"PlayerId": "StarterId", "dk_wh_n": "pdo_dk_wh",
                      "dk_n": "pdo_dk_n", "dk_fb_v": "pdo_dk_fbv",
@@ -2246,7 +3175,31 @@ def build_batter_frame(raw):
                      "dk_fb_v2": "pdo_dk_fbv2",
                      "dk_rp_n": "pdo_dk_rpn", "dk_rp_x": "pdo_dk_rpx",
                      "dk_rp_x2": "pdo_dk_rpx2", "dk_rp_z": "pdo_dk_rpz",
-                     "dk_rp_z2": "pdo_dk_rpz2"})
+                     "dk_rp_z2": "pdo_dk_rpz2",
+                     "dk_ivb_n": "pdo_dk_ivbn",
+                     "dk_ivb_sum": "pdo_dk_ivbsum",
+                     "dk_fbstr_n": "pdo_dk_fbstrn",
+                     "dk_fbstr_v": "pdo_dk_fbstrv",
+                     "dk_fbe_n": "pdo_dk_fben",
+                     "dk_fbe_sum": "pdo_dk_fbesum",
+                     "dk_rpf_n": "pdo_dk_rpfn", "dk_rpf_x": "pdo_dk_rpfx",
+                     "dk_rpf_z": "pdo_dk_rpfz",
+                     "dk_rpb_n": "pdo_dk_rpbn", "dk_rpb_x": "pdo_dk_rpbx",
+                     "dk_rpb_z": "pdo_dk_rpbz",
+                     "dk_brkmov_n": "pdo_dk_brkmovn",
+                     "dk_brkmov_sum": "pdo_dk_brkmovsum",
+                     "dk_fblo_bip": "pdo_dk_flobip",
+                     "dk_fblo_xw": "pdo_dk_floxw",
+                     "dk_fbmid_bip": "pdo_dk_fmidbip",
+                     "dk_fbmid_xw": "pdo_dk_fmidxw",
+                     "dk_fb95_bip": "pdo_dk_f95bip",
+                     "dk_fb95_xw": "pdo_dk_f95xw",
+                     "dk_brk_bip": "pdo_dk_brkbip",
+                     "dk_brk_xw": "pdo_dk_brkxw",
+                     "dk_off_bip": "pdo_dk_offbip",
+                     "dk_off_xw": "pdo_dk_offxw",
+                     "dk_fbk_bip": "pdo_dk_fbkbip",
+                     "dk_fbk_xw": "pdo_dk_fbkxw"})
         po["StarterId"] = po["StarterId"].astype(df["StarterId"].dtype)
         df = _asof_merge(df, po, by=["StarterId"])
     wdn2 = np.exp(-DECAY_LAM * (df["Date"] - DECAY_EPOCH)
@@ -2312,6 +3265,39 @@ def build_batter_frame(raw):
             df["pdo_dk_rpn"] * wdn2, df["pdo_dk_rpx"] * wdn2,
             df["pdo_dk_rpx2"] * wdn2, df["pdo_dk_rpz"] * wdn2,
             df["pdo_dk_rpz2"] * wdn2)
+        # v6: the opposing starter's decayed FF ride (feeds the ride
+        # collisions in add_batter_derived)
+        prior, k, _, _ = PD_SHRINK["ivb"]
+        df["p_ivb_d"] = ((df["pdo_dk_ivbsum"] * wdn2 + k * prior)
+                         / (df["pdo_dk_ivbn"] * wdn2 + k))
+        # v7 audit wave: the opposing starter's perceived-velo premium,
+        # breaking-movement magnitude, base-out stretch delta and
+        # per-class release separation (cause axes; NaN pre-v7 rows)
+        prior, k, _, _ = PD_SHRINK["effprem"]
+        df["p_effprem_d"] = ((df["pdo_dk_fbesum"] * wdn2 + k * prior)
+                             / (df["pdo_dk_fben"] * wdn2 + k))
+        prior, k, _, _ = PD_SHRINK["brkmov"]
+        df["p_brkmov_d"] = ((df["pdo_dk_brkmovsum"] * wdn2 + k * prior)
+                            / (df["pdo_dk_brkmovn"] * wdn2 + k))
+        df["p_stretch_d"] = stretch_vdelta_from_sums(
+            df["pdo_dk_fbn"] * wdn2, df["pdo_dk_fbv"] * wdn2,
+            df["pdo_dk_fbstrn"] * wdn2, df["pdo_dk_fbstrv"] * wdn2)
+        df["p_relsep_d"] = release_sep_from_sums(
+            df["pdo_dk_rpfn"] * wdn2, df["pdo_dk_rpfx"] * wdn2,
+            df["pdo_dk_rpfz"] * wdn2, df["pdo_dk_rpbn"] * wdn2,
+            df["pdo_dk_rpbx"] * wdn2, df["pdo_dk_rpbz"] * wdn2)
+        # v8: his damage-ALLOWED splits (xwOBA per BBE by velo band /
+        # pitch class) — does the stuff hold up when it gets touched
+        for nm, num_col, den_col in (
+                ("fbloxw", "pdo_dk_floxw", "pdo_dk_flobip"),
+                ("fbmidxw", "pdo_dk_fmidxw", "pdo_dk_fmidbip"),
+                ("fb95xw", "pdo_dk_f95xw", "pdo_dk_f95bip"),
+                ("brkxw", "pdo_dk_brkxw", "pdo_dk_brkbip"),
+                ("offxw", "pdo_dk_offxw", "pdo_dk_offbip"),
+                ("fbkxw", "pdo_dk_fbkxw", "pdo_dk_fbkbip")):
+            prior, k, _, _ = PD_SHRINK[nm]
+            df[f"p_{nm}_d"] = ((df[num_col] * wdn2 + k * prior)
+                               / (df[den_col] * wdn2 + k))
     else:
         df["p_swstr_d"] = np.nan
         df["p_fbv_d"] = np.nan
@@ -2319,7 +3305,12 @@ def build_batter_frame(raw):
         df["p_chase_d"] = np.nan
         for c in ("p_brk_d", "p_off_d", "p_edge_d", "p_fps_d",
                   "p_fblou_d", "p_fbmidu_d", "p_fb95u_d",
-                  "p_tswh_d", "p_f32b_d", "p_fbv_sd", "p_rel_sd"):
+                  "p_tswh_d", "p_f32b_d", "p_fbv_sd", "p_rel_sd",
+                  "p_ivb_d",
+                  "p_effprem_d", "p_brkmov_d", "p_stretch_d",
+                  "p_relsep_d",
+                  "p_fbloxw_d", "p_fbmidxw_d", "p_fb95xw_d",
+                  "p_brkxw_d", "p_offxw_d", "p_fbkxw_d"):
             df[c] = np.nan
 
     # prior-season sprint speed (raw footspeed for the SB/run props) and
@@ -2354,6 +3345,30 @@ def build_batter_frame(raw):
                                  "Opponent", ["opp_oaa"])
     else:
         df["opp_oaa"] = np.nan
+    # the OPPONENT's battery, prior season (2026-07-15): framing runs per
+    # 2000 called pitches (more called strikes AGAINST this batter), and
+    # the running-game wall his SB chain must beat (CS-above-average per
+    # attempt + pop time) — team playing-time-weighted, the same
+    # serving-safe dodge as team OAA
+    if raw.get("cat") is not None:
+        ct = raw["cat"].rename(columns={
+            "Team": "PlayerId", "FrameRV_pt": "opp_cat_frame",
+            "CSAA_att": "opp_cat_csaa", "PopTime": "opp_cat_pop",
+            "PopC": "opp_cat_popc"})
+        df = _merge_prior_season(
+            df, ct[["PlayerId", "Year", "opp_cat_frame", "opp_cat_csaa",
+                    "opp_cat_pop", "opp_cat_popc"]],
+            "Opponent", ["opp_cat_frame", "opp_cat_csaa", "opp_cat_pop",
+                         "opp_cat_popc"])
+    else:
+        for c in ("opp_cat_frame", "opp_cat_csaa", "opp_cat_pop",
+                  "opp_cat_popc"):
+            df[c] = np.nan
+    # IL return context (2026-07-15): the batter's own last stint and the
+    # opposing starter's (a fresh-off-the-IL starter pitches on a leash —
+    # complements xpa_pen and the ramp flags)
+    df = _il_asof(df, raw.get("il"), "PlayerId", "")
+    df = _il_asof(df, raw.get("il"), "StarterId", "p_")
     # the ACTUAL defense behind tonight's opposing starter: mean prior-season
     # player OAA of the OPPONENT's posted lineup (overall + IF/OF splits) —
     # the lineup is known pregame, so this is serving-computable and
@@ -2397,6 +3412,10 @@ def build_batter_frame(raw):
                              "PlayerId", ["bat_goao"])
     df = _merge_prior_season(df, _pitcher_season_table(raw["pit_season"]),
                              "StarterId", ["pit_goao", "psb_sb27", "psb_stop"])
+    # audit wave (ranks 4/24): prior-season league SB/27 — regime-aware
+    # centering for the steal-permissiveness products
+    df = df.merge(_league_sb27_table(raw["pit_season"]), on="Season",
+                  how="left")
 
     # opponent battery: SB allowed per game and the shrunk caught-stealing
     # rate, season-to-date (catcher-inclusive, unlike the psb_* priors)
@@ -2408,17 +3427,31 @@ def build_batter_frame(raw):
     df["tsb_stop"] = ((df["tsb_cum_CS"] + SB_SUCC_K * TSB_STOP_PRIOR)
                       / (df["tsb_cum_SB"] + df["tsb_cum_CS"] + SB_SUCC_K))
 
+    # backlog #22 (audit-wave rebuild): the OPPONENT's high-leverage arm
+    # availability — pairs with xpa_pen: exposure says how many late PAs,
+    # this says whether the good arms are down tonight
+    df = df.merge(_pen_unavail_table(gp).rename(
+        columns={"Team": "Opponent"}), on=["Opponent", "Date"], how="left")
+
     pairs = df[["PlayerId", "StarterId", "Season"]].dropna().rename(
         columns={"PlayerId": "BatterId", "StarterId": "PitcherId"})
     mu = matchup_features(pairs, raw["ars_p"], raw["ars_b"])
     df = df.merge(mu, left_on=["PlayerId", "StarterId", "Season"],
                   right_on=["BatterId", "PitcherId", "Season"], how="left")
+    # audit wave (rank 22): the opposing starter's arsenal breadth/
+    # trajectory (batter-independent; merged by StarterId)
+    df = df.merge(_arsenal_dynamics(raw["ars_p"]).rename(
+        columns={"PlayerId": "StarterId"}),
+        on=["StarterId", "Season"], how="left")
 
     df = _attach_bio(df, raw["rosters"], "PlayerId", "bat")
     df = df.rename(columns={"B": "bat_hand"}).drop(columns=["T"], errors="ignore")
-    ros_p = raw["rosters"][["PlayerId", "T"]].rename(
+    ros_p = raw["rosters"][["PlayerId", "T", "DOB"]].rename(
         columns={"PlayerId": "StarterId", "T": "pit_throws"})
     df = df.merge(ros_p, on="StarterId", how="left")
+    # audit wave (rank 20): the opposing starter's age (bio prior for young
+    # arms where the pc_/ps_/pd_ history is thin)
+    df["p_age"] = (df["Date"] - df.pop("DOB")).dt.days / 365.25
     # statsapi handedness covers ALL players (rosters only current ones)
     bats = raw["hands"].set_index("PlayerId")["Bats"].replace("", np.nan)
     throws = raw["hands"].set_index("PlayerId")["Throws"].replace("", np.nan)
@@ -2499,12 +3532,20 @@ def build_batter_frame(raw):
     for pre, src, den in (("c", "c", df["g_career"]),
                           ("s", "s", df["g_season"]),
                           ("d", "_dk", df["_dk_G"])):
-        sums = {f"HRR{l}": df[f"{src}_HRR{l}"] for l in (2, 3)}
+        sums = {key: df[f"{src}_{key}"] for key in THRESH_HIST}
         for k, v in hrr_hist_feats(sums, den, pre).items():
             df[k] = v
     # stolen-base success rate (career, shrunk toward the league rate)
     df["c_sb_succ"] = ((df["c_SB"] + SB_SUCC_K * SB_SUCC_PRIOR)
                        / (df["c_SB"] + df["c_CS"] + SB_SUCC_K))
+    # audit wave (rank 4): reach-first rate and attempt-per-opportunity —
+    # the intent decomposition the fused SB/PA rate can't express (it is
+    # (sb_pa/sb_succ)/ob1, a triple ratio trees cannot carve)
+    _ob1 = (df["c_H"] - df["c_2B"] - df["c_3B"] - df["c_HR"]
+            + df["c_BB"] + df["c_HBP"])
+    df["ob1_sh"] = (_ob1 + OB1_K * OB1_PRIOR) / (df["c_PA"] + OB1_K)
+    df["sb_att1"] = ((df["c_SB"] + df["c_CS"] + SB_ATT_K * SB_ATT_PRIOR)
+                     / (_ob1 + SB_ATT_K))
     # extra-base-hit rate, full OBP (incl. HBP), feared-hitter IBB rate
     for pre in ["c", "s"]:
         df[f"{pre}_xbh_ab"] = ((df[f"{pre}_2B"] + df[f"{pre}_3B"]
@@ -2565,6 +3606,13 @@ def build_batter_frame(raw):
     df["ctx_behind_slg"] = df[["_slgp1", "_slgp2"]].mean(axis=1)
     df["ctx_ahead_obp_d"] = df[["_obpp_d-2", "_obpp_d-1"]].mean(axis=1)
     df["ctx_behind_slg_d"] = df[["_slgp_d1", "_slgp_d2"]].mean(axis=1)
+    # audit wave (rank 12): the missing directions of the neighbor matrix —
+    # ahead-SLG (WHICH base the supply runners occupy: a runner scores from
+    # 2nd ~2x as often) and behind-OBP (chain continuation), + decayed
+    df["ctx_ahead_slg"] = df[["_slgp-2", "_slgp-1"]].mean(axis=1)
+    df["ctx_ahead_slg_d"] = df[["_slgp_d-2", "_slgp_d-1"]].mean(axis=1)
+    df["ctx_behind_obp"] = df[["_obpp1", "_obpp2"]].mean(axis=1)
+    df["ctx_behind_obp_d"] = df[["_obpp_d1", "_obpp_d2"]].mean(axis=1)
     # runners-ahead advancement (2026-07-12): mean prior-season extra-base
     # advancement rate of the two hitters ahead — whether the runners this
     # batter drives in can actually take the extra base. RBI-specific
@@ -2579,6 +3627,18 @@ def build_batter_frame(raw):
         df = df.merge(nb, on=["GamePk", "Team", "_nslot"], how="left")
     df = df.drop(columns=["_nslot"])
     df["ctx_ahead_brr"] = df[["_brrp-2", "_brrp-1"]].mean(axis=1)
+    # audit wave (rank 12): the rally-kill axis — GIDP-proneness of the two
+    # hitters BEHIND (they bat with this batter on first; a double-play
+    # machine behind him erases his run chances). brr_lt shift-merge idiom.
+    gidp_lt = df[["GamePk", "Team", "slot",
+                  "c_gidp_pa_sh"]].drop_duplicates(["GamePk", "Team", "slot"])
+    for off in (1, 2):
+        nb = gidp_lt.rename(columns={"slot": "_nslot",
+                                     "c_gidp_pa_sh": f"_gidpp{off}"})
+        df["_nslot"] = ((df["slot"] + off - 1) % 9) + 1
+        df = df.merge(nb, on=["GamePk", "Team", "_nslot"], how="left")
+    df = df.drop(columns=["_nslot"])
+    df["ctx_behind_gidp"] = df[["_gidpp1", "_gidpp2"]].mean(axis=1)
     # rbi opportunity: full-order proximity-decayed OBP of the hitters ahead
     # (RBI_OPP_AHEAD) — expected runners on base the 2-slot ctx can't see.
     obp_lt = df[["GamePk", "Team", "slot", "_obpp"]].drop_duplicates(
@@ -2622,9 +3682,27 @@ def build_batter_frame(raw):
     df["y_bk2"] = (df["SO"] >= 2).astype(int)
     df["y_hrr2"] = (hrr >= 2).astype(int)
     df["y_hrr3"] = (hrr >= 3).astype(int)
+    # 2026-07-14 finish batch — new heads: the four deep binaries (H1,
+    # count-vs-binary verdict: these lines must be BINARY-priced), the
+    # triple (H3, completes the hit-type family; 1.21% base rate — Platt
+    # is load-bearing), and the 2+ RBI / 2+ runs thresholds (H4)
+    df["y_bk3"] = (df["SO"] >= 3).astype(int)
+    df["y_tb3"] = (df["TB"] >= 3).astype(int)
+    df["y_tb4"] = (df["TB"] >= 4).astype(int)
+    df["y_hrr4"] = (hrr >= 4).astype(int)
+    df["y_3b"] = (df["3B"] >= 1).astype(int)
+    df["y_rbi2"] = (df["RBI"] >= 2).astype(int)
+    df["y_run2"] = (df["R"] >= 2).astype(int)
     df["bk_count"] = df["SO"]
     df["hrr_count"] = hrr
     df["tb_count"] = df["TB"]   # total bases -> expected-TB head (xTB)
+    # H6 count-head targets: the rest of the expected-stat-line (means
+    # only; their banked line calibrators never ship — binaries own the
+    # batter lines per the 07-13 shoot-out)
+    df["h_count"] = df["H"]
+    df["run_count"] = df["R"]
+    df["rbi_count"] = df["RBI"]
+    df["bb_count"] = df["BB"]
 
     # ---- row-wise derived features + interactions: one shared function that the
     # serving path also calls, so the two compute them identically (parity). The
@@ -2650,13 +3728,15 @@ def batter_feature_cols():
              "toff_loc_hr_pa", "toff_loc_r_pg",
              "pen_hr_bf", "pen_k_bf", "pen_h_bf", "pen_era",
              "pen_hl_era", "pen_hl_k_bf", "pen_np_l3",
-             "park_hr_pg", "park_r_pg", "park_h_pg", "park_2b_pg", "park_tb_pg",
+             "park_hr_pg", "park_r_pg", "park_h_pg", "park_2b_pg",
+             "park_3b_pg", "park_tb_pg",
              "LF", "CF", "RF", "Elevation_ft",
              "Temp", "WindSpeed",
              "hrq_n", "hrq_ev_avg", "hrq_dist_avg", "hrq_dist_max",
              "hrq_angle_avg", "hrpt_score", "phrq_n", "phrq_ev_avg",
              "bat_goao", "pit_goao",
              *ARS_P_METRICS.values(), *ARS_B_METRICS.values(), "m_coverage",
+             *ARS_DYN_COLS,   # audit wave rank 22 (opposing-starter arsenal)
              "bat_height", "bat_weight", "bat_age", "same_hand",
              "vsh_PA", "vsh_hr_pa_sh", "vsh_tb_ab_sh", "vsh_k_pct_sh",
              "vloc_PA", "vloc_hr_pa_sh", "vloc_h_pa_sh", "vloc_tb_ab_sh",
@@ -2789,6 +3869,17 @@ def batter_feature_cols():
              "bd_tswh_c", "bd_tswh_d", "bd_f32b_c", "bd_f32b_d",
              "p_tswh_d", "p_f32b_d", "ts_matchup",
              "p_fbv_sd", "p_rel_sd",
+             # 2026-07-14 finish batch (backlog #15/#18/#23/#24/#27/#31):
+             # bullpen exposure + pen-minus-starter collisions (the
+             # second-pitcher problem), schedule/travel fatigue +
+             # doubleheader flags, the opposing starter's venue split,
+             # FF ride + its whiff/air collisions, and form-weighted
+             # exposure (decayed siblings of the xpa_x_* products)
+             "xpa_pen", "xpen_k", "xpen_hr", "xpen_h",
+             "day_after_night", "travel_km", "tz_delta", "is_dh", "dh_game2",
+             "pvloc_era", "pvloc_k_bf", "pvloc_hr_bf",
+             "p_ivb_d", "ride_matchup", "ride_air",
+             "xpa_x_hr_d", "xpa_x_tb_d", "xpa_x_k_d",
              # NOTE: pull_fence/porch_margin and batter-side fatigue were
              # tried (iteration 3) and hurt the batter props on the holdout;
              # the league-environment lg_* columns (iteration 4) were flat
@@ -2804,8 +3895,83 @@ def batter_feature_cols():
              # frames but out of the batter models. Fatigue (p_np_*) and
              # lg_* were re-accepted into the batter models 2026-07-09
              # (cols above); they also live in starts cols for the K model.
-             # This is the SUPERSET; per-prop trimming (e.g. SB features
-             # only reach the SB model) lives in train.py PROP_EXCLUDE.
+             # This is the SUPERSET; what each head actually trains on is
+             # decided solely by stability selection (feature_keep.json) —
+             # the hand-curated PROP_EXCLUDE routing was deleted 2026-07-15.
+             # ---- audit wave (2026-07-14, AUDIT_BUILD_SPECS_0714.md) ----
+             # rank 1: bb/sb exposure completion + pen walk exposure
+             "xpa_x_bb", "xpa_x_sb", "xpa_x_bb_d", "xpa_x_sb_d",
+             "xpen_bb", "pen_bb_bf",
+             # rank 2: deeper threshold histories for the 07-14 heads
+             "c_hrr4_g_sh", "s_hrr4_g_sh", "d_hrr4_g_sh",
+             "c_rbi2_g_sh", "s_rbi2_g_sh", "d_rbi2_g_sh",
+             "c_run2_g_sh", "s_run2_g_sh", "d_run2_g_sh",
+             # rank 3: park x hit-type products (rates ride SHRINK_COLS)
+             "park_x_2b", "park_x_3b",
+             # rank 4: sb opportunity chain
+             "ob1_sh", "sb_att1", "sb_chain", "sb_chain_env", "ob1_x_st",
+             # rank 7: passivity axis + collisions
+             "bd_zsw_c", "bd_zsw_d", "bd_tssw_c", "bd_tssw_d",
+             "called_k_matchup", "ump_k_x_take",
+             # rank 5: pitcher spray exposure + pull-air collision
+             "pbip_pull", "pbip_pullair", "pbipd_pullair", "mix_pullair",
+             # rank 11: starter outing shape carried to the batter grain
+             "p_outs_sd", "p_short_share",
+             # rank 12: neighbor-matrix completion
+             "ctx_ahead_slg", "ctx_ahead_slg_d",
+             "ctx_behind_obp", "ctx_behind_obp_d", "ctx_behind_gidp",
+             # rank 13: oppo spray + EV tail + oppo park geometry
+             "bip_oppo", "bip_oppoair", "bipd_oppoair",
+             "pbip_oppo", "pbip_oppoair", "pbipd_oppoair",
+             "bip_ev105", "bipd_ev105", "pbip_ev105", "pbipd_ev105",
+             "oppo_fence", "oppo_air_porch",
+             # rank 14: realized RBI opportunity/conversion (LOB consumed;
+             # c_/s_rbi_conv_sh ride SHRINK_COLS)
+             "rbi_conv_gap", "d_rob_pa",
+             # rank 15: own team's BaseRuns sequencing-luck residual
+             "toff_bsr_luck",
+             # rank 17: the opposing starter's MiLB-translated priors
+             *MILB_PIT_COLS,
+             # rank 21: chaos channel (career + season, both starter rates)
+             "pc_chaos_bf", "pc_hbp_bf", "ps_chaos_bf", "ps_hbp_bf",
+             # ranks 23/31: ump x walk cell, protection product
+             "ump_bb_x_bb", "pitch_around",
+             # rank 27: v7 cause axes of the opposing starter + the 2K x
+             # breaking putaway cell
+             "p_effprem_d", "p_brkmov_d", "p_stretch_d", "p_relsep_d",
+             "bd_tsbrkwh_c", "bd_tsbrkwh_d", "ts_brk_matchup",
+             # rank 29/30: ump run environment + precip (exposure-only)
+             "ump_r_g", "Precip",
+             # backlog #22 (rebuild): opponent high-leverage arm
+             # availability — pairs with xpa_pen (how many late PAs vs
+             # whether the good arms are down)
+             "pen_hl_unavail",
+             # rank 20: opposing starter age
+             "p_age",
+             # v8 damage-on-contact wave (2026-07-15): xwOBA-per-BBE
+             # splits by velo band / pitch class — batter side (career +
+             # decay), the opposing starter's damage-ALLOWED splits, the
+             # damage collisions (contact half of the velo-band axis; the
+             # whiff half shipped v4), and the 2K x elite-velo cell
+             "bd_fbloxw_c", "bd_fbloxw_d", "bd_fbmidxw_c", "bd_fbmidxw_d",
+             "bd_fb95xw_c", "bd_fb95xw_d", "bd_brkxw_c", "bd_brkxw_d",
+             "bd_offxw_c", "bd_offxw_d", "bd_fbkxw_c", "bd_fbkxw_d",
+             "p_fbloxw_d", "p_fbmidxw_d", "p_fb95xw_d",
+             "p_brkxw_d", "p_offxw_d", "p_fbkxw_d",
+             "bat_velo_damage", "velo_band_damage", "arsenal_damage",
+             "mix_fb95xw",
+             "bd_tsfb95wh_c", "bd_tsfb95wh_d", "ts_fb95_matchup",
+             # battery + IL wave (2026-07-15): the opponent's playing-time-
+             # weighted catcher quality (framing / CS value / pop time) +
+             # the framing-take and SB-chain collisions; IL return context
+             # for the batter and the opposing starter (the layoff CAUSE
+             # the days-rest gaps can't see)
+             "opp_cat_frame", "opp_cat_csaa", "opp_cat_pop",
+             "frame_x_take", "sb_cat_env",
+             "il_ret_days", "il_last_len", "il_ret21", "il_szn_days",
+             "il_rehab",
+             "p_il_ret_days", "p_il_last_len", "p_il_ret21",
+             "p_il_szn_days", "p_il_rehab",
              *CAT_COLS]
     # r{w}_{r,rbi}_pa_sh re-accepted 2026-07-09 (RUNRBI_FORM_COLS note)
     cols += SHRINK_COLS
@@ -2824,7 +3990,11 @@ def add_starter_derived(df):
     df["p_tto_decay"] = tto_decay_from_sums(df)
     df["pc_kbb"] = df["pc_k_bf"] - df["pc_bb_bf"]
     for c in ("lu_wsw", "lu_k_sh", "lu_chase",
-              "lu_brkwh", "lu_offwh", "lu_fbwh"):
+              "lu_brkwh", "lu_offwh", "lu_fbwh",
+              # v8 banded whiff / damage lineup views
+              "lu_fblowh", "lu_fbmidwh", "lu_fb95wh",
+              "lu_fbloxw", "lu_fbmidxw", "lu_fb95xw",
+              "lu_brkxw", "lu_offxw", "lu_fbkxw"):
         if c not in df.columns:
             df[c] = np.nan
     df["lu_mix_whiff"] = df["lu_wsw"] * df["pd_wsw_d"]
@@ -2837,6 +4007,91 @@ def add_starter_derived(df):
     df["lu_ars_whiff"] = (_fb_share * df["lu_fbwh"]
                           + df["pd_brk_d"] * df["lu_brkwh"]
                           + df["pd_off_d"] * df["lu_offwh"])
+    # v8 (2026-07-15): the velocity-graded lineup collision (lu_ars_whiff's
+    # velo-band sibling — the lineup's whiff-by-band weighted by HIS banded
+    # usage) and the damage twins — what the lineup does when it CONNECTS
+    # with each band/class of his stuff (the pha/per side of the collision)
+    df["lu_velo_k"] = (df["pd_fblou_d"] * df["lu_fblowh"]
+                       + df["pd_fbmidu_d"] * df["lu_fbmidwh"]
+                       + df["pd_fb95u_d"] * df["lu_fb95wh"])
+    df["lu_velo_dmg"] = (df["pd_fblou_d"] * df["lu_fbloxw"]
+                         + df["pd_fbmidu_d"] * df["lu_fbmidxw"]
+                         + df["pd_fb95u_d"] * df["lu_fb95xw"])
+    df["lu_ars_dmg"] = (_fb_share * df["lu_fbkxw"]
+                        + df["pd_brk_d"] * df["lu_brkxw"]
+                        + df["pd_off_d"] * df["lu_offxw"])
+    # layoff / ramp regime flags (2026-07-14 #17): thin-support interactions
+    # of rest x pitch count handed over explicitly; NaN inputs propagate
+    _rest, _npl = df["p_days_rest"], df["p_np_last"]
+    df["p_gap15"] = (_rest >= GAP_DAYS).astype(float).where(_rest.notna())
+    df["p_ramp60"] = (_npl < RAMP_NP).astype(float).where(_npl.notna())
+    df["p_short_heavy"] = ((_rest <= SHORT_REST_DAYS)
+                           & (_npl >= HEAVY_NP)).astype(float).where(
+        _rest.notna() & _npl.notna())
+    # earned-run conversion chain (2026-07-14 #28): baserunners allowed x
+    # damage-on-contact allowed — the rbi_conv/run_opp template pointed at
+    # the starter frame (career + recent sibling)
+    for c in ("pbip_xwoba", "pbipd_xwoba", "p5_bb_bf"):
+        if c not in df.columns:
+            df[c] = np.nan
+    df["p_conv_c"] = (df["pc_h_bf"] + df["pc_bb_bf"]) * df["pbip_xwoba"]
+    df["p_conv_r"] = (df["p5_h_bf"] + df["p5_bb_bf"]) * df["pbipd_xwoba"]
+    # ump x the actual lineup's K-proneness (2026-07-14 #29): completes the
+    # proven ump_k_x_pk pattern with the lineup side
+    df["ump_k_x_lu"] = df["ump_k_pct"] * df["lu_k_sh"]
+    # v6 (#25): ahead-vs-behind spin-usage shift (does his mix collapse
+    # when behind) — both sides shrink to their OWN league prior, so
+    # no-history lands on the league's usage shift, not zero. The velo-fade
+    # slope (#26) is computed from the decayed fade sums by each path
+    # separately (pd_fbv_sd idiom).
+    df["pd_absh_d"] = df["pd_ahsp_d"] - df["pd_bhsp_d"]
+    # ---- audit wave (2026-07-14, AUDIT_BUILD_SPECS_0714.md) ----
+    for c in ("lu_obp", "lu_slg", "lu_xwcon", "lu_brl", "lu_fpsw",
+              "lu_gidp", "lu_sb", "lu_sprint", "vs_obp", "vs_slg",
+              "pbip_gb", "pbipd_gb", "pbipd_xba", "air_dens",
+              "lg_sb_pa", "lg_sb27_prior", "psb_sb27",
+              "p5_h_bf", "p5_k_bf", "p5_bb_bf", "pc_NP", "pc_Outs"):
+        if c not in df.columns:
+            df[c] = np.nan
+    # rank 16: signed wind carry -> HR/XBH allowed -> ER (the physics the
+    # pull-only categorical can't be carved into; accepted twice elsewhere)
+    add_wind_carry(df, pull=False)
+    # rank 18: posted-lineup quality gap (B-lineup detector) + first-pitch
+    # economy collision (aggressive lineup vs a strike-thrower)
+    df["lu_obp_gap"] = df["lu_obp"] - df["vs_obp"]
+    df["lu_slg_gap"] = df["lu_slg"] - df["vs_slg"]
+    df["fp_lu_x"] = ((df["lu_fpsw"] - PD_SHRINK["fpsw"][0])
+                     * (df["pd_fps_d"] - PD_SHRINK["fps"][0]))
+    # rank 5c: GB-allowed x thin air (a grounder pitcher is insulated where
+    # carry helps) + GB x the lineup's double-play proneness
+    df["p_gb_air"] = ((AIR_RHO0 - df["air_dens"])
+                      * (df["pbipd_gb"] - BIP_SHRINK["gb"][0]))
+    df["gb_dp_x"] = ((df["pbipd_gb"] - BIP_SHRINK["gb"][0])
+                     * (df["lu_gidp"] - SHRINK["gidp_pa"][0]))
+    # rank 10: starter BABIP-luck residual (verbatim batter twin) — the
+    # starts frame had no realized hits-allowed rate at all
+    _pcon = 1.0 - df["p5_k_bf"] - df["p5_bb_bf"]
+    df["p_hit_luck"] = (np.where(_pcon > 0, df["p5_h_bf"] / _pcon, np.nan)
+                        - df["pbipd_xba"])
+    # rank 24: steal-vulnerable pitcher x running lineup -> same contact
+    # line, more runs; both centered on the as-of / prior-season league
+    df["run_game_x"] = ((df["lu_sb"] - df["lg_sb_pa"])
+                        * (df["psb_sb27"] - df["lg_sb27_prior"]))
+    # battery collisions (2026-07-15): framing cashes at the shadow zone —
+    # his battery's framing x his edge share (centered); and the running
+    # game vs his battery: the lineup's SB intent x his catchers' stop
+    # value (run_game_x's catcher half)
+    for c in ("own_cat_frame", "own_cat_csaa", "own_cat_pop"):
+        if c not in df.columns:
+            df[c] = np.nan
+    df["frame_x_edge"] = (df["own_cat_frame"]
+                          * (df["pd_edge_d"] - PD_SHRINK["edge"][0]))
+    df["run_cat_x"] = df["lu_sb"] * df["own_cat_csaa"]
+    # rank 25: pitch-economy budget x efficiency (trees can't divide
+    # pc_NP by pc_Outs); p_exp_outs = recent budget / this ratio
+    df["p_np_per_out"] = ((df["pc_NP"] + NP_PER_OUT_K * NP_PER_OUT_PRIOR)
+                          / (df["pc_Outs"] + NP_PER_OUT_K))
+    df["p_exp_outs"] = df["p_np_l3"] / df["p_np_per_out"]
     return df
 
 
@@ -2858,15 +4113,100 @@ def build_starts_frame(raw, batter_frame=None):
     st["vs_bb_pct"] = st["vs_cum_BB"] / st["vs_cum_PA"]
     st["vs_hr_pa"] = st["vs_cum_HR"] / st["vs_cum_PA"]
     st["vs_r_pg"] = st["vs_cum_R"] / st["vs_cum_n"]
+    # audit wave (rank 18): the OPPONENT team's season OBP/SLG norm — the
+    # baseline the posted-lineup quality gap is measured against (B-lineup
+    # detector, ported from the game frame's #19)
+    st["vs_obp"] = ((st["vs_cum_H"] + st["vs_cum_BB"] + st["vs_cum_HBP"])
+                    / st["vs_cum_PA"])
+    st["vs_slg"] = st["vs_cum_TB"] / st["vs_cum_AB"]
 
     for pre in ["pc", "ps"]:
         st = pd.concat([st, _pit_rates(st, pre)], axis=1)
     st["p5_hr_bf"] = st["p5_HR"] / st["p5_BF"]
     st["p5_k_bf"] = st["p5_SO"] / st["p5_BF"]
     st["p5_h_bf"] = st["p5_H"] / st["p5_BF"]
+    st["p5_bb_bf"] = st["p5_BB"] / st["p5_BF"]   # p_conv_r input (#28)
     st["p_ip_per_start"] = st["ps_Outs"] / 3 / st["p_starts_season"]
     add_pit_trends(st)
     st = st.merge(_league_env_table(gb), on="Date", how="left")
+
+    # the manager's leash (2026-07-14 #16): his TEAM's as-of average
+    # starter outs per game — organizational policy, not his own history
+    lea = _team_starter_outs_table(gp)
+    lea = lea.rename(columns={"cum_Outs": "lea_cum_Outs",
+                              "cum_n": "lea_cum_n"})
+    st = _asof_merge(st, lea, by=["Team", "Season"])
+    st["team_st_outs_pg"] = st["lea_cum_Outs"] / st["lea_cum_n"]
+
+    # audit wave (rank 6): the starter's OWN bullpen state — the manager's
+    # pull decision runs on his own pen's fatigue/quality (team_st_outs_pg
+    # is static policy; this is the dynamic day-of input). Re-key the same
+    # leakage-vetted pen tables to Team (distinct openp_/openhl_ prefixes
+    # avoid the opponent-keyed pen_cum_* intermediates from _attach_context)
+    own = pen_tab.rename(columns={c: f"openp_{c}" for c in pen_tab.columns
+                                  if c.startswith("cum")})
+    st = _asof_merge(st, own, by=["Team", "Season"])
+    st["own_pen_era"] = st["openp_cum_ER"] * 27 / st["openp_cum_Outs"]
+    ohl = _bullpen_hl_table(gp).rename(
+        columns={c: f"openhl_{c}" for c in _bullpen_hl_table(gp).columns
+                 if c.startswith("cum")})
+    st = _asof_merge(st, ohl, by=["Team", "Season"])
+    st["own_pen_hl_era"] = st["openhl_cum_ER"] * 27 / st["openhl_cum_Outs"]
+    ofat = _pen_fatigue_table(gp).rename(columns={"pen_np_l3": "own_pen_np_l3"})
+    st = st.merge(ofat, on=["Team", "Date"], how="left")
+
+    # audit wave (rank 26): the OWN defense's unearned-run rate — per is
+    # the only head whose label is defined by the earned/unearned split and
+    # it has zero error signal today (own_def_p_oaa is range, not errors)
+    od = _team_defense_table(gp).rename(
+        columns={c: f"od_{c}" for c in _team_defense_table(gp).columns
+                 if c.startswith("cum")})
+    st = _asof_merge(st, od, by=["Team", "Season"])
+    st["own_def_uer"] = (st["od_cum_R"] - st["od_cum_ER"]) * 27 / st["od_cum_Outs"]
+
+    # audit wave (rank 24): the running game vs THIS starter — his own
+    # prior-season SB-allowed permissiveness (nothing on the starts frame
+    # sees the running game today) + the regime-aware league centering
+    st = _merge_prior_season(st, _pitcher_season_table(raw["pit_season"]),
+                             "PlayerId", ["psb_sb27", "psb_stop"])
+    st = st.merge(_league_sb27_table(raw["pit_season"]), on="Season",
+                  how="left")
+
+    # schedule context (2026-07-14 #18/#24): his team's travel/day-night
+    # fatigue + tonight's doubleheader flags (game 2 = spot starters,
+    # tired pens — outs/exposure policy the frames couldn't see)
+    st = st.merge(_team_sched_table(raw["games"], raw["parks"]),
+                  on=["GamePk", "Team"], how="left")
+
+    # his own contact quality ALLOWED (career + decayed xwOBA-on-contact)
+    # — the damage half of the earned-run conversion chain (#28); same
+    # tables + shrink as the batter frame's pbip_* so serving
+    # (Stores.bip_pitcher) matches by construction
+    if raw.get("bip") is not None:
+        pt0 = _bip_table(raw["bip"], "PitcherId").rename(
+            columns={"PitcherId": "PlayerId"})
+        pt0 = pt0.rename(columns={c: f"pb_{c}" for c in pt0.columns
+                                  if c.startswith(("cum_", "dk_"))})
+        st = _asof_merge(st, pt0, by=["PlayerId"])
+        wdn_bip = np.exp(-DECAY_LAM * (st["Date"] - DECAY_EPOCH)
+                         .dt.days.to_numpy(dtype="float64"))
+        # #28 xwoba + audit-wave rank 5 contact-shape widening (the starts
+        # frame's only contact-allowed view was one xwOBA scalar; batter +
+        # team frames both carry the GB axis) + rank 10 xba (the pitcher-
+        # side hit-luck residual's expected side). Tags pbip/pbipd produce
+        # the exact names Stores.bip_pitcher already emits -> serving parity.
+        for k, v in bip_feats(lambda c: st[f"pb_cum_{c}"], "pbip",
+                              ("xwoba", "ev", "brl", "gb", "flyd",
+                               "pullair")).items():
+            st[k] = v
+        for k, v in bip_feats(lambda c: st[f"pb_dk_{c}"] * wdn_bip, "pbipd",
+                              ("xwoba", "gb", "brl", "xba")).items():
+            st[k] = v
+    else:
+        for c in ("pbip_xwoba", "pbip_ev", "pbip_brl", "pbip_gb",
+                  "pbip_flyd", "pbip_pullair",
+                  "pbipd_xwoba", "pbipd_gb", "pbipd_brl", "pbipd_xba"):
+            st[c] = np.nan
 
     # the starter's own arsenal, K-model view (whiff/K%/put-away, blended
     # over the last two Statcast seasons)
@@ -2874,6 +4214,10 @@ def build_starts_frame(raw, batter_frame=None):
         st[["PlayerId", "Season"]].rename(columns={"PlayerId": "PitcherId"}),
         raw["ars_p"]).rename(columns={"PitcherId": "PlayerId"})
     st = st.merge(pa, on=["PlayerId", "Season"], how="left")
+    # audit wave (rank 22): arsenal breadth + trajectory (the 0.7/0.3 level
+    # blend hides both); annual, leakage-safe (serve season reads Y<=S-1)
+    st = st.merge(_arsenal_dynamics(raw["ars_p"]),
+                  on=["PlayerId", "Season"], how="left")
 
     # pitch-level dailies: as-of swinging-strike / CSW / whiff-per-swing /
     # chase-induced / zone rates (90-day decay + career) and the fastball
@@ -2906,6 +4250,19 @@ def build_starts_frame(raw, batter_frame=None):
             st["pd_dk_rp_n"] * wdn_pd, st["pd_dk_rp_x"] * wdn_pd,
             st["pd_dk_rp_x2"] * wdn_pd, st["pd_dk_rp_z"] * wdn_pd,
             st["pd_dk_rp_z2"] * wdn_pd)
+        # v6 (#26): decayed weighted-mean per-start velo-fade slope
+        st["pd_fbv_fade"] = fbv_fade_from_sums(
+            st["pd_dk_fade_w"] * wdn_pd, st["pd_dk_fade_num"] * wdn_pd)
+        # v7 audit wave (rank 27): base-out stretch delta + per-class
+        # release separation (the shrink-ratio siblings pd_effprem_d /
+        # pd_brkmov_d ride the PD_D loop above; these two need the helper)
+        st["pd_stretch_vdelta_d"] = stretch_vdelta_from_sums(
+            st["pd_dk_fb_n"] * wdn_pd, st["pd_dk_fb_v"] * wdn_pd,
+            st["pd_dk_fbstr_n"] * wdn_pd, st["pd_dk_fbstr_v"] * wdn_pd)
+        st["pd_relsep_d"] = release_sep_from_sums(
+            st["pd_dk_rpf_n"] * wdn_pd, st["pd_dk_rpf_x"] * wdn_pd,
+            st["pd_dk_rpf_z"] * wdn_pd, st["pd_dk_rpb_n"] * wdn_pd,
+            st["pd_dk_rpb_x"] * wdn_pd, st["pd_dk_rpb_z"] * wdn_pd)
     else:
         for name in PD_C:
             st[f"pd_{name}_c"] = np.nan
@@ -2914,6 +4271,9 @@ def build_starts_frame(raw, batter_frame=None):
         st["pd_fbv_tr"] = np.nan
         st["pd_fbv_sd"] = np.nan
         st["pd_rel_sd"] = np.nan
+        st["pd_fbv_fade"] = np.nan
+        st["pd_stretch_vdelta_d"] = np.nan
+        st["pd_relsep_d"] = np.nan
 
     # the ACTUAL opposing lineup (not just team-season rates): mean as-of
     # shrunk K%/BB%, whiff vs this starter's arsenal, and K% vs his hand,
@@ -2929,7 +4289,28 @@ def build_starts_frame(raw, batter_frame=None):
                    lu_chase=("bd_chase_d", "mean"),
                    lu_brkwh=("bd_brkwh_d", "mean"),
                    lu_offwh=("bd_offwh_d", "mean"),
-                   lu_fbwh=("bd_fbwh_d", "mean"))
+                   lu_fbwh=("bd_fbwh_d", "mean"),
+                   # audit wave rank 18 (damage/OBP the whiff-only lu_ view
+                   # missed) + rank 5c (rally-kill) + rank 24 (running game)
+                   lu_obp=("_obpp", "mean"), lu_slg=("_slgp", "mean"),
+                   lu_xwcon=("bipd_xwoba", "mean"),
+                   lu_brl=("bipd_brl", "mean"),
+                   lu_fpsw=("bd_fpsw_d", "mean"),
+                   lu_gidp=("c_gidp_pa_sh", "mean"),
+                   lu_sb=("d_sb_pa_sh", "mean"),
+                   lu_sprint=("bat_sprint", "mean"),
+                   # v8 (2026-07-15): the lineup's whiff-by-velo-band and
+                   # damage-by-band/class views (career damage reads —
+                   # see the PD_SHRINK v8 note on thin per-band BBE)
+                   lu_fblowh=("bd_fblowh_d", "mean"),
+                   lu_fbmidwh=("bd_fbmidwh_d", "mean"),
+                   lu_fb95wh=("bd_fb95wh_d", "mean"),
+                   lu_fbloxw=("bd_fbloxw_c", "mean"),
+                   lu_fbmidxw=("bd_fbmidxw_c", "mean"),
+                   lu_fb95xw=("bd_fb95xw_c", "mean"),
+                   lu_brkxw=("bd_brkxw_c", "mean"),
+                   lu_offxw=("bd_offxw_c", "mean"),
+                   lu_fbkxw=("bd_fbkxw_c", "mean"))
               .reset_index().rename(columns={"Team": "Opponent"}))
         st = st.merge(lu, on=["GamePk", "Opponent"], how="left")
 
@@ -2959,6 +4340,25 @@ def build_starts_frame(raw, batter_frame=None):
         for c in ("own_def_p_oaa", "own_def_p_if", "own_def_p_of"):
             st[c] = np.nan
 
+    # his OWN battery, prior season (2026-07-15): framing (strikes FOR
+    # him), CS value and pop time (his catchers' running-game wall) —
+    # team playing-time-weighted, serving-safe
+    if raw.get("cat") is not None:
+        ct = raw["cat"].rename(columns={
+            "Team": "PlayerId", "FrameRV_pt": "own_cat_frame",
+            "CSAA_att": "own_cat_csaa", "PopTime": "own_cat_pop"})
+        st = _merge_prior_season(
+            st, ct[["PlayerId", "Year", "own_cat_frame", "own_cat_csaa",
+                    "own_cat_pop"]],
+            "Team", ["own_cat_frame", "own_cat_csaa", "own_cat_pop"])
+    else:
+        for c in ("own_cat_frame", "own_cat_csaa", "own_cat_pop"):
+            st[c] = np.nan
+    # his own IL return context (2026-07-15): pairs with the #17 ramp
+    # flags — a 15-day gap off the IL is a different animal than a
+    # skipped start, and the gap features alone can't tell them apart
+    st = _il_asof(st, raw.get("il"), "PlayerId", "p_")
+
     # MiLB translated prior, pitcher-allowed side (2026-07-13 rider) —
     # same semantics as the batter block (exact-season join, NaN without
     # kept-level minors in window)
@@ -2968,6 +4368,13 @@ def build_starts_frame(raw, batter_frame=None):
     else:
         for c in MILB_PIT_COLS:
             st[c] = np.nan
+
+    # audit wave (rank 20): pitcher bio — bat bio is exposed and selection-
+    # kept in 17 heads; the pitcher side had nothing but throws. Age is
+    # distinct geometry from experience (p_starts_career) and realized
+    # decline (pd_fbv_tr, noise on the thin histories where age matters).
+    st = _attach_bio(st, raw["rosters"], "PlayerId", "pit")
+    st = st.drop(columns=["B", "T"], errors="ignore")
 
     # shared derived features (weather, TTO decay, K-BB, lineup collisions)
     # — the serving path calls the same function (parity)
@@ -2992,6 +4399,7 @@ def starts_feature_cols():
             "p5_hr_bf", "p5_k_bf", "p_ip_per_start",
             "p5_k_trend", "p_era_trend",
             "pars_whiff", "pars_kpct", "pars_paway", "pars_rv100", "pars_cov",
+            *ARS_DYN_COLS,   # audit wave rank 22 (own arsenal dynamics)
             "pd_swstr_c", "pd_swstr_d", "pd_csw_d", "pd_wsw_d", "pd_chase_d",
             "pd_zone_d", "pd_fbv_c", "pd_fbv_d", "pd_fbv_tr",
             "lu_k_sh", "lu_bb_sh", "lu_whiff", "lu_vsh_k",
@@ -3031,11 +4439,119 @@ def starts_feature_cols():
             "pd_fbv_sd", "pd_rel_sd",
             # MiLB translated prior, allowed side (2026-07-13 rider)
             *MILB_PIT_COLS,
+            # 2026-07-14 finish batch (backlog #16/#17/#21/#23/#25-28/#29 +
+            # #18/#24 sched): outing shape + the manager's leash, layoff/
+            # ramp flags, ump run environment, own venue split, 0-2 waste /
+            # ahead-behind mix shift / transition shares / FF ride / velo
+            # fade, contact allowed + the earned-run conversion chain,
+            # ump x lineup K, schedule/travel + doubleheader flags
+            "p_outs_sd", "p_short_share", "team_st_outs_pg",
+            "p_gap15", "p_ramp60", "p_short_heavy",
+            "ump_r_g",
+            "pvloc_era", "pvloc_k_bf", "pvloc_hr_bf",
+            "pd_w02_d", "pd_absh_d", "pd_trsame_d", "pd_trfbbrk_d",
+            "pd_ivb_d", "pd_fbv_fade",
+            "pbip_xwoba", "pbipd_xwoba", "p5_bb_bf",
+            "p_conv_c", "p_conv_r", "ump_k_x_lu",
+            "day_after_night", "travel_km", "tz_delta", "is_dh", "dh_game2",
+            "Precip",
+            # ---- audit wave (2026-07-14, AUDIT_BUILD_SPECS_0714.md) ----
+            # rank 5: contact-shape allowed (the frame's only view was one
+            # xwOBA scalar) + the air/DP collisions
+            "pbip_ev", "pbip_brl", "pbip_gb", "pbip_flyd", "pbip_pullair",
+            "pbipd_gb", "pbipd_brl", "p_gb_air", "gb_dp_x", "lu_gidp",
+            # rank 6: own bullpen state (the manager's day-of leash input)
+            "own_pen_era", "own_pen_hl_era", "own_pen_np_l3",
+            # rank 10: starter BABIP-luck residual (no realized H-allowed
+            # rate existed on the frame)
+            "pbipd_xba", "p_hit_luck",
+            # rank 16: signed wind carry
+            "wind_carry",
+            # rank 18: posted-lineup damage/OBP view + gaps + fp economy
+            "lu_obp", "lu_slg", "lu_xwcon", "lu_brl", "lu_fpsw",
+            "lu_obp_gap", "lu_slg_gap", "fp_lu_x",
+            # rank 20: pitcher bio
+            "pit_age", "pit_height", "pit_weight",
+            # rank 24: the running game vs this starter
+            "psb_sb27", "psb_stop", "lu_sb", "lu_sprint", "run_game_x",
+            # rank 25: pitch-economy budget x efficiency
+            "p_np_per_out", "p_exp_outs",
+            # rank 26: own defense unearned-run rate (per's error axis)
+            "own_def_uer",
+            # rank 27: v7 cause axes (perceived velo, breaking movement,
+            # base-out stretch delta, per-class release separation)
+            "pd_effprem_d", "pd_brkmov_d", "pd_stretch_vdelta_d",
+            "pd_relsep_d",
+            # v8 damage-on-contact wave (2026-07-15): his own xwOBA-allowed
+            # splits by velo band / pitch class, the lineup's banded
+            # whiff/damage views, and the velocity/arsenal collisions at
+            # lineup grain (lu_velo_k = lu_ars_whiff's velo-band sibling;
+            # the _dmg twins are the pha/per side)
+            "pd_fbloxw_d", "pd_fbmidxw_d", "pd_fb95xw_d",
+            "pd_brkxw_d", "pd_offxw_d", "pd_fbkxw_d",
+            "lu_fblowh", "lu_fbmidwh", "lu_fb95wh",
+            "lu_fbloxw", "lu_fbmidxw", "lu_fb95xw",
+            "lu_brkxw", "lu_offxw", "lu_fbkxw",
+            "lu_velo_k", "lu_velo_dmg", "lu_ars_dmg",
+            # battery + IL wave (2026-07-15): his own catchers' framing /
+            # CS value / pop time + the edge-framing and running-game
+            # collisions; his own IL return context (the layoff cause the
+            # #17 gap flags can't see)
+            "own_cat_frame", "own_cat_csaa", "own_cat_pop",
+            "frame_x_edge", "run_cat_x",
+            "p_il_ret_days", "p_il_last_len", "p_il_ret21",
+            "p_il_szn_days", "p_il_rehab",
             "DayNight", "Condition", "WindDir"]
 
 
-def build_game_frame(raw):
-    """Training frame for game totals and the winner model: one row per game."""
+def lineup_aggregates(bf):
+    """Per (GamePk, Team): posted-lineup means the GAME frame consumes
+    (2026-07-14 #19/#30/#32) — as-of career OBP/SLG (the B-lineup gap's
+    lineup side), pulled-air share (the air-density collision's lineup
+    side), and the mean usage-weighted arsenal whiff vs tonight's opposing
+    starter (the cross-grain collision, already computed per batter row as
+    arsenal_whiff). NaN-skipping means, exactly what the serving path
+    computes from its own batter rows."""
+    # rank 33 platoon edges (_vsh_tb_edge / _vsh_k_edge) are precomputed
+    # per batter row in add_batter_derived so serving and training share
+    # one definition; here we just average them over the posted lineup.
+    return (bf.groupby(["GamePk", "Team"])
+            .agg(lu_obp=("_obpp", "mean"), lu_slg=("_slgp", "mean"),
+                 lu_pullair=("bip_pullair", "mean"),
+                 lu_arswh=("arsenal_whiff", "mean"),
+                 lu_vsh_edge=("_vsh_tb_edge", "mean"),
+                 lu_vsh_kedge=("_vsh_k_edge", "mean"))
+            .reset_index())
+
+
+def add_team_game_derived(d):
+    """Row-wise derived team-game features, shared by build_team_game_frame
+    and the serving _team_rows (parity): thin air x how fly-ball-heavy this
+    lineup is (2026-07-14 #30 — game-grain sibling of air_fly)."""
+    d["air_lu_fly"] = (AIR_RHO0 - d["air_dens"]) * d["off_lu_pullair"]
+    # audit wave rank 8: patience x wildness (a walk-drawing offense vs a
+    # wild staff compounds; centered on the league walk rate, the mix_bb
+    # idiom at team grain)
+    for c in ("off_bb_pct", "opp_ps_bb_bf", "lg_bb_pa", "opp_ps_len",
+              "opp_pen_era", "opp_ps_era"):
+        if c not in d.columns:
+            d[c] = np.nan
+    d["patience_wild"] = ((d["off_bb_pct"] - d["lg_bb_pa"])
+                          * (d["opp_ps_bb_bf"] - d["lg_bb_pa"]))
+    # rank 9: expected extra runs from the starter->pen handoff — how many
+    # of the 9 innings the pen must cover x how much worse it is (both
+    # ERAs are per-9, so the product is in runs). Guard the early-season
+    # 0-outs inf ERAs -> NaN (GBM imputes) rather than +/-inf.
+    _gap = (d["opp_pen_era"] - d["opp_ps_era"]).replace(
+        [np.inf, -np.inf], np.nan)
+    d["xpen_r_gap"] = np.clip(9.0 - d["opp_ps_len"], 0.0, 9.0) * _gap / 9.0
+    return d
+
+
+def build_game_frame(raw, batter_frame=None):
+    """Training frame for game totals and the winner model: one row per game.
+    batter_frame (the built batter frame) supplies the posted-lineup
+    aggregates (lineup_aggregates); without it those columns are NaN."""
     games, gb, gp = raw["games"], raw["gb"], raw["gp"]
     team_tab = _team_offense_table(gb)
     loc_tab = _team_offense_loc_table(gb)
@@ -3043,6 +4559,7 @@ def build_game_frame(raw):
     pen_hl_tab = _bullpen_hl_table(gp)
     pen_fat_tab = _pen_fatigue_table(gp)
     def_tab = _team_defense_table(gp)
+    lea_tab = _team_starter_outs_table(gp)   # rank 9: the manager's leash
     park_tab = _park_table(gb, games)
     res_tab = _team_results_table(games)
     form_tab = _team_form_table(games)
@@ -3050,6 +4567,10 @@ def build_game_frame(raw):
     stf = _starter_asof(gp)
     stf = pd.concat([stf, _pit_rates(stf, "ps"), _pit_rates(stf, "pc")], axis=1)
     stf["p5_k_bf"] = stf["p5_SO"] / stf["p5_BF"]
+    # audit wave (rank 9): starter length — how tonight's 9 innings divide
+    # between the rotation and the pen (a 4.2-IP opener team and a 6.2-IP
+    # workhorse look identical to the current rate mains)
+    stf["p_ip_per_start"] = stf["ps_Outs"] / 3 / stf["p_starts_season"]
 
     # starter contact quality ALLOWED (Statcast): career + 90-day-decayed
     # xwOBA-on-contact, decayed barrel and ground-ball shares. Same shrink
@@ -3102,6 +4623,13 @@ def build_game_frame(raw):
                 if raw.get("oaa_players") is not None else None)
     lbrr_tab = (_lineup_brr_table(gb, raw["baserun"])
                 if raw.get("baserun") is not None else None)
+    # posted-lineup quality/style aggregates from the built batter frame
+    # (2026-07-14 #19/#30/#32) + schedule context and the trailing-30-day
+    # BaseRuns luck residual (#18/#20/#24)
+    lagg_tab = (lineup_aggregates(batter_frame)
+                if batter_frame is not None else None)
+    sched_tab = _team_sched_table(games, raw["parks"])
+    bsr_tab = _team_bsr_table(gb)
 
     g = games[~games["ShortGame"]].copy()
     away_sc = pd.to_numeric(g["AwayScore"], errors="coerce")
@@ -3112,7 +4640,7 @@ def build_game_frame(raw):
 
     ST_COLS = ["ps_era", "ps_k_bf", "ps_hr_bf", "ps_bb_bf", "ps_h_bf",
                "pc_era", "pc_hr_bf", "p_days_rest", "p5_k_bf",
-               "ps_tto_decay", *ST_BIP]
+               "ps_tto_decay", "p_ip_per_start", *ST_BIP]   # rank 9 length
     for side, team_col in [("away", "AwayTeam"), ("home", "HomeTeam")]:
         t = team_tab.rename(columns={"Team": team_col})
         t = t.rename(columns={c: f"{side}_{c}" for c in t.columns if c.startswith("cum")})
@@ -3120,6 +4648,14 @@ def build_game_frame(raw):
         g[f"{side}_hr_pa"] = g[f"{side}_cum_HR"] / g[f"{side}_cum_PA"]
         g[f"{side}_r_pg"] = g[f"{side}_cum_R"] / g[f"{side}_cum_n"]
         g[f"{side}_k_pct"] = g[f"{side}_cum_SO"] / g[f"{side}_cum_PA"]
+        # audit wave (rank 8): the walk channel — no walk encoding existed
+        # on either side of the 64-col team frame (the largest run-scoring
+        # input it couldn't see)
+        g[f"{side}_bb_pct"] = g[f"{side}_cum_BB"] / g[f"{side}_cum_PA"]
+        # season OBP/SLG norms — the B-lineup gap's team side (#19)
+        g[f"{side}_obp"] = ((g[f"{side}_cum_H"] + g[f"{side}_cum_BB"]
+                             + g[f"{side}_cum_HBP"]) / g[f"{side}_cum_PA"])
+        g[f"{side}_slg"] = g[f"{side}_cum_TB"] / g[f"{side}_cum_AB"]
         # offense split for the venue context this side plays in tonight
         lo = loc_tab[loc_tab["Home"] == (1 if side == "home" else 0)]
         lo = lo.drop(columns=["Home"]).rename(columns={"Team": team_col})
@@ -3165,9 +4701,23 @@ def build_game_frame(raw):
         g = _asof_merge(g, hl, by=[team_col, "Season"])
         g[f"{side}_pen_hl_era"] = (g[f"{side}_penhl_cum_ER"] * 27
                                    / g[f"{side}_penhl_cum_Outs"])
+        # audit wave (opp_pen_bridge gray -> share-only rider): the share
+        # of pen outs thrown by high-leverage arms — the mixture weight the
+        # two pen-ERA mains can't recover (bridge ERA itself was 95%
+        # redundant; the user kept only this)
+        g[f"{side}_penhl_share"] = (g[f"{side}_penhl_cum_Outs"]
+                                    / g[f"{side}_pen_cum_Outs"])
         fat = pen_fat_tab.rename(columns={"Team": team_col,
                                           "pen_np_l3": f"{side}_pen_np_l3"})
         g = g.merge(fat, on=[team_col, "Date"], how="left")
+        # audit wave (rank 9): the team's as-of average starter outs (the
+        # manager's organizational leash — the static policy paired with the
+        # dynamic p_ip_per_start length)
+        le = lea_tab.rename(columns={"Team": team_col})
+        le = le.rename(columns={c: f"{side}_st_{c}" for c in le.columns
+                                if c.startswith("cum")})
+        g = _asof_merge(g, le, by=[team_col, "Season"])
+        g[f"{side}_st_outs_pg"] = g[f"{side}_st_cum_Outs"] / g[f"{side}_st_cum_n"]
         d = def_tab.rename(columns={"Team": team_col})
         d = d.rename(columns={c: f"{side}_def_{c}" for c in d.columns
                               if c.startswith("cum")})
@@ -3209,6 +4759,39 @@ def build_game_frame(raw):
         else:
             g[f"{side}_lu_brr"] = np.nan
             g[f"{side}_lu_brr_xb"] = np.nan
+        # posted-lineup quality/style aggregates (2026-07-14 #19/#30/#32):
+        # the B-lineup gap = tonight's lineup vs the team's own season norm
+        if lagg_tab is not None:
+            la = lagg_tab.rename(columns={
+                "Team": team_col, "lu_obp": f"{side}_lu_obp",
+                "lu_slg": f"{side}_lu_slg",
+                "lu_pullair": f"{side}_lu_pullair",
+                "lu_arswh": f"{side}_lu_arswh",
+                # audit wave rank 33: the lineup's platoon edge tonight
+                "lu_vsh_edge": f"{side}_lu_vsh_edge",
+                "lu_vsh_kedge": f"{side}_lu_vsh_kedge"})
+            g = g.merge(la, on=["GamePk", team_col], how="left")
+        else:
+            for c in (f"{side}_lu_obp", f"{side}_lu_slg",
+                      f"{side}_lu_pullair", f"{side}_lu_arswh",
+                      f"{side}_lu_vsh_edge", f"{side}_lu_vsh_kedge"):
+                g[c] = np.nan
+        g[f"{side}_lu_obp_gap"] = g[f"{side}_lu_obp"] - g[f"{side}_obp"]
+        g[f"{side}_lu_slg_gap"] = g[f"{side}_lu_slg"] - g[f"{side}_slg"]
+        # schedule context + trailing BaseRuns luck (2026-07-14
+        # #18/#20/#24); the DH flags are game-level (identical both sides)
+        sc = sched_tab.rename(columns={
+            "Team": team_col, "day_after_night": f"{side}_dan",
+            "travel_km": f"{side}_travel_km", "tz_delta": f"{side}_tz_delta",
+            "is_dh": "is_dh", "dh_game2": "dh_game2"})
+        if side == "away":      # keep one game-level copy of the DH flags
+            g = g.merge(sc, on=["GamePk", team_col], how="left")
+        else:
+            g = g.merge(sc.drop(columns=["is_dh", "dh_game2"]),
+                        on=["GamePk", team_col], how="left")
+        bs = bsr_tab.rename(columns={"Team": team_col,
+                                     "bsr_luck": f"{side}_bsr_luck"})
+        g = g.merge(bs, on=[team_col, "Date"], how="left")
 
     elo_pre, _ = build_elo(games)
     g = g.merge(elo_pre, on="GamePk", how="left")
@@ -3224,6 +4807,12 @@ def build_game_frame(raw):
                      - (g["away_ps_k_bf"] - g["away_ps_bb_bf"]))
     # starter contact-quality-allowed diff (decayed xwOBA on contact)
     g["d_ps_xwcon_d"] = g["home_ps_xwcon_d"] - g["away_ps_xwcon_d"]
+    # 2026-07-14 finish batch: winner-facing diffs — sequencing luck due to
+    # regress (#20), the B-lineup quality gap (#19), and the cross-grain
+    # arsenal collision (#32); the small-n paired-CI caveat governs
+    g["d_bsr_luck"] = g["home_bsr_luck"] - g["away_bsr_luck"]
+    g["d_lu_obp_gap"] = g["home_lu_obp_gap"] - g["away_lu_obp_gap"]
+    g["d_lu_arswh"] = g["home_lu_arswh"] - g["away_lu_arswh"]
 
     park = park_tab.rename(columns={c: f"park_{c}" for c in park_tab.columns
                                     if c.startswith("cum")})
@@ -3231,20 +4820,31 @@ def build_game_frame(raw):
     ok = g["park_cum_n"] >= 30
     for stat, col in (("HR", "park_hr_pg"), ("R", "park_r_pg"),
                       ("H", "park_h_pg"), ("2B", "park_2b_pg"),
-                      ("TB", "park_tb_pg")):
+                      ("3B", "park_3b_pg"), ("TB", "park_tb_pg")):
         g[col] = np.where(ok, g[f"park_cum_{stat}"] / g["park_cum_n"], np.nan)
+    # audit wave (rank 32): the venue run-DISPERSION (variance-to-mean
+    # ratio, EB-shrunk toward the league VMR) — the second moment of runs,
+    # for the totals-tail pricing layer. Column only; the NB pricing
+    # substitution is gated on the 2025-only exponent fit (predict.py).
+    g["park_vmr"] = park_vmr_from_sums(g["park_cum_n"], g["park_cum_R"],
+                                       g["park_cum_R2"])
     parks = raw["parks"].rename(columns={"Ballpark": "Venue"})
     g = g.merge(parks[["Venue", "LF", "CF", "RF", "Elevation_ft"]], on="Venue", how="left")
     g = g.merge(_league_env_table(gb), on="Date", how="left")
     # air-density weather (humidity/pressure scrape, 2026-07-12) for the
-    # run-total environment
+    # run-total environment; Precip wired 2026-07-14 (#11 close-out — the
+    # rain-shortening signal for the outs/total heads)
     if raw.get("weather") is not None:
-        g = g.merge(raw["weather"][["GamePk", "Humidity", "Pressure"]],
+        g = g.merge(raw["weather"][["GamePk", "Humidity", "Pressure",
+                                    "Precip"]],
                     on="GamePk", how="left")
     else:
         g["Humidity"] = np.nan
         g["Pressure"] = np.nan
+        g["Precip"] = np.nan
     add_weather_derived(g)
+    # HP-ump run environment (2026-07-14 #21) for the totals surface
+    g = _merge_ump(g, raw)
     g["month"] = g["Date"].dt.month
     return g
 
@@ -3288,7 +4888,11 @@ def win_feature_cols():
              "away_elo", "home_elo", "d_elo", "elo_prob_home",
              # unbenched to the winner 2026-07-10 (superset dev — selection +
              # 2026 confirm decide at ship; the 10k-row overfit caveat stands).
-             "d_ps_xwcon_d"]
+             "d_ps_xwcon_d",
+             # 2026-07-14 finish batch (#19/#20/#32 winner-facing diffs):
+             # sequencing luck, B-lineup gap, arsenal collision. Small-n
+             # caveat — the paired-CI read, not the keep-vote, arbitrates.
+             "d_bsr_luck", "d_lu_obp_gap", "d_lu_arswh"]
     return cols
 
 
@@ -3336,6 +4940,35 @@ def build_team_game_frame(gf):
             "off_lu_brr": gf[f"{side}_lu_brr"],
             "off_lu_brr_xb": gf[f"{side}_lu_brr_xb"],
             "opp_ps_tto_decay": gf[f"{opp}_ps_tto_decay"],
+            # 2026-07-14 finish batch: B-lineup gap (#19), lineup air
+            # profile (#30 input), cross-grain arsenal collision (#32),
+            # BaseRuns luck (#20), schedule/travel + DH flags (#18/#24),
+            # ump run environment (#21), precip (#11 close-out)
+            "off_lu_obp_gap": gf[f"{side}_lu_obp_gap"],
+            "off_lu_slg_gap": gf[f"{side}_lu_slg_gap"],
+            "off_lu_pullair": gf[f"{side}_lu_pullair"],
+            "off_lu_arswh": gf[f"{side}_lu_arswh"],
+            "off_bsr_luck": gf[f"{side}_bsr_luck"],
+            "off_dan": gf[f"{side}_dan"],
+            "off_travel_km": gf[f"{side}_travel_km"],
+            "off_tz_delta": gf[f"{side}_tz_delta"],
+            # ---- audit wave (2026-07-14) ----
+            # rank 8: the walk channel + patience_wild collision carrier
+            "off_bb_pct": gf[f"{side}_bb_pct"],
+            "opp_ps_bb_bf": gf[f"{opp}_ps_bb_bf"],
+            "lg_bb_pa": gf["lg_bb_pa"],
+            # rank 9: starter-length/pen innings split + leash + the handoff
+            # run gap; gray rider: the opposing pen's HL-outs mixture weight
+            "opp_ps_len": gf[f"{opp}_p_ip_per_start"],
+            "opp_st_outs_pg": gf[f"{opp}_st_outs_pg"],
+            "opp_penhl_share": gf[f"{opp}_penhl_share"],
+            # rank 32: venue run-dispersion (totals-tail pricing input)
+            "park_vmr": gf["park_vmr"],
+            # rank 33: the lineup's platoon edge tonight
+            "off_lu_vsh_edge": gf[f"{side}_lu_vsh_edge"],
+            "off_lu_vsh_kedge": gf[f"{side}_lu_vsh_kedge"],
+            "is_dh": gf["is_dh"], "dh_game2": gf["dh_game2"],
+            "ump_r_g": gf["ump_r_g"], "Precip": gf["Precip"],
             "park_hr_pg": gf["park_hr_pg"], "park_r_pg": gf["park_r_pg"],
             "park_h_pg": gf["park_h_pg"], "park_2b_pg": gf["park_2b_pg"],
             "park_tb_pg": gf["park_tb_pg"],
@@ -3349,6 +4982,7 @@ def build_team_game_frame(gf):
             "y_runs": pd.to_numeric(gf[score], errors="coerce"),
         })
         add_wind_carry(d)      # general out/in carry wind (wind_carry)
+        add_team_game_derived(d)   # air x lineup air profile (#30)
         frames.append(d)
     return pd.concat(frames, ignore_index=True)
 
@@ -3377,7 +5011,29 @@ def team_game_feature_cols():
             # own lineup baserunning, opposing starter's TTO decay
             "opp_def_p_oaa", "opp_def_p_if", "opp_def_p_of",
             "off_lu_brr", "off_lu_brr_xb", "opp_ps_tto_decay",
-            "wind_carry", "lg_r_pa", "lg_hr_pa"]
+            "wind_carry", "lg_r_pa", "lg_hr_pa",
+            # 2026-07-14 finish batch: B-lineup quality gap (#19), air x
+            # lineup air profile (#30), cross-grain arsenal collision
+            # (#32), BaseRuns cluster luck (#20), ump run environment
+            # (#21), schedule/travel + doubleheader flags (#18/#24),
+            # precip (#11 close-out)
+            "off_lu_obp_gap", "off_lu_slg_gap",
+            "off_lu_pullair", "air_lu_fly", "off_lu_arswh",
+            "off_bsr_luck", "ump_r_g",
+            "off_dan", "off_travel_km", "off_tz_delta",
+            "is_dh", "dh_game2", "Precip",
+            # ---- audit wave (2026-07-14, AUDIT_BUILD_SPECS_0714.md) ----
+            # rank 8: the walk channel + patience x wildness collision
+            "off_bb_pct", "opp_ps_bb_bf", "patience_wild",
+            # rank 9: starter length/leash + the handoff run gap; gray
+            # rider: the opposing pen's HL-outs mixture weight
+            "opp_ps_len", "opp_st_outs_pg", "xpen_r_gap", "opp_penhl_share",
+            # rank 32: venue run-dispersion (also fed to the totals-tail
+            # NB pricing; near-zero for the mean-objective GBM, that's fine)
+            "park_vmr",
+            # rank 33: the lineup's platoon edge (weak measured value —
+            # selection dropping it is informative, per the accept policy)
+            "off_lu_vsh_edge", "off_lu_vsh_kedge"]
 
 
 # --------------------------------------------------------------- inference
@@ -3452,6 +5108,16 @@ class Stores:
             r["oaa"].drop_duplicates(["Team", "Year"], keep="last")
             .set_index(["Team", "Year"])
             if r.get("oaa") is not None else None)
+        # team battery quality (2026-07-15), prior-season like team OAA
+        self.cat_prior = (
+            r["cat"].drop_duplicates(["Team", "Year"], keep="last")
+            .set_index(["Team", "Year"])
+            if r.get("cat") is not None else None)
+        # paired IL stints per player, activation-sorted (2026-07-15)
+        self.il_by_player = (
+            {pid: g for pid, g in _il_stint_table(r["il"]).groupby(
+                "PlayerId", sort=False)}
+            if r.get("il") is not None else None)
         self.oaa_p_prior = (
             r["oaa_players"].drop_duplicates(["PlayerId", "Year"], keep="last")
             .set_index(["PlayerId", "Year"])
@@ -3475,7 +5141,7 @@ class Stores:
             uh["HpUmpId"] = pd.to_numeric(uh["HpUmpId"], errors="coerce")
             uh = uh.dropna(subset=["HpUmpId"]).copy()
             uh["HpUmpId"] = uh["HpUmpId"].astype("int64")
-            for s in ("g_SO", "g_BB", "g_BF"):
+            for s in ("g_SO", "g_BB", "g_BF", "g_R"):
                 uh[s] = pd.to_numeric(uh[s], errors="coerce").fillna(0.0)
             self.ump_hist = _LazyGroups(uh, "HpUmpId")
         tick("building team/park tables...")
@@ -3487,6 +5153,33 @@ class Stores:
             ["Team", "Date"])["pen_np_l3"]
         self._pen_fat_max = self._pen_fat.index.get_level_values("Date").max()
         self.def_tab = _team_defense_table(r["gp"])
+        # 2026-07-14 finish batch: manager's-leash table (#16), trailing
+        # BaseRuns luck (#20), per-team schedule history + park coords for
+        # travel/day-night (#18), all mirroring their vectorized tables
+        self.lea_tab = _team_starter_outs_table(r["gp"])
+        self._bsr = _team_bsr_table(r["gb"]).set_index(
+            ["Team", "Date"])["bsr_luck"]
+        self._bsr_max = self._bsr.index.get_level_values("Date").max()
+        # audit wave: opponent HL-arm availability (#22, share unavailable
+        # tonight), the prior-season league SB/27 regime centering (ranks
+        # 4/24), and per-(pitcher, season) arsenal breadth/trajectory (#22)
+        self._pen_unavail = _pen_unavail_table(r["gp"]).set_index(
+            ["Team", "Date"])["pen_hl_unavail"]
+        self._pen_unavail_max = (self._pen_unavail.index
+                                 .get_level_values("Date").max())
+        self.lg_sb27 = _league_sb27_table(r["pit_season"]).set_index(
+            "Season")["lg_sb27_prior"]
+        self.ars_dyn = _arsenal_dynamics(r["ars_p"]).set_index(
+            ["PlayerId", "Season"])
+        rows = []
+        for tc in ("AwayTeam", "HomeTeam"):
+            rows.append(r["games"][["GamePk", "Date", "Venue", "DayNight"]]
+                        .assign(Team=r["games"][tc]))
+        self.sched_hist = _LazyGroups(
+            pd.concat(rows, ignore_index=True), "Team")
+        self.park_coords = {v: (row["Lat"], row["Lon"])
+                            for v, row in r["parks"].set_index("Ballpark")
+                            [["Lat", "Lon"]].iterrows()}
         self.tsb_tab = _team_sb_allowed_table(r["gb"])
         self.park_tab = _park_table(r["gb"], r["games"])
         self.phh_tab = _park_hand_hr_table(r["gb"], r["games"], r["hands"])
@@ -3583,8 +5276,8 @@ class Stores:
         zero = {k: 0 for k in BAT_STATS}
         if h is None or h.empty:
             for pre in ["c", "s"]:
-                for k in ["PA", "hr_pa", "tb_ab", "h_ab", "k_pct", "bb_pct",
-                          "iso", "xbh_ab", "obp"]:
+                for k in ["PA", "TB", "hr_pa", "tb_ab", "h_ab", "k_pct",
+                          "bb_pct", "iso", "xbh_ab", "obp"]:
                     out[f"{pre}_{k}"] = np.nan
                 out.update(shrunk_from_sums(zero, pre))  # 0 sums -> priors
             out.update(g_career=0, g_season=0, days_rest=np.nan,
@@ -3592,20 +5285,26 @@ class Stores:
                        pos_dh_share=np.nan, _obpp=np.nan, _slgp=np.nan,
                        _obpp_d=np.nan, _slgp_d=np.nan)
             out["c_sb_succ"] = SB_SUCC_PRIOR  # shrink of zero sums
+            # audit wave rank 4: reach-first / attempt priors on zero sums
+            out["ob1_sh"] = OB1_PRIOR
+            out["sb_att1"] = SB_ATT_PRIOR
             for w in ROLL_WINDOWS:
                 for k in ["PA", "hr_pa", "tb_ab", "k_pct"]:
                     out[f"r{w}_{k}"] = np.nan
                 out.update(shrunk_from_sums(zero, f"r{w}", roll=True))
             out.update(decayed_feats({s: 0.0 for s in DECAY_STATS}))
             out["_dk_AB"] = out["_dk_H"] = out["_dk_SO"] = 0.0   # hit_luck inputs
+            out["_dk_RBI"] = out["_dk_LOB"] = out["_dk_PA"] = 0.0   # d_rob_pa
             out["xpa_bat"] = XPA_PRIOR      # zero decayed sums -> the prior
+            _zero_thr = {k: 0.0 for k in THRESH_HIST}
             for pre in ("c", "s", "d"):     # zero sums -> the league priors
-                out.update(hrr_hist_feats({"HRR2": 0.0, "HRR3": 0.0}, 0.0, pre))
+                out.update(hrr_hist_feats(_zero_thr, 0.0, pre))
         else:
             hs = h[h["Season"] == season]
             for pre, frame in [("c", h), ("s", hs)]:
                 sums = frame[BAT_STATS].sum()
                 out[f"{pre}_PA"] = sums["PA"]
+                out[f"{pre}_TB"] = sums["TB"]   # rank 33 vsh-edge baseline
                 out[f"{pre}_hr_pa"] = sums["HR"] / sums["PA"] if sums["PA"] else np.nan
                 out[f"{pre}_tb_ab"] = sums["TB"] / sums["AB"] if sums["AB"] else np.nan
                 out[f"{pre}_h_ab"] = sums["H"] / sums["AB"] if sums["AB"] else np.nan
@@ -3624,6 +5323,14 @@ class Stores:
                                        if sums["PA"] else np.nan)
                     out["c_sb_succ"] = ((sums["SB"] + SB_SUCC_K * SB_SUCC_PRIOR)
                                         / (sums["SB"] + sums["CS"] + SB_SUCC_K))
+                    # audit wave rank 4: reach-first rate + attempt/opp
+                    _ob1 = (sums["H"] - sums["2B"] - sums["3B"] - sums["HR"]
+                            + sums["BB"] + sums["HBP"])
+                    out["ob1_sh"] = ((_ob1 + OB1_K * OB1_PRIOR)
+                                     / (sums["PA"] + OB1_K))
+                    out["sb_att1"] = ((sums["SB"] + sums["CS"]
+                                       + SB_ATT_K * SB_ATT_PRIOR)
+                                      / (_ob1 + SB_ATT_K))
                     out["_obpp"] = ((sums["H"] + sums["BB"] + sums["HBP"])
                                     / sums["PA"] if sums["PA"] else np.nan)
                     out["_slgp"] = (sums["TB"] / sums["AB"]
@@ -3650,6 +5357,8 @@ class Stores:
             out.update(decayed_feats(dks))
             out["_dk_AB"], out["_dk_H"], out["_dk_SO"] = (   # hit_luck inputs
                 dks["AB"], dks["H"], dks["SO"])
+            out["_dk_RBI"], out["_dk_LOB"], out["_dk_PA"] = (   # d_rob_pa
+                dks["RBI"], dks["LOB"], dks["PA"])
             # decayed PA per game (exposure), same shrink as the frame
             out["xpa_bat"] = ((dks["PA"] + XPA_K * XPA_PRIOR)
                               / (float(wd.sum()) + XPA_K))
@@ -3704,7 +5413,7 @@ class Stores:
         if h is None or h.empty:
             return nan
         ev, la = h["ExitVelo"], h["LaunchAngle"]
-        pull, pullair = _spray_flags(h)
+        pull, pullair, oppo, oppoair = _spray_flags(h)
         parts = {
             "n": np.ones(len(h)),
             "ev_n": ev.notna().to_numpy(dtype="float64"),
@@ -3727,6 +5436,10 @@ class Stores:
             "hc_n": h["HcX"].notna().to_numpy(dtype="float64"),
             "pull_n": pull.astype(float),
             "pullair_n": pullair.astype(float),
+            # audit wave (rank 13): oppo spray bins + the 105+ EV tail
+            "oppo_n": oppo.astype(float),
+            "oppoair_n": oppoair.astype(float),
+            "ev105_n": (ev >= 105).to_numpy(dtype="float64"),
         }
         cs = {k: float(v.sum()) for k, v in parts.items()}
         wd = np.exp(-DECAY_LAM
@@ -3935,6 +5648,36 @@ class Stores:
             return np.nan
         return self._prior_val(self.oaa_prior, team, season, "OAA_per162")
 
+    def catcher_feats(self, team, season, prefix):
+        """Prior-season team battery quality (2026-07-15): framing runs
+        per 2000 called pitches, CS-above-average per attempt, pop time.
+        prefix = "opp" (batter rows) or "own" (starter rows)."""
+        src = {"FrameRV_pt": f"{prefix}_cat_frame",
+               "CSAA_att": f"{prefix}_cat_csaa",
+               "PopTime": f"{prefix}_cat_pop",
+               "PopC": f"{prefix}_cat_popc"}
+        if self.cat_prior is None:
+            return {v: np.nan for v in src.values()}
+        return {v: self._prior_val(self.cat_prior, team, season, k)
+                for k, v in src.items()}
+
+    def il_feats(self, pid, date, pre=""):
+        """IL return context (2026-07-15) — mirror of _il_asof. An unknown
+        starter (sentinel/None) stays NaN across the board; a known player
+        with no completed stint gets the informative 0.0 flags."""
+        cols = [f"{pre}{c}" for c in IL_FEATS]
+        if self.il_by_player is None or not pid or pid == -1:
+            return {c: np.nan for c in cols}
+        g = self.il_by_player.get(pid)
+        h = g[g["ActDate"] <= date] if g is not None else None
+        if h is None or h.empty:
+            return il_feats_from_stint(date, pd.NaT, np.nan, np.nan,
+                                       np.nan, pre)
+        last = h.iloc[-1]
+        return il_feats_from_stint(date, last["ActDate"],
+                                   last["StintDays"], last["Rehab"],
+                                   last["_szn_days"], pre)
+
     def milb_feats(self, pid, season, kind):
         """MiLB translated-prior features for one batter ("bat") or
         starter ("pit"), exact-season lookup — parity with the frames'
@@ -3950,10 +5693,11 @@ class Stores:
         return {c: np.nan for c in cols}
 
     def ump_feats(self, ump_id, date):
-        """HP-umpire zone tendency (K%/BB% per batter faced) over his games
-        strictly before `date`. Unknown ump / no file -> the league prior
-        (neutral), matching the vectorized _ump_asof exactly."""
-        so = bb = bf = 0.0
+        """HP-umpire zone tendency (K%/BB% per batter faced) and run
+        environment (shrunk R/G, #21) over his games strictly before
+        `date`. Unknown ump / no file -> the league priors (neutral),
+        matching the vectorized _ump_asof exactly."""
+        so = bb = bf = runs = n = 0.0
         if ump_id is not None and self.ump_hist is not None:
             h = self.ump_hist.get(int(ump_id))
             if h is not None:
@@ -3961,8 +5705,11 @@ class Stores:
                 so = float(h["g_SO"].sum())
                 bb = float(h["g_BB"].sum())
                 bf = float(h["g_BF"].sum())
+                runs = float(h["g_R"].sum())
+                n = float(len(h))
         k, w = _ump_shrink(so, bb, bf)
-        return {"ump_k_pct": k, "ump_bb_pct": w}
+        return {"ump_k_pct": k, "ump_bb_pct": w,
+                "ump_r_g": _ump_rg_shrink(runs, n)}
 
     def _pd_sums(self, groups, pid, date):
         """(career sums, decayed sums) of the pitch-daily rows before
@@ -3990,6 +5737,9 @@ class Stores:
         nan["pd_fbv_tr"] = np.nan
         nan["pd_fbv_sd"] = np.nan
         nan["pd_rel_sd"] = np.nan
+        nan["pd_fbv_fade"] = np.nan
+        nan["pd_stretch_vdelta_d"] = np.nan
+        nan["pd_relsep_d"] = np.nan
         cs, dk = self._pd_sums(self.pd_pitcher_hist, pid, date)
         if cs is None:
             return nan
@@ -4006,6 +5756,16 @@ class Stores:
             dk["fb_n"], dk["fb_v"], dk["fb_v2"]))
         out["pd_rel_sd"] = float(release_scatter_from_sums(
             dk["rp_n"], dk["rp_x"], dk["rp_x2"], dk["rp_z"], dk["rp_z2"]))
+        # v6 (#26): decayed weighted-mean per-start velo-fade slope
+        out["pd_fbv_fade"] = float(fbv_fade_from_sums(
+            dk["fade_w"], dk["fade_num"]))
+        # v7 audit wave (rank 27): base-out stretch delta + per-class
+        # release separation (effprem/brkmov ride the names_d loop)
+        out["pd_stretch_vdelta_d"] = float(stretch_vdelta_from_sums(
+            dk["fb_n"], dk["fb_v"], dk["fbstr_n"], dk["fbstr_v"]))
+        out["pd_relsep_d"] = float(release_sep_from_sums(
+            dk["rpf_n"], dk["rpf_x"], dk["rpf_z"],
+            dk["rpb_n"], dk["rpb_x"], dk["rpb_z"]))
         return out
 
     def pd_batter_feats(self, pid, date):
@@ -4053,7 +5813,10 @@ class Stores:
         return {c: self._prior_val(self.pit_prior, pid, season, c)
                 for c in ["pit_goao", "psb_sb27", "psb_stop"]}
 
-    def starter_feats(self, pid, date, season, prefix=""):
+    def starter_feats(self, pid, date, season, prefix="", home=None):
+        """`home` (0/1) = the starter's OWN venue context tonight — feeds
+        the pvloc_* venue split (#23); None -> shrunk-to-prior at zero
+        sums, matching a no-history merge."""
         hist = self.starts_by_player.get(pid)
         out = {}
         h = hist[hist["Date"] < date] if hist is not None else None
@@ -4061,12 +5824,17 @@ class Stores:
             keys = ["p_starts_career", "p_starts_season", "p_days_rest",
                     "p_np_last", "p_np_l3",
                     "pc_BF", "pc_hr_bf", "pc_k_bf", "pc_bb_bf", "pc_h_bf",
-                    "pc_era", "pc_strike_pct",
+                    "pc_era", "pc_strike_pct", "pc_chaos_bf", "pc_hbp_bf",
                     "ps_BF", "ps_hr_bf", "ps_k_bf", "ps_bb_bf", "ps_h_bf",
-                    "ps_era", "ps_strike_pct",
+                    "ps_era", "ps_strike_pct", "ps_chaos_bf", "ps_hbp_bf",
                     "p5_hr_bf", "p5_k_bf", "p5_h_bf", "p5_bb_bf",
-                    "p_ip_per_start"]
-            return {k: np.nan for k in keys}
+                    "p_ip_per_start", "p_outs_sd", "p_short_share",
+                    "pc_NP", "pc_Outs"]   # rank 25 economy inputs
+            nan = {k: np.nan for k in keys}
+            # zero venue-split sums -> the shrinkage priors (vectorized
+            # rows with no history land there too)
+            nan.update(pvloc_from_sums(0.0, 0.0, 0.0, 0.0, 0.0))
+            return nan
         hs = h[h["Season"] == season]
         out["p_starts_career"] = len(h)
         out["p_starts_season"] = len(hs)
@@ -4081,6 +5849,15 @@ class Stores:
             out[f"{pre}_era"] = s["ER"] * 27 / s["Outs"] if s["Outs"] else np.nan
             out[f"{pre}_strike_pct"] = (s["Strikes"] / s["NP"]
                                         if s["NP"] else np.nan)
+            # audit wave rank 21: shrunk chaos + HBP channels
+            out[f"{pre}_chaos_bf"] = ((s["WP"] + s["BK"]
+                                       + CHAOS_K * CHAOS_PRIOR)
+                                      / (s["BF"] + CHAOS_K))
+            out[f"{pre}_hbp_bf"] = ((s["HBP"] + HBP_K * HBP_PRIOR)
+                                    / (s["BF"] + HBP_K))
+            if pre == "pc":   # rank 25 pitch-economy inputs (raw sums)
+                out["pc_NP"] = s["NP"]
+                out["pc_Outs"] = s["Outs"]
         t5 = h.tail(5)[["BF", "HR", "SO", "H", "BB"]].sum()
         out["p5_hr_bf"] = t5["HR"] / t5["BF"] if t5["BF"] else np.nan
         out["p5_k_bf"] = t5["SO"] / t5["BF"] if t5["BF"] else np.nan
@@ -4089,26 +5866,80 @@ class Stores:
         out["p_ip_per_start"] = (hs["Outs"].sum() / 3 / len(hs)) if len(hs) else np.nan
         out["p_np_last"] = h["NP"].iloc[-1]
         out["p_np_l3"] = h.tail(3)["NP"].mean()
+        # outing shape (#16): career outing-length SD + short-start share
+        # of the last SHORT_SHARE_WIN starts, mirroring _starter_asof
+        outs = h["Outs"].to_numpy(dtype="float64")
+        out["p_outs_sd"] = float(outs_sd_from_sums(
+            len(h), outs.sum(), (outs ** 2).sum()))
+        t10 = h.tail(SHORT_SHARE_WIN)["Outs"]
+        out["p_short_share"] = (float((t10 <= SHORT_START_OUTS).mean())
+                                if len(t10) >= SHORT_SHARE_MIN else np.nan)
+        # venue split (#23) for tonight's context
+        if home in (0, 1):
+            hv = h[h["Home"] == home]
+            sv = hv[PVLOC_STATS].sum()
+            out.update(pvloc_from_sums(sv["BF"], sv["HR"], sv["SO"],
+                                       sv["ER"], sv["Outs"]))
+        else:
+            out.update(pvloc_from_sums(0.0, 0.0, 0.0, 0.0, 0.0))
         return out
 
     def team_offense(self, team, season, date, prefix="toff"):
         row = self._cum(self.team_tab, {"Team": team, "Season": season}, date)
         if row is None:
             return {f"{prefix}_hr_pa": np.nan, f"{prefix}_r_pg": np.nan,
-                    f"{prefix}_k_pct": np.nan, f"{prefix}_bb_pct": np.nan}
+                    f"{prefix}_k_pct": np.nan, f"{prefix}_bb_pct": np.nan,
+                    f"{prefix}_obp": np.nan, f"{prefix}_slg": np.nan}
         return {f"{prefix}_hr_pa": row["cum_HR"] / row["cum_PA"],
                 f"{prefix}_r_pg": row["cum_R"] / row["cum_n"],
                 f"{prefix}_k_pct": row["cum_SO"] / row["cum_PA"],
-                f"{prefix}_bb_pct": row["cum_BB"] / row["cum_PA"]}
+                f"{prefix}_bb_pct": row["cum_BB"] / row["cum_PA"],
+                # season OBP/SLG norms — the B-lineup gap's team side (#19)
+                f"{prefix}_obp": ((row["cum_H"] + row["cum_BB"]
+                                   + row["cum_HBP"]) / row["cum_PA"]),
+                f"{prefix}_slg": row["cum_TB"] / row["cum_AB"]}
+
+    def team_sched(self, team, date, venue, day_night):
+        """Schedule context off the team's previous game (2026-07-14 #18):
+        day_after_night / travel_km / tz_delta via the shared
+        sched_from_prev, from the games file's per-team history."""
+        hist = self.sched_hist.get(team)
+        h = hist[hist["Date"] < date] if hist is not None else None
+        if h is None or h.empty:
+            return sched_from_prev(None, None, None, date, None, venue,
+                                   self.park_coords)
+        prev = h.iloc[-1]
+        return sched_from_prev(prev["Date"], prev["Venue"],
+                               _dn1(prev["DayNight"]), date,
+                               _dn1(day_night), venue, self.park_coords)
+
+    def team_bsr(self, team, date):
+        """Trailing-30-day BaseRuns luck residual (#20). Table rows exist a
+        week past the data horizon; missing (thin window / far future) ->
+        NaN, matching the vectorized left-merge."""
+        try:
+            return float(self._bsr.loc[(team, date)])
+        except KeyError:
+            return np.nan
+
+    def team_st_outs(self, team, season, date):
+        """The manager's leash (#16): team's as-of season starter outs/game."""
+        row = self._cum(self.lea_tab, {"Team": team, "Season": season}, date)
+        if row is None:
+            return np.nan
+        return row["cum_Outs"] / row["cum_n"]
 
     def bullpen(self, team, season, date, prefix="pen"):
         row = self._cum(self.pen_tab, {"Team": team, "Season": season}, date)
         if row is None:
             return {f"{prefix}_hr_bf": np.nan, f"{prefix}_k_bf": np.nan,
-                    f"{prefix}_h_bf": np.nan, f"{prefix}_era": np.nan}
+                    f"{prefix}_h_bf": np.nan, f"{prefix}_bb_bf": np.nan,
+                    f"{prefix}_era": np.nan}
         return {f"{prefix}_hr_bf": row["cum_HR"] / row["cum_BF"],
                 f"{prefix}_k_bf": row["cum_SO"] / row["cum_BF"],
                 f"{prefix}_h_bf": row["cum_H"] / row["cum_BF"],
+                # audit wave rank 1: the pen's walk rate (xpen_bb input)
+                f"{prefix}_bb_bf": row["cum_BB"] / row["cum_BF"],
                 f"{prefix}_era": row["cum_ER"] * 27 / row["cum_Outs"]}
 
     def bullpen_hl(self, team, season, date, prefix="pen_hl"):
@@ -4119,6 +5950,15 @@ class Stores:
         return {f"{prefix}_era": row["cum_ER"] * 27 / row["cum_Outs"],
                 f"{prefix}_k_bf": row["cum_SO"] / row["cum_BF"]}
 
+    def penhl_share(self, team, season, date):
+        """Share of the pen's outs thrown by HL arms (opp_pen_bridge gray
+        rider) — the mixture weight the two pen-ERA mains can't recover."""
+        hl = self._cum(self.pen_hl_tab, {"Team": team, "Season": season}, date)
+        pen = self._cum(self.pen_tab, {"Team": team, "Season": season}, date)
+        if hl is None or pen is None or not pen["cum_Outs"]:
+            return np.nan
+        return hl["cum_Outs"] / pen["cum_Outs"]
+
     def pen_fatigue(self, team, date):
         """Bullpen pitches thrown over the trailing PEN_FATIGUE_DAYS days.
         Uses the same table as training; dates past the table's horizon
@@ -4127,6 +5967,31 @@ class Stores:
             return float(self._pen_fat.loc[(team, date)])
         except KeyError:
             return 0.0 if date > self._pen_fat_max else np.nan
+
+    def pen_unavail(self, team, date):
+        """Backlog #22: share of the team's HL relief capacity likely
+        unavailable tonight (arms up both previous days). Past the table
+        horizon -> 0 (fully rested); pre-first-save -> NaN like training."""
+        try:
+            return float(self._pen_unavail.loc[(team, date)])
+        except KeyError:
+            return 0.0 if date > self._pen_unavail_max else np.nan
+
+    def lg_sb27_prior(self, season):
+        """Prior-season league SB per 27 outs (ranks 4/24 centering)."""
+        try:
+            return float(self.lg_sb27.loc[int(season)])
+        except KeyError:
+            return np.nan
+
+    def arsenal_dynamics(self, pid, season):
+        """Arsenal breadth/trajectory for one pitcher (#22), exact-season
+        lookup mirroring the frames' _arsenal_dynamics merge."""
+        try:
+            row = self.ars_dyn.loc[(int(pid), int(season))]
+            return {c: float(row[c]) for c in ARS_DYN_COLS}
+        except KeyError:
+            return {c: np.nan for c in ARS_DYN_COLS}
 
     def team_offense_loc(self, team, season, home, date, prefix="toff_loc"):
         """Team offense in one venue context (home=1 / road=0), as-of."""
@@ -4187,7 +6052,8 @@ class Stores:
     def park(self, venue, date):
         out = {"LF": np.nan, "CF": np.nan, "RF": np.nan, "Elevation_ft": np.nan,
                "park_hr_pg": np.nan, "park_r_pg": np.nan, "park_h_pg": np.nan,
-               "park_2b_pg": np.nan, "park_tb_pg": np.nan}
+               "park_2b_pg": np.nan, "park_3b_pg": np.nan,
+               "park_tb_pg": np.nan, "park_vmr": np.nan}
         if venue in self.parks.index:
             p = self.parks.loc[venue]
             out.update(LF=p["LF"], CF=p["CF"], RF=p["RF"],
@@ -4197,8 +6063,11 @@ class Stores:
             n = row["cum_n"]
             for stat, col in (("HR", "park_hr_pg"), ("R", "park_r_pg"),
                               ("H", "park_h_pg"), ("2B", "park_2b_pg"),
-                              ("TB", "park_tb_pg")):
+                              ("3B", "park_3b_pg"), ("TB", "park_tb_pg")):
                 out[col] = row[f"cum_{stat}"] / n
+            # audit wave rank 32: venue run-dispersion (shared helper)
+            out["park_vmr"] = float(park_vmr_from_sums(
+                n, row["cum_R"], row["cum_R2"]))
         return out
 
     def bio(self, pid):

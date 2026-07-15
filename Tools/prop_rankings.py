@@ -70,6 +70,13 @@ BIN_NAMES = {  # Batter Props sheet, probability columns
     "bb":     "Batter BB",
     "bk":     "Batter K",
     "bk2":    "Batter 2+ K",
+    "bk3":    "Batter 3+ K",
+    "tb3":    "Batter 3+ TB",
+    "tb4":    "Batter 4+ TB",
+    "hrr4":   "Batter H+R+RBI 4+",
+    "triple": "Batter Triple",
+    "rbi2":   "Batter 2+ RBI",
+    "run2":   "Batter 2+ Runs",
     "hit":    "Batter Hit",
     "hits2":  "Batter 2+ Hits",
     "single": "Batter Single",
@@ -83,11 +90,12 @@ BIN_NAMES = {  # Batter Props sheet, probability columns
 # O/U count columns, split by what the column IS in the workbook:
 #   PITCHER_CNT — standalone O/U markets; the model is the SOLE pricer of
 #     every line the book posts -> AUC/ECE/Edge% grade the FULL line family.
-#   BATTER_X — expected-count context columns; their half-point lines are
-#     priced (better) by the binary rows -> AUC/ECE grade ONLY the deep
-#     lines they uniquely price (3+ K, 3/4+ TB, 4+ HRR); Edge% still
-#     averages every line they quote.
-#   GAME_CNT — game totals (NB-priced, no binary overlap; full family).
+#   BATTER_X — RETIRED from the board 2026-07-14 (G3): the H1 deep binary
+#     heads (bk3/tb3/tb4/hrr4) took the last lines the x-rows uniquely
+#     priced, so they have nothing left to grade as line families. Their
+#     MEANS still display and still grade (MEAN_MARKETS below).
+#   GAME_CNT — game totals (no binary overlap; full family) + the H5
+#     per-team total lines (2026-07-14).
 PITCHER_CNT = {
     "k":     "Pitcher K > x",
     "outs":  "Pitcher Outs > x",
@@ -95,12 +103,8 @@ PITCHER_CNT = {
     "pbb":   "Pitcher BB > x",
     "per":   "Pitcher ER > x",
 }
-BATTER_X = {
-    "xbk":   "Batter xSO",
-    "xtb":   "Batter xTB",
-    "xhrr":  "Batter xHRR",
-}
-GAME_CNT = {"total": "Game Runs > x"}
+BATTER_X = {}
+GAME_CNT = {"total": "Game Runs > x", "team_total": "Team Runs > x"}
 CNT_MARKETS = {**PITCHER_CNT, **BATTER_X, **GAME_CNT}
 
 # The displayed expected-count (mean) columns, named as the workbook names
@@ -112,6 +116,12 @@ MEAN_MARKETS = {
     "xbk":   "Batter xSO",
     "xtb":   "Batter xTB",
     "xhrr":  "Batter xHRR",
+    # H6 (2026-07-14): the rest of the expected-stat-line — means only,
+    # their banked line calibrators never ship (binaries own the lines)
+    "xh":    "Batter xH",
+    "xrun":  "Batter xR",
+    "xrbi":  "Batter xRBI",
+    "xbb":   "Batter xBB",
     "k":     "Pitcher xK",
     "outs":  "Pitcher xOuts",
     "pha":   "Pitcher xHits",
@@ -120,11 +130,12 @@ MEAN_MARKETS = {
     "total": "Game Total Runs",
 }
 
-# Which of an x-column's lines the BINARY columns already price (bk = 1+ K
-# -> 0.5, bk2 -> 1.5; tb2 -> 1.5; hrr2/hrr3 -> 1.5/2.5). Pure workbook
-# structure — which column sells which number — NOT market data: the
-# x-row's AUC/ECE describe only the deep lines it uniquely prices.
-BINARY_OWNED_LINES = {"xbk": {0.5, 1.5}, "xtb": {1.5}, "xhrr": {1.5, 2.5}}
+# Which of an x-column's lines the BINARY columns already price. After the
+# H1 heads (2026-07-14) the binaries own EVERY line the x-heads quote
+# (bk/bk2/bk3 -> 0.5/1.5/2.5; tb2/tb3/tb4 -> 1.5/2.5/3.5; hrr2/3/4 ->
+# 1.5/2.5/3.5) — which is why BATTER_X retired from the line board (G3).
+BINARY_OWNED_LINES = {"xbk": {0.5, 1.5, 2.5}, "xtb": {1.5, 2.5, 3.5},
+                      "xhrr": {1.5, 2.5, 3.5}}
 
 # ---------------------------------------------------- score construction
 # Skill is EDGE-LED. The relative log-loss beat is a PROPER score — it
@@ -320,17 +331,20 @@ def winner_year(snap):
     }
 
 
-def count_lines(name, head, k_disp, total_disp):
+def count_lines(name, head, k_disp, total_disp, art=None):
     """The lines a count column prices and its P(over) pricer, mirroring
     serving: per-line calibrators via count_over (which itself prices the
     NB_PRICED_TARGETS heads, e.g. per, with the negative binomial), NB for
-    starter K and game totals."""
+    starter K and game totals; team_over for the H5 per-team lines."""
     if name == "k":
         return P.K_LINES, lambda mu, ln: np.array(
             [P.nb_over(m, ln, k_disp) for m in mu])
     if name == "total":
         return [6.5, 7.5, 8.5, 9.5, 10.5], lambda mu, ln: np.array(
             [P.nb_over(m, ln, total_disp) for m in mu])
+    if name == "team_total":
+        return P.TEAM_TOTAL_LINES, lambda mu, ln: P.team_over(art or {},
+                                                              mu, ln)
     return head["lines"], lambda mu, ln: P.count_over(head, mu, ln)
 
 
@@ -346,7 +360,7 @@ def count_year(snap, art):
         df = blob["df"]
         mu, y = df["mu"].to_numpy(), df["y"].to_numpy()
         head = heads.get(name)
-        lines, pricer = count_lines(name, head, k_disp, total_disp)
+        lines, pricer = count_lines(name, head, k_disp, total_disp, art)
         # the dispersion the head's pricer ASSUMES: NB-priced heads bake
         # their cal-year dispersion into P(over); calibrator heads price
         # each listed line empirically but extremes beyond extrapolate a
@@ -643,12 +657,12 @@ def _binlike_boot(pp, Wm):
     return sc, lift, base
 
 
-def _prep_count_family(name, snap, head, k_disp, total_disp):
+def _prep_count_family(name, snap, head, k_disp, total_disp, art=None):
     df = snap["count"][name]["df"]
     day_id, uniq = pd.factorize(df["Date"], sort=False)
     D = len(uniq)
     mu, y = df["mu"].to_numpy(float), df["y"].to_numpy(float)
-    lines, pricer = count_lines(name, head, k_disp, total_disp)
+    lines, pricer = count_lines(name, head, k_disp, total_disp, art)
     owned = BINARY_OWNED_LINES.get(name, set())
     priced_disp = (k_disp if name == "k" else total_disp if name == "total"
                    else head["disp"] if head is not None
@@ -773,8 +787,10 @@ def bootstrap_lcb(snap25, snap26, art25, art26):
     for name in snap25["count"]:
         if name not in snap26["count"]:
             continue
-        p25 = _prep_count_family(name, snap25, heads25.get(name), kd25, td25)
-        p26 = _prep_count_family(name, snap26, heads26.get(name), kd26, td26)
+        p25 = _prep_count_family(name, snap25, heads25.get(name), kd25, td25,
+                                 art25)
+        p26 = _prep_count_family(name, snap26, heads26.get(name), kd26, td26,
+                                 art26)
         W25, W26 = _draws(p25["D"], rng), _draws(p26["D"], rng)
         out["count_fam"][name] = {
             "score_lo": _lcb(_combine(_countfam_boot(p25, W25),
@@ -967,6 +983,19 @@ def _rank_and_tier(df):
 def build_table():
     snap25 = joblib.load(ART / "eval_paired_select_2025.joblib")
     snap26 = joblib.load(ART / "eval_paired_2026.joblib")
+    # audit #6 (user decision 07-15): the 2026 snapshot refreshes only on a
+    # DELIBERATE `evaluate_deep --confirm --set-baseline` (the daily job no
+    # longer touches it), so it legitimately ages between confirms.
+    try:
+        age = ((ART / "eval_paired_select_2025.joblib").stat().st_mtime
+               - (ART / "eval_paired_2026.joblib").stat().st_mtime) / 86400.0
+        if age > 2:
+            print(f"note: 2026 snapshot is ~{age:.0f} day(s) older than the "
+                  f"2025 one — expected under manual-confirm-only (refresh "
+                  f"via evaluate_deep --confirm --set-baseline after a "
+                  f"finished change).")
+    except OSError:
+        pass
     art25 = joblib.load(ART / "models_bt.joblib")
     art26 = joblib.load(ART / "models.joblib")
 

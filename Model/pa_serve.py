@@ -20,24 +20,14 @@ import numpy as np
 import pandas as pd
 
 from pa_model import FRAME_CACHE
-from pa_sim import STEAL_K_ATT, STEAL_K_SUCC, TIER_EDGES
+from pa_sim import (STEAL_K_ATT, STEAL_K_SUCC, hazard_slice_v2,
+                    starter_exp_bf)
 from pa_engine import MatchupFeatures, PackedTransitions, GameSim
 
 HERE = Path(__file__).resolve().parent
 ART = HERE / "artifacts"
 
 N_SIMS = 2000
-
-
-def _tier(bf_tables, starter, date, k_last=30):
-    dates, bfs = bf_tables["by_pitcher"].get(int(starter), (None, None))
-    mean_bf = 23.0
-    if dates is not None:
-        i = np.searchsorted(dates, np.datetime64(date))
-        hist = bfs[max(0, i - k_last):i]
-        if len(hist) >= 5:
-            mean_bf = float(hist.mean())
-    return int(np.searchsorted(TIER_EDGES, mean_bf))
 
 
 class SlateSim:
@@ -119,12 +109,22 @@ class SlateSim:
             steal[side] = self._steal(lus[side], date)
 
         bf_t = self.tables["starter_bf"]
-        hzt = self.tables["starter_hazard"]["hazard"]
+        # hazard v2 (2026-07-14): per-starter absolute-BF slice of the
+        # relative-BF hook table (his own leash)
+        hz2 = self.tables["starter_hazard_v2"]["hazard"]
         bf = {s: np.array([22, 23, 24], np.int16) for s in ("away", "home")}
-        hazard = {"away": hzt[_tier(bf_t, sts["away"], date)],
-                  "home": hzt[_tier(bf_t, sts["home"], date)]}
-        seed = int(date.value // 10 ** 9) ^ hash(
-            (spec["away_team"], spec["home_team"])) & 0x7fffffff
+        hazard = {"away": hazard_slice_v2(hz2, starter_exp_bf(
+                      bf_t, sts["away"], date)),
+                  "home": hazard_slice_v2(hz2, starter_exp_bf(
+                      bf_t, sts["home"], date))}
+        # deterministic across processes (audit #9): builtin hash() is
+        # salted per interpreter (PYTHONHASHSEED), which made the same game
+        # sim differently in every session — ±1.1pp Monte-Carlo jitter on
+        # p(home win) at N_SIMS=2000. crc32 is stable everywhere.
+        import zlib
+        seed = int(date.value // 10 ** 9) ^ (zlib.crc32(
+            f"{spec['away_team']}|{spec['home_team']}".encode())
+            & 0x7fffffff)
         sim = GameSim(self.packed, sides, bf, steal=steal, hazard=hazard,
                       n_sims=N_SIMS, seed=seed & 0x7fffffff)
         out = sim.run()

@@ -79,6 +79,9 @@ JOB_FILES = {
     "scrape_weather.py": ["mlb_weather.csv"],
     "scrape_umpires.py": ["mlb_umpires.csv"],
     "scrape_bat_tracking.py": ["mlb_bat_tracking.csv"],
+    "scrape_linescores.py": ["mlb_linescores.csv"],
+    "scrape_catchers.py": ["mlb_catchers.csv", "mlb_catchers_team.csv"],
+    "scrape_transactions.py": ["mlb_il_events.csv", "mlb_il.csv"],
 }
 
 
@@ -210,23 +213,29 @@ def main():
             # the state right here. The experiment_in_flight() gate above
             # guarantees this only ever snapshots SHIPPED code.
             if ok:
+                # 2026-07-15 (audit #6, user decision): the daily job no
+                # longer runs `--confirm --set-baseline`. 2026 is
+                # confirm-only doctrine — its snapshot/workup refreshes ONLY
+                # when the user deliberately runs
+                #   python Model/evaluate_deep.py --confirm --set-baseline
+                # after a finished change. Blue-mark/rankings inputs read
+                # that last deliberate snapshot (it ages between confirms).
+                # Only the selection-year baseline refreshes daily.
                 ev = str(MODEL_TRAIN.parent / "evaluate_deep.py")
                 base_ok = True
                 for label, cmd in (
                         ("evaluate_deep.py --set-baseline",
-                         [ev, "--set-baseline"]),
-                        ("evaluate_deep.py --confirm --set-baseline",
-                         [ev, "--confirm", "--set-baseline"])):
+                         [ev, "--set-baseline"]),):
                     ok, took = run(label, cmd)
                     results.append((label, ok, took))
                     all_ok = all_ok and ok
                     base_ok = base_ok and ok
-                # Warm the prop-rankings bootstrap cache. The two baselines
-                # above rewrote the paired snapshots, and quality_boot.joblib
-                # is keyed by THEIR fingerprints — so it is now stale, and
-                # without this the first predict of the day would stall ~60s
-                # rebuilding it before it could paint blue marks. Needs BOTH
-                # baselines (the cache key spans both years).
+                # Warm the prop-rankings bootstrap cache. The selection
+                # baseline above rewrote its paired snapshot, and
+                # quality_boot.joblib is keyed by the snapshot fingerprints
+                # (2025 daily + the last DELIBERATE 2026 confirm) — so it is
+                # now stale, and without this the first predict of the day
+                # would stall ~60s rebuilding it before painting blue marks.
                 #
                 # Deliberately NON-FATAL: it does not touch all_ok. A cold
                 # cache costs one slow serve, never correctness, and a perf

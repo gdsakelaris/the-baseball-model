@@ -385,13 +385,16 @@ class App(tk.Tk):
         self.sp_hum = add(4, "Humidity %", ttk.Spinbox(top, from_=0, to=100,
                                                        width=5), row=1)
         self.e_pres = add(5, "Pressure hPa", ttk.Entry(top, width=7), row=1)
+        # Precip (mm at start hour, Open-Meteo forecast; 2026-07-14): the
+        # outs/total heads' rain-shortening signal. Blank = NaN.
+        self.e_precip = add(6, "Precip mm", ttk.Entry(top, width=6), row=1)
         # Editable; leave blank for a neutral-ump prediction. Known names
         # resolve to an HpUmpId in _collect_spec; an unknown name -> no id.
-        self.cb_ump = add(6, "HP Umpire", ttk.Combobox(top, width=18), row=1)
+        self.cb_ump = add(7, "HP Umpire", ttk.Combobox(top, width=18), row=1)
         # spread the two input rows evenly across the panel's full width
         # (equal weights share the leftover space; no `uniform`, which would
         # force every column as wide as the Stadium box and overflow)
-        for i in range(7):
+        for i in range(8):
             top.columnconfigure(i, weight=1)
 
         self.cb_away.bind("<<ComboboxSelected>>", lambda e: self._team_changed("away"))
@@ -446,12 +449,12 @@ class App(tk.Tk):
                    command=self._add_to_slate).pack(fill="x", pady=1)
         ttk.Button(sb, text="Update selected game",
                    command=self._update_selected).pack(fill="x", pady=1)
+        ttk.Button(sb, text="🡅",
+                   command=lambda: self._move_slate(-1)).pack(fill="x", pady=1)
+        ttk.Button(sb, text="🡇",
+                   command=lambda: self._move_slate(1)).pack(fill="x", pady=1)
         ttk.Button(sb, text="Remove selected",
                    command=self._remove_from_slate).pack(fill="x", pady=1)
-        ttk.Button(sb, text="Move up",
-                   command=lambda: self._move_slate(-1)).pack(fill="x", pady=1)
-        ttk.Button(sb, text="Move down",
-                   command=lambda: self._move_slate(1)).pack(fill="x", pady=1)
         ttk.Button(sb, text="Clear slate",
                    command=self._clear_slate).pack(fill="x", pady=1)
         ttk.Button(sb, text="Load today's file",
@@ -562,6 +565,9 @@ class App(tk.Tk):
         self.e_pres.delete(0, "end")
         if spec.get("pressure") is not None:
             self.e_pres.insert(0, spec["pressure"])
+        self.e_precip.delete(0, "end")
+        if spec.get("precip") is not None:
+            self.e_precip.insert(0, spec["precip"])
         self.cb_wdir.set(spec.get("wind_dir") or "")
         self.cb_cond.set(spec.get("condition") or "")
         self.cb_ump.set(spec.get("hp_ump") or "")
@@ -619,6 +625,7 @@ class App(tk.Tk):
                 "wind_speed": num(self.sp_wind, "wind speed"),
                 "humidity": num(self.sp_hum, "humidity"),
                 "pressure": num(self.e_pres, "pressure"),
+                "precip": num(self.e_precip, "precip"),
                 "wind_dir": self.cb_wdir.get(), "condition": self.cb_cond.get()}
         ump = self.cb_ump.get().strip()
         spec["hp_ump"] = ump or None
@@ -696,6 +703,9 @@ class App(tk.Tk):
         old = self.slate[idx]
         if old.get("names"):     # keep scraped display names for re-loading
             spec["names"] = old["names"]
+        for k in ("is_dh", "dh_game2"):   # DH flags have no form field —
+            if old.get(k) is not None:    # carry the scraped values through
+                spec[k] = old[k]
         self.slate[idx] = spec
         self.lb_slate.delete(idx)
         self.lb_slate.insert(idx, self._slate_row_text(spec))

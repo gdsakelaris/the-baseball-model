@@ -13,7 +13,36 @@ per player per day of sufficient statistics:
                 edge-of-zone count (edge_n, shadow band 0.67-1.33 of
                 scaled zone), first-pitch counts (fp_n seen, fp_sw swung,
                 fp_s strike)
-  pitcher file: + fastball velo sum/count (FF+SI)
+  pitcher file: + fastball velo sum/count (FF+SI), and the v6 sequencing/
+                count-state/movement sums (2026-07-14): 0-2 waste
+                (c02_n/c02_w — located 0-2 pitches and the share thrown
+                beyond the shadow band), ahead/behind pitch-class usage
+                (ah_/bh_ n/brk/off — does the mix collapse when behind),
+                back-to-back pitch-class transitions within an at-bat
+                (tr_n pairs, tr_same repeats, tr_fbbrk fastball->breaking
+                — a tunneling/predictability proxy), per-start OLS slope
+                of FF/SI velo vs the pitcher's own pitch index (fade_w
+                weight, fade_num = slope x weight; in-game stamina), and
+                FF induced vertical break (ivb_n/ivb_sum, inches — ride)
+                + the v7 audit-wave sums (2026-07-14): FF/SI velo with
+                runners on (fbstr_n/fbstr_v — stretch-vs-windup split),
+                perceived-velo premium (fbe_n/fbe_sum = effective minus
+                release speed on FF/SI; extension), per-class release
+                centroids (rpf_/rpb_ n/x/z + x2/z2 — fastball-remainder
+                vs breaking arm-slot separation; sumsqs staged for a
+                within-class scatter refinement), and breaking-ball
+                movement magnitude (brkmov_n/brkmov_sum, inches,
+                12*hypot(pfx_x, pfx_z))
+  both (v7):    two-strike x breaking-class cell (ts_brk_n/sw/wh — the
+                putaway cell; batter side is the consumer)
+  both (v8):    damage-on-contact sums (2026-07-15): balls in play with a
+                Savant xwOBA estimate + the xwOBA sum, total (con_n/
+                con_xw) and per bucket — velo bands (fblo_/fbmid_/fb95_
+                bip + xw) and pitch classes (brk_/off_ bip + xw; the
+                fastball-remainder class is derived downstream as
+                con - brk - off, the fbk_sw/fbk_wh idiom) — the damage
+                sibling of every whiff cell, and the two-strike x elite-
+                velo cell (ts_fb95_n/sw/wh, the ts_brk mirror)
 
 From these, features can rebuild any rate (swinging-strike%, CSW%, whiff
 per swing, chase%, zone%) as career or decay-weighted as-of values —
@@ -51,6 +80,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -88,6 +118,7 @@ CHUNK_DAYS = 4                   # ~18k pitches in-season; cap guard splits
 CAP_ROWS = 24000
 SLEEP = 2.0
 REFETCH_DAYS = 2
+FADE_MIN_FB = 8                  # fastballs needed for a per-start velo slope
 
 
 def fetch_range(d0, d1, tries=3):
@@ -126,6 +157,15 @@ def aggregate(raw):
     """One Savant chunk -> (pitcher day rows, batter day rows)."""
     if raw.empty:
         return None, None
+    # canonical in-game pitch order (game, at-bat, pitch) so the v6
+    # sequencing pairs and the per-start velo-fade index are well-defined;
+    # mergesort keeps ties stable. Games never span a chunk (one day each).
+    raw = raw.copy()
+    raw["_gpk"] = pd.to_numeric(raw["game_pk"], errors="coerce")
+    raw["_abn"] = pd.to_numeric(raw["at_bat_number"], errors="coerce")
+    raw["_pnum"] = pd.to_numeric(raw["pitch_number"], errors="coerce")
+    raw = raw.sort_values(["_gpk", "_abn", "_pnum"],
+                          kind="mergesort").reset_index(drop=True)
     desc = raw["description"].astype(str)
     zone = pd.to_numeric(raw["zone"], errors="coerce")
     swing = desc.isin(SWINGS)
@@ -159,6 +199,61 @@ def aggregate(raw):
     z_sc = (pz - (top + bot) / 2).abs() / ((top - bot) / 2).clip(lower=0.1)
     loc = pd.concat([x_sc, z_sc], axis=1).max(axis=1)
     edge = (loc > EDGE_LO) & (loc <= EDGE_HI)
+    # ---- v6 sequencing / count-state / movement (2026-07-14) ----
+    # 0-2 waste: of located 0-2 pitches, the share thrown beyond the shadow
+    # band (loc > EDGE_HI = non-competitive by design)
+    is02 = (balls == 0) & (strikes == 2)
+    loc_ok = loc.notna()
+    # ahead/behind count states (0-0 and even counts sit in neither)
+    ahead = strikes > balls
+    behind = balls > strikes
+    # back-to-back pitch-class transitions within one at-bat, assigned to
+    # the SECOND pitch of the pair: same-class repeats (predictability) and
+    # fastball->breaking (the classic tunneling pair)
+    cls = pd.Series(np.where(is_brk, 1, np.where(is_off, 2, 0)),
+                    index=raw.index)
+    known = raw["pitch_type"].notna()
+    same_ab = ((raw["_gpk"] == raw["_gpk"].shift())
+               & (raw["_abn"] == raw["_abn"].shift()))
+    tr_ok = same_ab & known & known.shift(fill_value=False)
+    tr_same = tr_ok & (cls == cls.shift())
+    tr_fbbrk = tr_ok & (cls.shift() == 0) & (cls == 1)
+    # FF induced vertical break (ride), inches — pfx_z x 12 on four-seamers
+    pfz = pd.to_numeric(raw["pfx_z"], errors="coerce")
+    ivb_ok = (raw["pitch_type"] == "FF") & pfz.notna()
+    # ---- v7 audit wave (2026-07-14) ----
+    # stretch split: FF/SI velo with any runner on (pitching from the
+    # stretch) vs the windup complement (rebuilt downstream from fb_n/fb_v)
+    runners = (raw["on_1b"].notna() | raw["on_2b"].notna()
+               | raw["on_3b"].notna())
+    fbv_ok = is_fb & velo.notna()
+    # perceived-velo premium: effective (extension-adjusted) minus release
+    # speed on FF/SI — league mean drifts by tracking era (-0.56 in 2015 ->
+    # +0.30 in 2024, Hawk-Eye era ~+0.15), so downstream priors fit the
+    # recent era and the GBM absorbs the slow level shift
+    eff = pd.to_numeric(raw["effective_speed"], errors="coerce")
+    fbe_ok = fbv_ok & eff.notna()
+    # per-class release centroids: fastball-remainder class (everything not
+    # breaking/offspeed, incl. cutters — the cls==0 remainder) vs the
+    # breaking set. Between-class arm-slot separation is a deception trait
+    # the pooled rp_ scatter confounds; sumsqs are staged so a within-class
+    # scatter can be rebuilt later without another re-agg.
+    is_fbrem = known & ~is_brk & ~is_off
+    rpf_ok = is_fbrem & rp_ok
+    rpb_ok = is_brk & rp_ok
+    # breaking-ball movement magnitude (cause axis; whiff outcome already
+    # covered by brk_wh) — total break in inches from pfx components
+    pfx = pd.to_numeric(raw["pfx_x"], errors="coerce")
+    brkmov_ok = is_brk & pfx.notna() & pfz.notna()
+    # ---- v8 damage-on-contact wave (2026-07-15) ----
+    # Savant's estimated wOBA (EV+LA) on balls in play, per velo band and
+    # pitch class — the damage sibling of the whiff cells (whiff says he
+    # misses 95+; this says what happens when he doesn't). Counts gate on
+    # a present estimate, mirroring the BIP file's xw_n convention.
+    xw = pd.to_numeric(raw["estimated_woba_using_speedangle"],
+                       errors="coerce")
+    inplay = (desc == "hit_into_play") & xw.notna()
+    is_tsfb95 = two_k & is_fb95
     base = pd.DataFrame({
         "Date": pd.to_datetime(raw["game_date"]).dt.date,
         "PitcherId": pd.to_numeric(raw["pitcher"], errors="coerce"),
@@ -206,6 +301,54 @@ def aggregate(raw):
         "rp_x2": (rx ** 2).where(rp_ok).fillna(0.0),
         "rp_z": rz.where(rp_ok).fillna(0.0),
         "rp_z2": (rz ** 2).where(rp_ok).fillna(0.0),
+        "c02_n": (is02 & loc_ok).astype(float),
+        "c02_w": (is02 & (loc > EDGE_HI)).astype(float),
+        "ah_n": (ahead & known).astype(float),
+        "ah_brk": (ahead & is_brk).astype(float),
+        "ah_off": (ahead & is_off).astype(float),
+        "bh_n": (behind & known).astype(float),
+        "bh_brk": (behind & is_brk).astype(float),
+        "bh_off": (behind & is_off).astype(float),
+        "tr_n": tr_ok.astype(float),
+        "tr_same": tr_same.astype(float),
+        "tr_fbbrk": tr_fbbrk.astype(float),
+        "ivb_n": ivb_ok.astype(float),
+        "ivb_sum": (pfz * 12.0).where(ivb_ok).fillna(0.0),
+        "ts_brk_n": (two_k & is_brk).astype(float),
+        "ts_brk_sw": (two_k & is_brk & swing).astype(float),
+        "ts_brk_wh": (two_k & is_brk & whiff).astype(float),
+        "fbstr_n": (fbv_ok & runners).astype(float),
+        "fbstr_v": velo.where(fbv_ok & runners).fillna(0.0),
+        "fbe_n": fbe_ok.astype(float),
+        "fbe_sum": (eff - velo).where(fbe_ok).fillna(0.0),
+        "rpf_n": rpf_ok.astype(float),
+        "rpf_x": rx.where(rpf_ok).fillna(0.0),
+        "rpf_z": rz.where(rpf_ok).fillna(0.0),
+        "rpf_x2": (rx ** 2).where(rpf_ok).fillna(0.0),
+        "rpf_z2": (rz ** 2).where(rpf_ok).fillna(0.0),
+        "rpb_n": rpb_ok.astype(float),
+        "rpb_x": rx.where(rpb_ok).fillna(0.0),
+        "rpb_z": rz.where(rpb_ok).fillna(0.0),
+        "rpb_x2": (rx ** 2).where(rpb_ok).fillna(0.0),
+        "rpb_z2": (rz ** 2).where(rpb_ok).fillna(0.0),
+        "brkmov_n": brkmov_ok.astype(float),
+        "brkmov_sum": (12.0 * np.hypot(pfx, pfz)).where(brkmov_ok)
+                      .fillna(0.0),
+        "con_n": inplay.astype(float),
+        "con_xw": xw.where(inplay).fillna(0.0),
+        "fblo_bip": (is_fblo & inplay).astype(float),
+        "fblo_xw": xw.where(is_fblo & inplay).fillna(0.0),
+        "fbmid_bip": (is_fbmid & inplay).astype(float),
+        "fbmid_xw": xw.where(is_fbmid & inplay).fillna(0.0),
+        "fb95_bip": (is_fb95 & inplay).astype(float),
+        "fb95_xw": xw.where(is_fb95 & inplay).fillna(0.0),
+        "brk_bip": (is_brk & inplay).astype(float),
+        "brk_xw": xw.where(is_brk & inplay).fillna(0.0),
+        "off_bip": (is_off & inplay).astype(float),
+        "off_xw": xw.where(is_off & inplay).fillna(0.0),
+        "ts_fb95_n": is_tsfb95.astype(float),
+        "ts_fb95_sw": (is_tsfb95 & swing).astype(float),
+        "ts_fb95_wh": (is_tsfb95 & whiff).astype(float),
     })
     shared = ["n", "sw_n", "wh_n", "cs_n", "z_n", "oz_n", "oz_sw", "oz_wh",
               "fb95_n", "fb95_sw", "fb95_wh",
@@ -213,14 +356,60 @@ def aggregate(raw):
               "fblo_n", "fblo_sw", "fblo_wh",
               "brk_n", "brk_sw", "brk_wh", "off_n", "off_sw", "off_wh",
               "edge_n", "fp_n", "fp_sw", "fp_s", "ts_n", "ts_sw", "ts_wh",
-              "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh"]
+              "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh",
+              "ts_brk_n", "ts_brk_sw", "ts_brk_wh",
+              # v8 damage-on-contact sums + 2K x elite-velo cell
+              "con_n", "con_xw",
+              "fblo_bip", "fblo_xw", "fbmid_bip", "fbmid_xw",
+              "fb95_bip", "fb95_xw",
+              "brk_bip", "brk_xw", "off_bip", "off_xw",
+              "ts_fb95_n", "ts_fb95_sw", "ts_fb95_wh"]
     pit_stats = shared + ["fb_n", "fb_v", "fb_v2",
-                          "rp_n", "rp_x", "rp_x2", "rp_z", "rp_z2"]
+                          "rp_n", "rp_x", "rp_x2", "rp_z", "rp_z2",
+                          "c02_n", "c02_w", "ah_n", "ah_brk", "ah_off",
+                          "bh_n", "bh_brk", "bh_off",
+                          "tr_n", "tr_same", "tr_fbbrk",
+                          "ivb_n", "ivb_sum",
+                          "fbstr_n", "fbstr_v", "fbe_n", "fbe_sum",
+                          "rpf_n", "rpf_x", "rpf_z", "rpf_x2", "rpf_z2",
+                          "rpb_n", "rpb_x", "rpb_z", "rpb_x2", "rpb_z2",
+                          "brkmov_n", "brkmov_sum"]
     bat_stats = shared
     pit = (base.dropna(subset=["PitcherId"])
            .astype({"PitcherId": "int64"})
            .groupby(["PitcherId", "Date"], as_index=False)[pit_stats].sum()
            .rename(columns={"PitcherId": "PlayerId"}))
+    # per-start velo-fade slope (v6): OLS of FF/SI velo against the
+    # pitcher's own pitch index within the game (all pitches count toward
+    # the index; only fastballs enter the regression). Stored as a
+    # weight (fade_w = fastballs, gated at FADE_MIN_FB) and slope x weight
+    # (fade_num), so decayed sums rebuild a weighted mean slope — a pooled
+    # cross-game regression would conflate game intercepts, so the slope is
+    # computed per start HERE and only averaged downstream.
+    pidx = raw.groupby(["_gpk", "pitcher"]).cumcount().astype(float)
+    fb_ok = is_fb & velo.notna() & raw["_gpk"].notna()
+    fr = pd.DataFrame({
+        "PlayerId": pd.to_numeric(raw["pitcher"], errors="coerce"),
+        "Date": pd.to_datetime(raw["game_date"]).dt.date,
+        "g": raw["_gpk"], "x": pidx, "y": velo,
+        "xy": pidx * velo, "xx": pidx * pidx})[fb_ok.to_numpy()]
+    if len(fr):
+        g = fr.dropna(subset=["PlayerId"]).astype({"PlayerId": "int64"}) \
+              .groupby(["PlayerId", "Date", "g"])
+        s = g.agg(n=("y", "size"), sx=("x", "sum"), sy=("y", "sum"),
+                  sxy=("xy", "sum"), sxx=("xx", "sum")).reset_index()
+        den = s["n"] * s["sxx"] - s["sx"] ** 2
+        slope = (s["n"] * s["sxy"] - s["sx"] * s["sy"]) / den.where(den > 0)
+        ok = (s["n"] >= FADE_MIN_FB) & slope.notna()
+        s["fade_w"] = s["n"].where(ok, 0.0)
+        s["fade_num"] = (slope * s["n"]).where(ok, 0.0)
+        fade = s.groupby(["PlayerId", "Date"], as_index=False)[
+            ["fade_w", "fade_num"]].sum()
+        pit = pit.merge(fade, on=["PlayerId", "Date"], how="left")
+    for c in ("fade_w", "fade_num"):
+        if c not in pit.columns:
+            pit[c] = 0.0
+        pit[c] = pit[c].fillna(0.0)
     bat = (base.dropna(subset=["BatterId"])
            .astype({"BatterId": "int64"})
            .groupby(["BatterId", "Date"], as_index=False)[bat_stats].sum()

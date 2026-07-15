@@ -25,19 +25,41 @@ Re-running is safe and REPAIRS earlier grades: pass 1 reverts every
 occurred-color cell back to its base color (magenta/yellow -> plain, dark blue/
 green/purple -> the light pick shade), then pass 2 grades fresh.
 
-Doubleheaders: a batter's stats are summed across the day's games (the
-slate carries one row per matchup, so the day total is the honest read).
+Doubleheaders (audit #10, 2026-07-15): workbooks now carry a G# column, so
+every batter/pitcher row grades against ITS OWN game's box line (the
+tag's G#-th final, schedule order) — a game-1 prediction is never credited
+with a game-2 stat. Legacy pre-G# workbooks fall back to the old
+day-summed read (which inflated DH-day hit rates; noted, not repaired).
 Games-sheet rows are matched per game: the tag's i-th row grades against
 the day's i-th final for that matchup (schedule order); if only one of
 the two games is final the tag's rows are skipped until both are in.
+Bets rows carry no G#, so on a multi-final day they stay unsettled rather
+than misgraded.
 
 If some games are missing (they weren't final at the last scrape), their
 rows are skipped and counted — run  python Scrapers/scrape_gamelogs_3F.py
 to pull the late finals, then grade again.
 
+After painting, prints a backtest-style day report (2026-07-14): per head,
+n / actual vs stated rate / AUC / logloss / Brier against the day's base
+rate — the same reads evaluate_deep prints per head — plus the over-50%
+pick ledger. One day is a small sample: treat thin-head AUC as directional
+and use Tools/hit_rate_report.py for the across-days accumulation of the
+identical cell surface.
+
+The summary above that report also scores the blue picks: how many of the
+light-blue rank-quality cells actually hit (with the purple ones — a
+quality pick that is ALSO a +EV bet — broken out as a subset), so the
+quality flag's daily hit rate is visible, not just its per-cell recolor.
+
 Usage:
     python Tools/4_grade_results.py                  # newest in Predictions/
     python Tools/4_grade_results.py path\\to\\file.xlsx
+    python Tools/4_grade_results.py --all            # cumulative report only
+
+--all pools EVERY dated workbook in Predictions/ into one cumulative
+backtest-style report (same per-head table + pick ledger, all days
+combined). Read-only: nothing is painted or saved in that mode.
 """
 import argparse
 import re
@@ -99,21 +121,29 @@ BET_PIT_STAT = {"pitcher strikeouts": "SO", "pitcher outs": "outs",
                 "pitcher earned runs": "ER"}
 
 # batter columns -> did the event happen, from the day's summed line
+# (2026-07-14: + the H1 deep binaries, H3 triple, H4 2+ RBI / 2+ runs)
 BAT_EVENTS = {
     "HR":          lambda s: s["HR"] >= 1,
     "Hit":         lambda s: s["H"] >= 1,
     "2+ Hits":     lambda s: s["H"] >= 2,
     "Single":      lambda s: (s["H"] - s["2B"] - s["3B"] - s["HR"]) >= 1,
     "Double":      lambda s: s["2B"] >= 1,
+    "Triple":      lambda s: s["3B"] >= 1,
     "2+ TB":       lambda s: s["TB"] >= 2,
+    "3+ TB":       lambda s: s["TB"] >= 3,
+    "4+ TB":       lambda s: s["TB"] >= 4,
     "Run":         lambda s: s["R"] >= 1,
+    "2+ Runs":     lambda s: s["R"] >= 2,
     "RBI":         lambda s: s["RBI"] >= 1,
+    "2+ RBI":      lambda s: s["RBI"] >= 2,
     "H+R+RBI 2+":  lambda s: (s["H"] + s["R"] + s["RBI"]) >= 2,
     "H+R+RBI 3+":  lambda s: (s["H"] + s["R"] + s["RBI"]) >= 3,
+    "H+R+RBI 4+":  lambda s: (s["H"] + s["R"] + s["RBI"]) >= 4,
     "BB":          lambda s: s["BB"] >= 1,
     "SB":          lambda s: s["SB"] >= 1,
     "K":           lambda s: s["SO"] >= 1,
     "2+ K":        lambda s: s["SO"] >= 2,
+    "3+ K":        lambda s: s["SO"] >= 3,
 }
 BAT_SUM_COLS = ["PA", "AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "SO",
                 "SB", "TB"]
@@ -122,6 +152,8 @@ BAT_SUM_COLS = ["PA", "AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "SO",
 LINE_RE = re.compile(r"^(K|Outs|Hits|BB|ER) > (\d+(?:\.\d+)?)$")
 LINE_STAT = {"K": "SO", "Outs": "outs", "Hits": "H", "BB": "BB", "ER": "ER"}
 RUNS_RE = re.compile(r"^Runs > (\d+(?:\.\d+)?)$")
+# H5 team_total (2026-07-14): per-team run lines on the Games sheet
+TEAM_RUNS_RE = re.compile(r"^(Away|Home) Runs > (\d+(?:\.\d+)?)$")
 
 
 def ip_to_outs(ip):
@@ -132,25 +164,36 @@ def ip_to_outs(ip):
 
 
 def load_actuals(date):
-    """(batters {pid: summed Series}, starters {pid: dict},
-    games {'AWY@HOM': [dict, ...]}) for one date, from the scraped logs.
-    The games lists keep mlb_games.csv row order (the schedule's game
-    order), so a doubleheader's game 1 is entry 0 and game 2 entry 1."""
+    """(batters {pid: day-summed Series}, starters {pid: dict},
+    games {'AWY@HOM': [dict, ...]}, batters_game {(pid, gamepk): Series},
+    starters_game {(pid, gamepk): dict}) for one date, from the scraped
+    logs. The games lists keep mlb_games.csv row order (the schedule's
+    game order), so a doubleheader's game 1 is entry 0 and game 2 entry 1.
+
+    audit #10 (2026-07-15): the per-GAME dicts are the primary grading
+    source — workbooks with a G# column grade each row against ITS game's
+    box line. The day-summed dicts remain only as the legacy fallback for
+    pre-G# workbooks (where a DH day inflated hit rates: P(HR in game)
+    graded as 'did he homer today')."""
     gb = pd.read_csv(DATA_DIR / "mlb_game_batting.csv", encoding="utf-8-sig",
                      low_memory=False)
     gb = gb[gb["Date"] == date]
     batters = {int(pid): grp[BAT_SUM_COLS].sum()
                for pid, grp in gb.groupby("PlayerId")}
+    batters_game = {(int(pid), int(gpk)): grp[BAT_SUM_COLS].sum()
+                    for (pid, gpk), grp in gb.groupby(["PlayerId", "GamePk"])}
 
     gp = pd.read_csv(DATA_DIR / "mlb_game_pitching.csv", encoding="utf-8-sig",
                      low_memory=False)
     gp = gp[(gp["Date"] == date) & (gp["GS"] == 1)]
-    starters = {}
-    for pid, grp in gp.groupby("PlayerId"):
+    starters, starters_game = {}, {}
+    for (pid, gpk), grp in gp.groupby(["PlayerId", "GamePk"]):
         r = grp.iloc[0]
-        starters[int(pid)] = {"SO": float(r["SO"]), "H": float(r["H"]),
-                              "BB": float(r["BB"]), "ER": float(r["ER"]),
-                              "outs": ip_to_outs(r["IP"])}
+        line = {"SO": float(r["SO"]), "H": float(r["H"]),
+                "BB": float(r["BB"]), "ER": float(r["ER"]),
+                "outs": ip_to_outs(r["IP"])}
+        starters_game[(int(pid), int(gpk))] = line
+        starters.setdefault(int(pid), line)   # first start = legacy value
 
     g = pd.read_csv(DATA_DIR / "mlb_games.csv", encoding="utf-8-sig")
     g = g[g["Date"] == date].dropna(subset=["AwayScore", "HomeScore"])
@@ -158,9 +201,28 @@ def load_actuals(date):
     for _, r in g.iterrows():
         a, h = float(r["AwayScore"]), float(r["HomeScore"])
         games.setdefault(f'{r["AwayTeam"]}@{r["HomeTeam"]}', []).append({
-            "total": a + h,
+            "total": a + h, "away": a, "home": h,
+            "gamepk": int(r["GamePk"]),
             "winner": r["HomeTeam"] if h > a else r["AwayTeam"]})
-    return batters, starters, games
+    return batters, starters, games, batters_game, starters_game
+
+
+def _row_stats(per_game, day_dict, games, pid, tag, gnum):
+    """Actual stats for one workbook row (audit #10): with a Game tag and a
+    G# the row grades against its OWN game's line (None until that game is
+    final); without them (legacy workbook / single-game book) fall back to
+    the day sum. Returns None when unresolvable."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if tag is not None and gnum is not None:
+        finals = games.get(tag, [])
+        k = gnum - 1
+        if k < 0 or k >= len(finals):
+            return None                       # that game not final yet
+        return per_game.get((pid, finals[k]["gamepk"]))
+    return day_dict.get(pid)
 
 
 # graded-color -> the base to restore on re-grade (yellow was plain).
@@ -220,12 +282,25 @@ def _base_color(cell):
     return tail if tail in (BLUE, GREEN, PURPLE) else None
 
 
-def _mark(cell, occurred):
+def _mark(cell, occurred, tally=None):
     """HIT -> the dark fill; MISS on a pick -> grayed out; MISS on a
     plain cell -> untouched. Font weight follows the bold-over-50% rule
     in EVERY case (hit or miss); text cells (e.g. Winner) stay bold on
-    fills for contrast."""
+    fills for contrast.
+
+    If `tally` is given, every blue rank-quality pick is counted into it
+    (blue_picks / blue_hit), with the purple subset — quality picks that
+    are ALSO +EV bets — tracked separately (purple_picks / purple_hit) so
+    the blue-pick hit rate can be reported after grading. The base color is
+    read BEFORE repainting, so re-grading a workbook counts the same picks
+    it counted the first time."""
     base = _base_color(cell)
+    if tally is not None and base in (BLUE, PURPLE):
+        tally["blue_picks"] = tally.get("blue_picks", 0) + 1
+        tally["blue_hit"] = tally.get("blue_hit", 0) + bool(occurred)
+        if base == PURPLE:
+            tally["purple_picks"] = tally.get("purple_picks", 0) + 1
+            tally["purple_hit"] = tally.get("purple_hit", 0) + bool(occurred)
     num = isinstance(cell.value, (int, float))
     bold = bool(cell.value > 0.5) if num else True
     if occurred:
@@ -262,11 +337,14 @@ def _name_pid(ws):
     return byname, bygame
 
 
-def _settle_bet(row, batters, starters, games, bat_pid, pit_pid):
+def _settle_bet(row, batters, starters, games, bat_pid, pit_pid,
+                bg=None, sg=None):
     """Did this Bets row win? True / False / None (can't settle yet: no
-    final, unmatched player, or a doubleheader game bet we can't pin to one
-    game from an EV-sorted board). `row` is {header: value}; `bat_pid` /
-    `pit_pid` resolve a (game, name) to a PlayerId."""
+    final, unmatched player, or a doubleheader day we can't pin to one game
+    — Bets rows carry no G#, so any multi-final matchup is unsettleable
+    rather than misgraded against a day sum; audit #10). `row` is
+    {header: value}; `bat_pid` / `pit_pid` resolve a (game, name) to a
+    PlayerId."""
     game, prop = str(row.get("Game", "")), str(row.get("Prop", ""))
     side, line = str(row.get("Side", "")), row.get("Line")
 
@@ -276,18 +354,27 @@ def _settle_bet(row, batters, starters, games, bat_pid, pit_pid):
         except (TypeError, ValueError):
             return None
 
-    if prop == "moneyline":                     # Side is the picked team
+    def _one_final():
         finals = games.get(game, [])
-        return finals[0]["winner"] == side if len(finals) == 1 else None
+        return finals[0] if len(finals) == 1 else None
+
+    if prop == "moneyline":                     # Side is the picked team
+        f = _one_final()
+        return f["winner"] == side if f else None
     if prop == "total runs":
-        finals, ln = games.get(game, []), _line()
-        if len(finals) != 1 or ln is None:
+        f, ln = _one_final(), _line()
+        if f is None or ln is None:
             return None
-        occ = finals[0]["total"] > ln
+        occ = f["total"] > ln
         return occ if side == "Over" else not occ
     if prop in BET_LABEL_TO_BATCOL:
         pid = bat_pid(game, row.get("Player"))
-        s = batters.get(pid) if pid is not None else None
+        f = _one_final()
+        if pid is None or f is None:
+            return None
+        s = (bg or {}).get((int(pid), f["gamepk"]))
+        if s is None:
+            s = batters.get(pid)
         if s is None:
             return None
         occ = bool(BAT_EVENTS[BET_LABEL_TO_BATCOL[prop]](s))
@@ -295,16 +382,21 @@ def _settle_bet(row, batters, starters, games, bat_pid, pit_pid):
     for lbl, stat in BET_PIT_STAT.items():      # "pitcher strikeouts o6.5"
         if prop.startswith(lbl):
             pid = pit_pid(game, row.get("Player"))
-            a = starters.get(pid) if pid is not None else None
+            f = _one_final()
             ln = _line()
-            if a is None or ln is None:
+            if pid is None or f is None or ln is None:
+                return None
+            a = (sg or {}).get((int(pid), f["gamepk"]))
+            if a is None:
+                a = starters.get(pid)
+            if a is None:
                 return None
             occ = a[stat] > ln
             return occ if side == "Over" else not occ
     return None
 
 
-def _grade_bets(wb, batters, starters, games, stats):
+def _grade_bets(wb, batters, starters, games, stats, bg=None, sg=None):
     """Paint every WINNING bet row solid #00B050; reset the rest to the
     light board first, so re-running is idempotent (the Bets sheet is
     skipped by _ungrade for exactly this reason). No-op on the 'no bets'
@@ -340,7 +432,8 @@ def _grade_bets(wb, batters, starters, games, stats):
             c.font = Font(bold=(h in BET_PCT_COLS
                                 and isinstance(v, (int, float)) and v > 0.5))
         row = {h: ws.cell(row=i, column=hidx[h]).value for h in headers}
-        won = _settle_bet(row, batters, starters, games, bat_pid, pit_pid)
+        won = _settle_bet(row, batters, starters, games, bat_pid, pit_pid,
+                          bg=bg, sg=sg)
         stats["bets"] = stats.get("bets", 0) + 1
         if won:
             stats["bets_won"] = stats.get("bets_won", 0) + 1
@@ -355,7 +448,7 @@ def grade(path):
     if not m:
         sys.exit(f"can't read the game date from the filename: {path}")
     date = m.group(1)
-    batters, starters, games = load_actuals(date)
+    batters, starters, games, bg, sg = load_actuals(date)
     if not batters:
         sys.exit(f"no box scores for {date} in Data/mlb_game_batting.csv — "
                  f"run  python Scrapers/scrape_gamelogs_3F.py  first")
@@ -365,10 +458,24 @@ def grade(path):
         if ws.title == "Bets":
             continue          # graded by _grade_bets (whole-row), not _ungrade
         _ungrade(ws)
-    stats = {"cells": 0, "hit": 0, "missing_rows": 0}
+    stats = {"cells": 0, "hit": 0, "missing_rows": 0,
+             "blue_picks": 0, "blue_hit": 0,
+             "purple_picks": 0, "purple_hit": 0}
+    rows = []                 # (sheet, head, stated_p, occurred) per cell
 
     def headers_of(ws):
         return {str(c.value): j for j, c in enumerate(ws[1], start=1)}
+
+    def _tag_gnum(ws, hidx, i):
+        """(Game tag, G#) of a grid row, or (None, None) on a legacy book."""
+        g_j, gn_j = hidx.get("Game"), hidx.get("G#")
+        if g_j is None or gn_j is None:
+            return None, None
+        tag = str(ws.cell(row=i, column=g_j).value)
+        try:
+            return tag, int(ws.cell(row=i, column=gn_j).value)
+        except (TypeError, ValueError):
+            return None, None
 
     if "Batter Props" in wb.sheetnames:
         ws = wb["Batter Props"]
@@ -376,7 +483,8 @@ def grade(path):
         cols = {h: j for h, j in hidx.items() if h in BAT_EVENTS}
         for i in range(2, ws.max_row + 1):
             pid = ws.cell(row=i, column=hidx["ID"]).value
-            s = batters.get(int(pid)) if pid is not None else None
+            tag, gnum = _tag_gnum(ws, hidx, i)
+            s = _row_stats(bg, batters, games, pid, tag, gnum)
             if s is None:
                 stats["missing_rows"] += 1
                 continue
@@ -384,7 +492,10 @@ def grade(path):
                 stats["cells"] += 1
                 occ = bool(BAT_EVENTS[h](s))
                 stats["hit"] += occ
-                _mark(ws.cell(row=i, column=j), occ)
+                cell = ws.cell(row=i, column=j)
+                if isinstance(cell.value, (int, float)) and 0 <= cell.value <= 1:
+                    rows.append(("Batter Props", h, float(cell.value), occ))
+                _mark(cell, occ, stats)
 
     if "Pitching Props" in wb.sheetnames:
         ws = wb["Pitching Props"]
@@ -393,21 +504,29 @@ def grade(path):
                      if LINE_RE.match(h)]
         for i in range(2, ws.max_row + 1):
             pid = ws.cell(row=i, column=hidx["ID"]).value
-            a = starters.get(int(pid)) if pid is not None else None
+            tag, gnum = _tag_gnum(ws, hidx, i)
+            a = _row_stats(sg, starters, games, pid, tag, gnum)
             if a is None:
                 stats["missing_rows"] += 1
                 continue
             for h, j, mm in line_cols:
                 stats["cells"] += 1
-                occ = a[LINE_STAT[mm.group(1)]] > float(mm.group(2))
+                occ = bool(a[LINE_STAT[mm.group(1)]] > float(mm.group(2)))
                 stats["hit"] += occ
-                _mark(ws.cell(row=i, column=j), occ)
+                cell = ws.cell(row=i, column=j)
+                if isinstance(cell.value, (int, float)) and 0 <= cell.value <= 1:
+                    rows.append(("Pitching Props", h, float(cell.value), occ))
+                _mark(cell, occ, stats)
 
     if "Games" in wb.sheetnames:
         ws = wb["Games"]
         hidx = headers_of(ws)
-        run_cols = [(j, float(RUNS_RE.match(h).group(1)))
+        run_cols = [(h, j, float(RUNS_RE.match(h).group(1)))
                     for h, j in hidx.items() if RUNS_RE.match(h)]
+        # team-total lines (H5): 'Away Runs > 3.5' grades that side's score
+        team_cols = [(h, j, TEAM_RUNS_RE.match(h).group(1).lower(),
+                      float(TEAM_RUNS_RE.match(h).group(2)))
+                     for h, j in hidx.items() if TEAM_RUNS_RE.match(h)]
         # Doubleheaders: the same "AWY@HOM" tag appears once per game, in
         # start-time order, and the finals list keeps the schedule's game
         # order — so match the sheet's i-th row for a tag to the i-th final.
@@ -431,47 +550,287 @@ def grade(path):
                 stats["cells"] += 1
                 occ = str(cell.value) == g["winner"]
                 stats["hit"] += occ
-                _mark(cell, occ)
+                _mark(cell, occ, stats)
                 # Win Prob belongs to the named winner -> same outcome
                 if "Win Prob" in hidx:
-                    _mark(ws.cell(row=i, column=hidx["Win Prob"]), occ)
-            for j, line in run_cols:
+                    wp = ws.cell(row=i, column=hidx["Win Prob"])
+                    if isinstance(wp.value, (int, float)) and 0 <= wp.value <= 1:
+                        rows.append(("Games", "Winner", float(wp.value), occ))
+                    _mark(wp, occ, stats)
+            for h, j, line in run_cols:
                 stats["cells"] += 1
-                occ = g["total"] > line
+                occ = bool(g["total"] > line)
                 stats["hit"] += occ
-                _mark(ws.cell(row=i, column=j), occ)
+                cell = ws.cell(row=i, column=j)
+                if isinstance(cell.value, (int, float)) and 0 <= cell.value <= 1:
+                    rows.append(("Games", h, float(cell.value), occ))
+                _mark(cell, occ, stats)
+            for h, j, side, line in team_cols:
+                stats["cells"] += 1
+                occ = bool(g[side] > line)
+                stats["hit"] += occ
+                cell = ws.cell(row=i, column=j)
+                if isinstance(cell.value, (int, float)) and 0 <= cell.value <= 1:
+                    rows.append(("Games", h, float(cell.value), occ))
+                _mark(cell, occ, stats)
 
-    _grade_bets(wb, batters, starters, games, stats)
+    _grade_bets(wb, batters, starters, games, stats, bg=bg, sg=sg)
 
     try:
         wb.save(path)
     except PermissionError:
         sys.exit(f"{path} is open in Excel (it holds the file lock) — "
                  f"close it there, then run this again.")
-    return date, stats
+    return date, stats, rows
+
+
+def collect_rows(path):
+    """grade()'s cell surface, read-only: [(sheet, head, stated_p,
+    occurred), ...] plus a skipped-row count — no painting, no save.
+    Used by --all to pool days; prints a note and returns ([], 0) for
+    workbooks that can't be graded yet (no date / no box scores)."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2})", Path(path).stem)
+    if not m:
+        print(f"  ! {Path(path).name}: no date in filename, skipped")
+        return [], 0
+    date = m.group(1)
+    try:
+        batters, starters, games, bg, sg = load_actuals(date)
+    except Exception as e:
+        print(f"  ! {Path(path).name}: {e}")
+        return [], 0
+    if not batters:
+        print(f"  ! {Path(path).name}: no box scores for {date} yet")
+        return [], 0
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    rows, skipped = [], 0
+
+    def prob(v):
+        return (float(v) if isinstance(v, (int, float)) and 0 <= v <= 1
+                else None)
+
+    def sheet_head(name):
+        ws = wb[name]
+        head = [str(c.value) for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        return ws, {h: j for j, h in enumerate(head)}
+
+    def tag_gnum(r, hidx):
+        g_j, gn_j = hidx.get("Game"), hidx.get("G#")
+        if g_j is None or gn_j is None:
+            return None, None
+        try:
+            return str(r[g_j]), int(r[gn_j])
+        except (TypeError, ValueError):
+            return None, None
+
+    if "Batter Props" in wb.sheetnames:
+        ws, hidx = sheet_head("Batter Props")
+        cols = ({h: j for h, j in hidx.items() if h in BAT_EVENTS}
+                if "ID" in hidx else {})
+        for r in (ws.iter_rows(min_row=2, values_only=True) if cols else ()):
+            pid = r[hidx["ID"]]
+            tag, gnum = tag_gnum(r, hidx)
+            s = _row_stats(bg, batters, games, pid, tag, gnum)
+            if s is None:
+                skipped += 1
+                continue
+            for h, j in cols.items():
+                p = prob(r[j])
+                if p is not None:
+                    rows.append(("Batter Props", h, p,
+                                 bool(BAT_EVENTS[h](s))))
+
+    if "Pitching Props" in wb.sheetnames:
+        ws, hidx = sheet_head("Pitching Props")
+        line_cols = ([(h, j, LINE_RE.match(h)) for h, j in hidx.items()
+                      if LINE_RE.match(h)] if "ID" in hidx else [])
+        for r in (ws.iter_rows(min_row=2, values_only=True)
+                  if line_cols else ()):
+            pid = r[hidx["ID"]]
+            tag, gnum = tag_gnum(r, hidx)
+            a = _row_stats(sg, starters, games, pid, tag, gnum)
+            if a is None:
+                skipped += 1
+                continue
+            for h, j, mm in line_cols:
+                p = prob(r[j])
+                if p is not None:
+                    occ = bool(a[LINE_STAT[mm.group(1)]] > float(mm.group(2)))
+                    rows.append(("Pitching Props", h, p, occ))
+
+    if "Games" in wb.sheetnames:
+        ws, hidx = sheet_head("Games")
+        run_cols = [(h, j, float(RUNS_RE.match(h).group(1)))
+                    for h, j in hidx.items() if RUNS_RE.match(h)]
+        team_cols = [(h, j, TEAM_RUNS_RE.match(h).group(1).lower(),
+                      float(TEAM_RUNS_RE.match(h).group(2)))
+                     for h, j in hidx.items() if TEAM_RUNS_RE.match(h)]
+        # same doubleheader rule as grade(): the tag's i-th row grades the
+        # day's i-th final; incomplete tags are skipped, never misgraded
+        game_rows = (list(ws.iter_rows(min_row=2, values_only=True))
+                     if "Game" in hidx else [])
+        need = Counter(str(r[hidx["Game"]]) for r in game_rows)
+        seen = Counter()
+        for r in game_rows:
+            tag = str(r[hidx["Game"]])
+            finals = games.get(tag, [])
+            k = seen[tag]
+            seen[tag] += 1
+            if len(finals) != need[tag]:
+                skipped += 1
+                continue
+            g = finals[k]
+            if "Winner" in hidx and "Win Prob" in hidx:
+                p = prob(r[hidx["Win Prob"]])
+                if p is not None:
+                    rows.append(("Games", "Winner", p,
+                                 str(r[hidx["Winner"]]) == g["winner"]))
+            for h, j, line in run_cols:
+                p = prob(r[j])
+                if p is not None:
+                    rows.append(("Games", h, p, bool(g["total"] > line)))
+            for h, j, side, line in team_cols:
+                p = prob(r[j])
+                if p is not None:
+                    rows.append(("Games", h, p, bool(g[side] > line)))
+    wb.close()
+    return rows, skipped
+
+
+def _rank_auc(p, y):
+    """Mann-Whitney AUC (tie-aware, no sklearn); None if one class only."""
+    y = np.asarray(y, dtype=bool)
+    npos, nneg = int(y.sum()), int((~y).sum())
+    if npos == 0 or nneg == 0:
+        return None
+    r = pd.Series(p, dtype=float).rank()
+    return float((r[y].sum() - npos * (npos + 1) / 2) / (npos * nneg))
+
+
+def day_report(rows, title="Day report: per-head, backtest-style"):
+    """The backtest-style read of one graded day (or, via --all, of the
+    whole accumulated record — same table, pooled rows).
+
+    Per head (in board order, grouped by sheet): graded cells, the
+    actual occurrence rate vs the stated average (gap = actual - stated,
+    hit_rate_report's sign), AUC, and logloss/Brier next to what a
+    constant base-rate forecast scores — the same per-head surface
+    evaluate_deep prints for a backtest year. Then the over-50% pick
+    ledger. Mean columns have no yes/no event and never enter.
+    Single-day n is small — thin heads' AUC is directional."""
+    if not rows:
+        return
+    eps = 1e-6
+    by_head = {}
+    for sheet, head, p, occ in rows:
+        by_head.setdefault((sheet, head), []).append((p, occ))
+
+    print(f"\n=== {title} ===")
+    hdr = (f"  {'head':14s} {'n':>6s} {'actual%':>8s} {'stated%':>8s}"
+           f" {'gap':>7s} {'AUC':>6s} {'logloss':>8s} {'base_ll':>8s}"
+           f" {'brier':>7s} {'base_br':>8s}")
+    # sheets in first-seen order; heads in first-seen order within each —
+    # pooled workbooks with evolving boards still group cleanly
+    for sheet in dict.fromkeys(s for s, _ in by_head):
+        print(f"\n  -- {sheet} --")
+        print(hdr)
+        for (s2, head), pr in by_head.items():
+            if s2 != sheet:
+                continue
+            p = np.clip(np.array([x for x, _ in pr], float), eps, 1 - eps)
+            y = np.array([o for _, o in pr], float)
+            rate, stated = float(y.mean()), float(p.mean())
+            p0 = min(max(rate, eps), 1 - eps)
+            ll = float(-(y * np.log(p) + (1 - y) * np.log(1 - p)).mean())
+            ll0 = float(-(y * np.log(p0) + (1 - y) * np.log(1 - p0)).mean())
+            br = float(((p - y) ** 2).mean())
+            br0 = float(((p0 - y) ** 2).mean())
+            auc = _rank_auc(p, y.astype(bool))
+            print(f"  {head:14s} {len(y):6d} {rate:8.1%} {stated:8.1%}"
+                  f" {rate - stated:+7.1%}"
+                  + (f" {auc:6.3f}" if auc is not None else "      -")
+                  + f" {ll:8.3f} {ll0:8.3f} {br:7.3f} {br0:8.3f}")
+
+    over = [(h, p, o) for _, h, p, o in rows if p > 0.5]
+    print("\n=== Over-50% picks ===")
+    if not over:
+        print("  none stated above 50% today.")
+        return
+    hit = sum(o for _, _, o in over)
+    avg = sum(p for _, p, _ in over) / len(over)
+    print(f"  overall: {len(over):,} picks -> {hit:,} hit "
+          f"({hit / len(over):.1%}); stated avg {avg:.1%}")
+    byh = {}
+    for h, p, o in over:
+        byh.setdefault(h, []).append((p, o))
+    print(f"  {'head':14s} {'picks':>6s} {'hit':>5s} {'hit%':>7s}"
+          f" {'stated':>7s} {'gap':>7s}")
+    for h, b in sorted(byh.items(), key=lambda kv: -len(kv[1])):
+        k = sum(o for _, o in b)
+        r, a = k / len(b), sum(p for p, _ in b) / len(b)
+        print(f"  {h:14s} {len(b):6d} {k:5d} {r:7.1%} {a:7.1%} {r - a:+7.1%}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("workbook", nargs="?", default=None,
                     help="predictions .xlsx (default: newest in Predictions/)")
+    ap.add_argument("--all", action="store_true",
+                    help="read-only: pool every dated workbook in "
+                         "Predictions/ into one cumulative backtest-style "
+                         "report (no painting, no saves)")
     args = ap.parse_args()
+
+    if args.all:
+        books = sorted(PRED_DIR.glob("[0-9]*.xlsx"))
+        if not books:
+            sys.exit(f"no workbooks in {PRED_DIR}")
+        all_rows, all_skipped, days = [], 0, 0
+        print("workbooks:")
+        for p in books:
+            rows, skipped = collect_rows(p)
+            if rows:
+                days += 1
+                hits = sum(o for _, _, _, o in rows)
+                print(f"  {p.name}: {len(rows):,} cells ({hits:,} occurred)"
+                      + (f", {skipped} row(s) without box scores"
+                         if skipped else ""))
+            all_rows += rows
+            all_skipped += skipped
+        day_report(all_rows, title=f"Cumulative report: {days} day(s), "
+                                   f"{len(all_rows):,} graded cells, "
+                                   f"backtest-style")
+        if all_skipped:
+            print(f"\n{all_skipped} row(s) had no box score (scratched "
+                  f"player or finals not scraped yet) — not counted.")
+        return
+
     path = args.workbook
     if path is None:
         books = sorted(PRED_DIR.glob("*.xlsx"), key=lambda p: p.stat().st_mtime)
         if not books:
             sys.exit(f"no workbooks in {PRED_DIR}")
         path = books[-1]
-    date, s = grade(path)
+    date, s, rows = grade(path)
     print(f"graded {path}")
     print(f"  {date}: {s['cells']:,} cells checked, {s['hit']:,} stats "
           f"occurred (now yellow / dark blue / dark green / dark purple)")
+    if s.get("blue_picks"):
+        bp, bh = s["blue_picks"], s["blue_hit"]
+        pp, ph = s.get("purple_picks", 0), s.get("purple_hit", 0)
+        msg = f"  Blue quality picks: {bh} of {bp} hit ({bh / bp:.1%})"
+        if pp:                         # split out the also-+EV (purple) subset
+            msg += (f"  [blue-only {bh - ph} of {bp - pp}, "
+                    f"+EV purple {ph} of {pp}]")
+        print(msg)
     if s.get("bets"):
         print(f"  Bets sheet: {s.get('bets_won', 0)} of {s['bets']} bet(s) "
               f"won -> row highlighted solid green")
     if s["missing_rows"]:
         print(f"  {s['missing_rows']} row(s) had no final box score yet — "
               f"run  python Scrapers/scrape_gamelogs_3F.py  and grade again")
+    day_report(rows)
 
 
 if __name__ == "__main__":

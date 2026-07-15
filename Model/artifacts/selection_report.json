@@ -1,0 +1,2743 @@
+{
+ "generated": "2026-07-15T06:21:12",
+ "stat": "shap",
+ "pi": 0.75,
+ "eps_fallback": 0.0005,
+ "shadow_q": 0.85,
+ "min_keep": 40,
+ "max_rows": 5000,
+ "n_shap_samples": 3,
+ "families": [
+  "cb",
+  "lgbm",
+  "xgb"
+ ],
+ "write": true,
+ "electorate_regime": {
+  "ship_suite": null,
+  "sel_suite": null
+ },
+ "topup_min": 0.5,
+ "heads": {
+  "bb": {
+   "visible": 522,
+   "kept": 46,
+   "pre_topup": 46,
+   "floor_short": 0,
+   "vote_corr": 0.5499,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0013741345852562735,
+    "b": 0.0018986547523105455
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0013741345852562735
+    },
+    "b": {
+     "lgbm": 0.0018986547523105455
+    }
+   },
+   "pi_grid": {
+    "0.5": 66,
+    "0.6": 66,
+    "0.7": 46,
+    "0.75": 46,
+    "0.8": 46,
+    "0.9": 46,
+    "1": 46
+   },
+   "family_support": {
+    "lgbm": 46
+   }
+  },
+  "bk": {
+   "visible": 522,
+   "kept": 64,
+   "pre_topup": 64,
+   "floor_short": 0,
+   "vote_corr": 0.5838,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0014777247220837916,
+    "b": 0.0013731537549898831
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0014777247220837916
+    },
+    "b": {
+     "lgbm": 0.0013731537549898831
+    }
+   },
+   "pi_grid": {
+    "0.5": 76,
+    "0.6": 76,
+    "0.7": 64,
+    "0.75": 64,
+    "0.8": 64,
+    "0.9": 64,
+    "1": 64
+   },
+   "family_support": {
+    "lgbm": 64
+   }
+  },
+  "bk2": {
+   "visible": 522,
+   "kept": 57,
+   "pre_topup": 57,
+   "floor_short": 0,
+   "vote_corr": 0.5946,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0015375259922239327,
+    "b": 0.0016703682883732677
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0015375259922239327
+    },
+    "b": {
+     "lgbm": 0.0016703682883732677
+    }
+   },
+   "pi_grid": {
+    "0.5": 75,
+    "0.6": 75,
+    "0.7": 57,
+    "0.75": 57,
+    "0.8": 57,
+    "0.9": 57,
+    "1": 57
+   },
+   "family_support": {
+    "lgbm": 57
+   }
+  },
+  "bk3": {
+   "visible": 522,
+   "kept": 40,
+   "pre_topup": 31,
+   "floor_short": 0,
+   "vote_corr": 0.4736,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0020228507535374287,
+    "b": 0.0019969695317376794
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0020228507535374287
+    },
+    "b": {
+     "lgbm": 0.0019969695317376794
+    }
+   },
+   "pi_grid": {
+    "0.5": 48,
+    "0.6": 48,
+    "0.7": 31,
+    "0.75": 31,
+    "0.8": 31,
+    "0.9": 31,
+    "1": 31
+   },
+   "family_support": {
+    "lgbm": 31
+   }
+  },
+  "double": {
+   "visible": 522,
+   "kept": 33,
+   "pre_topup": 15,
+   "floor_short": 7,
+   "vote_corr": 0.4472,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0035429179803168434,
+    "b": 0.0020883054511598633
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0035429179803168434
+    },
+    "b": {
+     "lgbm": 0.0020883054511598633
+    }
+   },
+   "pi_grid": {
+    "0.5": 33,
+    "0.6": 33,
+    "0.7": 15,
+    "0.75": 15,
+    "0.8": 15,
+    "0.9": 15,
+    "1": 15
+   },
+   "family_support": {
+    "lgbm": 15
+   }
+  },
+  "hit": {
+   "visible": 522,
+   "kept": 68,
+   "pre_topup": 68,
+   "floor_short": 0,
+   "vote_corr": 0.5314,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0011548947683765161,
+    "b": 0.0017361939581262884
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0011548947683765161
+    },
+    "b": {
+     "lgbm": 0.0017361939581262884
+    }
+   },
+   "pi_grid": {
+    "0.5": 99,
+    "0.6": 99,
+    "0.7": 68,
+    "0.75": 68,
+    "0.8": 68,
+    "0.9": 68,
+    "1": 68
+   },
+   "family_support": {
+    "lgbm": 68
+   }
+  },
+  "hits2": {
+   "visible": 522,
+   "kept": 70,
+   "pre_topup": 70,
+   "floor_short": 0,
+   "vote_corr": 0.581,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0017257773028589959,
+    "b": 0.0011286174062169877
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0017257773028589959
+    },
+    "b": {
+     "lgbm": 0.0011286174062169877
+    }
+   },
+   "pi_grid": {
+    "0.5": 98,
+    "0.6": 98,
+    "0.7": 70,
+    "0.75": 70,
+    "0.8": 70,
+    "0.9": 70,
+    "1": 70
+   },
+   "family_support": {
+    "lgbm": 70
+   }
+  },
+  "hr": {
+   "visible": 522,
+   "kept": 41,
+   "pre_topup": 41,
+   "floor_short": 0,
+   "vote_corr": 0.6279,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.002515990615400731,
+    "b": 0.002056594412228212
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.002515990615400731
+    },
+    "b": {
+     "lgbm": 0.002056594412228212
+    }
+   },
+   "pi_grid": {
+    "0.5": 54,
+    "0.6": 54,
+    "0.7": 41,
+    "0.75": 41,
+    "0.8": 41,
+    "0.9": 41,
+    "1": 41
+   },
+   "family_support": {
+    "lgbm": 41
+   }
+  },
+  "hrr2": {
+   "visible": 522,
+   "kept": 80,
+   "pre_topup": 80,
+   "floor_short": 0,
+   "vote_corr": 0.6393,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0013072199464945306,
+    "b": 0.0012573895027283874
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0013072199464945306
+    },
+    "b": {
+     "lgbm": 0.0012573895027283874
+    }
+   },
+   "pi_grid": {
+    "0.5": 120,
+    "0.6": 120,
+    "0.7": 80,
+    "0.75": 80,
+    "0.8": 80,
+    "0.9": 80,
+    "1": 80
+   },
+   "family_support": {
+    "lgbm": 80
+   }
+  },
+  "hrr3": {
+   "visible": 522,
+   "kept": 72,
+   "pre_topup": 72,
+   "floor_short": 0,
+   "vote_corr": 0.6236,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0014459275973670949,
+    "b": 0.001371987710496145
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0014459275973670949
+    },
+    "b": {
+     "lgbm": 0.001371987710496145
+    }
+   },
+   "pi_grid": {
+    "0.5": 100,
+    "0.6": 100,
+    "0.7": 72,
+    "0.75": 72,
+    "0.8": 72,
+    "0.9": 72,
+    "1": 72
+   },
+   "family_support": {
+    "lgbm": 72
+   }
+  },
+  "hrr4": {
+   "visible": 522,
+   "kept": 73,
+   "pre_topup": 73,
+   "floor_short": 0,
+   "vote_corr": 0.619,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0015953403586883353,
+    "b": 0.0013875082324586625
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0015953403586883353
+    },
+    "b": {
+     "lgbm": 0.0013875082324586625
+    }
+   },
+   "pi_grid": {
+    "0.5": 98,
+    "0.6": 98,
+    "0.7": 73,
+    "0.75": 73,
+    "0.8": 73,
+    "0.9": 73,
+    "1": 73
+   },
+   "family_support": {
+    "lgbm": 73
+   }
+  },
+  "k": {
+   "visible": 207,
+   "kept": 70,
+   "pre_topup": 70,
+   "floor_short": 0,
+   "vote_corr": 0.9244,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0021596641579209527,
+    "b": 0.0029264998946726835
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0021596641579209527
+    },
+    "b": {
+     "lgbm": 0.0029264998946726835
+    }
+   },
+   "pi_grid": {
+    "0.5": 76,
+    "0.6": 76,
+    "0.7": 70,
+    "0.75": 70,
+    "0.8": 70,
+    "0.9": 70,
+    "1": 70
+   },
+   "family_support": {
+    "lgbm": 70
+   }
+  },
+  "outs": {
+   "visible": 207,
+   "kept": 68,
+   "pre_topup": 68,
+   "floor_short": 0,
+   "vote_corr": 0.8731,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0029571201204195265,
+    "b": 0.002386107903771993
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0029571201204195265
+    },
+    "b": {
+     "lgbm": 0.002386107903771993
+    }
+   },
+   "pi_grid": {
+    "0.5": 76,
+    "0.6": 76,
+    "0.7": 68,
+    "0.75": 68,
+    "0.8": 68,
+    "0.9": 68,
+    "1": 68
+   },
+   "family_support": {
+    "lgbm": 68
+   }
+  },
+  "pbb": {
+   "visible": 207,
+   "kept": 49,
+   "pre_topup": 49,
+   "floor_short": 0,
+   "vote_corr": 0.8428,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.003150668806960773,
+    "b": 0.00297730163590914
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.003150668806960773
+    },
+    "b": {
+     "lgbm": 0.00297730163590914
+    }
+   },
+   "pi_grid": {
+    "0.5": 57,
+    "0.6": 57,
+    "0.7": 49,
+    "0.75": 49,
+    "0.8": 49,
+    "0.9": 49,
+    "1": 49
+   },
+   "family_support": {
+    "lgbm": 49
+   }
+  },
+  "per": {
+   "visible": 207,
+   "kept": 61,
+   "pre_topup": 61,
+   "floor_short": 0,
+   "vote_corr": 0.8062,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.002803876781002889,
+    "b": 0.004037561640798945
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.002803876781002889
+    },
+    "b": {
+     "lgbm": 0.004037561640798945
+    }
+   },
+   "pi_grid": {
+    "0.5": 67,
+    "0.6": 67,
+    "0.7": 61,
+    "0.75": 61,
+    "0.8": 61,
+    "0.9": 61,
+    "1": 61
+   },
+   "family_support": {
+    "lgbm": 61
+   }
+  },
+  "pha": {
+   "visible": 207,
+   "kept": 56,
+   "pre_topup": 56,
+   "floor_short": 0,
+   "vote_corr": 0.8234,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0032506146481703427,
+    "b": 0.002913199748306475
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0032506146481703427
+    },
+    "b": {
+     "lgbm": 0.002913199748306475
+    }
+   },
+   "pi_grid": {
+    "0.5": 63,
+    "0.6": 63,
+    "0.7": 56,
+    "0.75": 56,
+    "0.8": 56,
+    "0.9": 56,
+    "1": 56
+   },
+   "family_support": {
+    "lgbm": 56
+   }
+  },
+  "rbi": {
+   "visible": 522,
+   "kept": 65,
+   "pre_topup": 65,
+   "floor_short": 0,
+   "vote_corr": 0.6409,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0014490594871808503,
+    "b": 0.0018601656973713907
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0014490594871808503
+    },
+    "b": {
+     "lgbm": 0.0018601656973713907
+    }
+   },
+   "pi_grid": {
+    "0.5": 91,
+    "0.6": 91,
+    "0.7": 65,
+    "0.75": 65,
+    "0.8": 65,
+    "0.9": 65,
+    "1": 65
+   },
+   "family_support": {
+    "lgbm": 65
+   }
+  },
+  "rbi2": {
+   "visible": 522,
+   "kept": 61,
+   "pre_topup": 61,
+   "floor_short": 0,
+   "vote_corr": 0.626,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0019487579343018732,
+    "b": 0.0013641362536016388
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0019487579343018732
+    },
+    "b": {
+     "lgbm": 0.0013641362536016388
+    }
+   },
+   "pi_grid": {
+    "0.5": 90,
+    "0.6": 90,
+    "0.7": 61,
+    "0.75": 61,
+    "0.8": 61,
+    "0.9": 61,
+    "1": 61
+   },
+   "family_support": {
+    "lgbm": 61
+   }
+  },
+  "run": {
+   "visible": 522,
+   "kept": 82,
+   "pre_topup": 82,
+   "floor_short": 0,
+   "vote_corr": 0.6632,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0014205840697396862,
+    "b": 0.0014337880710503115
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0014205840697396862
+    },
+    "b": {
+     "lgbm": 0.0014337880710503115
+    }
+   },
+   "pi_grid": {
+    "0.5": 105,
+    "0.6": 105,
+    "0.7": 82,
+    "0.75": 82,
+    "0.8": 82,
+    "0.9": 82,
+    "1": 82
+   },
+   "family_support": {
+    "lgbm": 82
+   }
+  },
+  "run2": {
+   "visible": 522,
+   "kept": 66,
+   "pre_topup": 66,
+   "floor_short": 0,
+   "vote_corr": 0.6426,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0015890522158563273,
+    "b": 0.0018141311072418936
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0015890522158563273
+    },
+    "b": {
+     "lgbm": 0.0018141311072418936
+    }
+   },
+   "pi_grid": {
+    "0.5": 90,
+    "0.6": 90,
+    "0.7": 66,
+    "0.75": 66,
+    "0.8": 66,
+    "0.9": 66,
+    "1": 66
+   },
+   "family_support": {
+    "lgbm": 66
+   }
+  },
+  "sb": {
+   "visible": 522,
+   "kept": 40,
+   "pre_topup": 30,
+   "floor_short": 0,
+   "vote_corr": 0.5644,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0012178145557725632,
+    "b": 0.0013735894850273017
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0012178145557725632
+    },
+    "b": {
+     "lgbm": 0.0013735894850273017
+    }
+   },
+   "pi_grid": {
+    "0.5": 44,
+    "0.6": 44,
+    "0.7": 30,
+    "0.75": 30,
+    "0.8": 30,
+    "0.9": 30,
+    "1": 30
+   },
+   "family_support": {
+    "lgbm": 30
+   }
+  },
+  "single": {
+   "visible": 522,
+   "kept": 76,
+   "pre_topup": 76,
+   "floor_short": 0,
+   "vote_corr": 0.6241,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0013287774344018799,
+    "b": 0.0015230968407119992
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0013287774344018799
+    },
+    "b": {
+     "lgbm": 0.0015230968407119992
+    }
+   },
+   "pi_grid": {
+    "0.5": 106,
+    "0.6": 106,
+    "0.7": 76,
+    "0.75": 76,
+    "0.8": 76,
+    "0.9": 76,
+    "1": 76
+   },
+   "family_support": {
+    "lgbm": 76
+   }
+  },
+  "tb2": {
+   "visible": 522,
+   "kept": 63,
+   "pre_topup": 63,
+   "floor_short": 0,
+   "vote_corr": 0.6076,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.002038151105317299,
+    "b": 0.0014473798697196094
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.002038151105317299
+    },
+    "b": {
+     "lgbm": 0.0014473798697196094
+    }
+   },
+   "pi_grid": {
+    "0.5": 91,
+    "0.6": 91,
+    "0.7": 63,
+    "0.75": 63,
+    "0.8": 63,
+    "0.9": 63,
+    "1": 63
+   },
+   "family_support": {
+    "lgbm": 63
+   }
+  },
+  "tb3": {
+   "visible": 522,
+   "kept": 40,
+   "pre_topup": 38,
+   "floor_short": 0,
+   "vote_corr": 0.6212,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0029535568947781504,
+    "b": 0.0017584849131836457
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0029535568947781504
+    },
+    "b": {
+     "lgbm": 0.0017584849131836457
+    }
+   },
+   "pi_grid": {
+    "0.5": 54,
+    "0.6": 54,
+    "0.7": 38,
+    "0.75": 38,
+    "0.8": 38,
+    "0.9": 38,
+    "1": 38
+   },
+   "family_support": {
+    "lgbm": 38
+   }
+  },
+  "tb4": {
+   "visible": 522,
+   "kept": 42,
+   "pre_topup": 42,
+   "floor_short": 0,
+   "vote_corr": 0.5886,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.002706118549647469,
+    "b": 0.0019012133282066152
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.002706118549647469
+    },
+    "b": {
+     "lgbm": 0.0019012133282066152
+    }
+   },
+   "pi_grid": {
+    "0.5": 52,
+    "0.6": 52,
+    "0.7": 42,
+    "0.75": 42,
+    "0.8": 42,
+    "0.9": 42,
+    "1": 42
+   },
+   "family_support": {
+    "lgbm": 42
+   }
+  },
+  "total": {
+   "visible": 74,
+   "kept": 35,
+   "pre_topup": 34,
+   "floor_short": 5,
+   "vote_corr": 0.8392,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0069891401150900785,
+    "b": 0.005410038944761822
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0069891401150900785
+    },
+    "b": {
+     "lgbm": 0.005410038944761822
+    }
+   },
+   "pi_grid": {
+    "0.5": 35,
+    "0.6": 35,
+    "0.7": 34,
+    "0.75": 34,
+    "0.8": 34,
+    "0.9": 34,
+    "1": 34
+   },
+   "family_support": {
+    "lgbm": 34
+   }
+  },
+  "triple": {
+   "visible": 522,
+   "kept": 23,
+   "pre_topup": 15,
+   "floor_short": 17,
+   "vote_corr": 0.4289,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0026941704819716194,
+    "b": 0.0024377834737968544
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0026941704819716194
+    },
+    "b": {
+     "lgbm": 0.0024377834737968544
+    }
+   },
+   "pi_grid": {
+    "0.5": 23,
+    "0.6": 23,
+    "0.7": 15,
+    "0.75": 15,
+    "0.8": 15,
+    "0.9": 15,
+    "1": 15
+   },
+   "family_support": {
+    "lgbm": 15
+   }
+  },
+  "winner": {
+   "visible": 55,
+   "kept": 23,
+   "pre_topup": 19,
+   "floor_short": 17,
+   "vote_corr": 0.9048,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.00908066264330833,
+    "b": 0.008553911676792574
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.00908066264330833
+    },
+    "b": {
+     "lgbm": 0.008553911676792574
+    }
+   },
+   "pi_grid": {
+    "0.5": 23,
+    "0.6": 23,
+    "0.7": 19,
+    "0.75": 19,
+    "0.8": 19,
+    "0.9": 19,
+    "1": 19
+   },
+   "family_support": {
+    "lgbm": 19
+   }
+  },
+  "xbb": {
+   "visible": 522,
+   "kept": 47,
+   "pre_topup": 47,
+   "floor_short": 0,
+   "vote_corr": 0.5162,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0011874124968958909,
+    "b": 0.002279313545530237
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0011874124968958909
+    },
+    "b": {
+     "lgbm": 0.002279313545530237
+    }
+   },
+   "pi_grid": {
+    "0.5": 59,
+    "0.6": 59,
+    "0.7": 47,
+    "0.75": 47,
+    "0.8": 47,
+    "0.9": 47,
+    "1": 47
+   },
+   "family_support": {
+    "lgbm": 47
+   }
+  },
+  "xbk": {
+   "visible": 522,
+   "kept": 94,
+   "pre_topup": 94,
+   "floor_short": 0,
+   "vote_corr": 0.6153,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0011292908855547758,
+    "b": 0.0012720623466084572
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0011292908855547758
+    },
+    "b": {
+     "lgbm": 0.0012720623466084572
+    }
+   },
+   "pi_grid": {
+    "0.5": 108,
+    "0.6": 108,
+    "0.7": 94,
+    "0.75": 94,
+    "0.8": 94,
+    "0.9": 94,
+    "1": 94
+   },
+   "family_support": {
+    "lgbm": 94
+   }
+  },
+  "xh": {
+   "visible": 522,
+   "kept": 71,
+   "pre_topup": 71,
+   "floor_short": 0,
+   "vote_corr": 0.602,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0018888408799470828,
+    "b": 0.0012851546673408431
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0018888408799470828
+    },
+    "b": {
+     "lgbm": 0.0012851546673408431
+    }
+   },
+   "pi_grid": {
+    "0.5": 86,
+    "0.6": 86,
+    "0.7": 71,
+    "0.75": 71,
+    "0.8": 71,
+    "0.9": 71,
+    "1": 71
+   },
+   "family_support": {
+    "lgbm": 71
+   }
+  },
+  "xhrr": {
+   "visible": 522,
+   "kept": 102,
+   "pre_topup": 102,
+   "floor_short": 0,
+   "vote_corr": 0.6817,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0010450814712175186,
+    "b": 0.0011486176299253716
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0010450814712175186
+    },
+    "b": {
+     "lgbm": 0.0011486176299253716
+    }
+   },
+   "pi_grid": {
+    "0.5": 142,
+    "0.6": 142,
+    "0.7": 102,
+    "0.75": 102,
+    "0.8": 102,
+    "0.9": 102,
+    "1": 102
+   },
+   "family_support": {
+    "lgbm": 102
+   }
+  },
+  "xrbi": {
+   "visible": 522,
+   "kept": 81,
+   "pre_topup": 81,
+   "floor_short": 0,
+   "vote_corr": 0.6651,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0011498635458830249,
+    "b": 0.001418218570309839
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0011498635458830249
+    },
+    "b": {
+     "lgbm": 0.001418218570309839
+    }
+   },
+   "pi_grid": {
+    "0.5": 115,
+    "0.6": 115,
+    "0.7": 81,
+    "0.75": 81,
+    "0.8": 81,
+    "0.9": 81,
+    "1": 81
+   },
+   "family_support": {
+    "lgbm": 81
+   }
+  },
+  "xrun": {
+   "visible": 522,
+   "kept": 103,
+   "pre_topup": 103,
+   "floor_short": 0,
+   "vote_corr": 0.7123,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0012023926740707016,
+    "b": 0.001210604997727806
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0012023926740707016
+    },
+    "b": {
+     "lgbm": 0.001210604997727806
+    }
+   },
+   "pi_grid": {
+    "0.5": 123,
+    "0.6": 123,
+    "0.7": 103,
+    "0.75": 103,
+    "0.8": 103,
+    "0.9": 103,
+    "1": 103
+   },
+   "family_support": {
+    "lgbm": 103
+   }
+  },
+  "xtb": {
+   "visible": 522,
+   "kept": 66,
+   "pre_topup": 66,
+   "floor_short": 0,
+   "vote_corr": 0.6861,
+   "members": {
+    "a": "L3",
+    "b": "L3"
+   },
+   "stat": "shap",
+   "eps": {
+    "a": 0.0017734368401204127,
+    "b": 0.001578612565798618
+   },
+   "shadow_q_by_family": {
+    "a": {
+     "lgbm": 0.0017734368401204127
+    },
+    "b": {
+     "lgbm": 0.001578612565798618
+    }
+   },
+   "pi_grid": {
+    "0.5": 94,
+    "0.6": 94,
+    "0.7": 66,
+    "0.75": 66,
+    "0.8": 66,
+    "0.9": 66,
+    "1": 66
+   },
+   "family_support": {
+    "lgbm": 66
+   }
+  }
+ },
+ "cofail": [
+  {
+   "head": "bb",
+   "share": 0.074873,
+   "members": [
+    "s_hr_pa",
+    "xpa_slot"
+   ]
+  },
+  {
+   "head": "bb",
+   "share": 0.02422,
+   "members": [
+    "r15_PA",
+    "r30_PA"
+   ]
+  },
+  {
+   "head": "bk",
+   "share": 0.229024,
+   "members": [
+    "bd_fbmidwh_d",
+    "bd_wsw_c"
+   ]
+  },
+  {
+   "head": "bk2",
+   "share": 0.013969,
+   "members": [
+    "bat_velo_matchup",
+    "p_fblou_d",
+    "p_fbv_d"
+   ]
+  },
+  {
+   "head": "bk3",
+   "share": 0.087077,
+   "members": [
+    "bipd_brl",
+    "hrq_ev_avg",
+    "s_xbh_ab",
+    "xpa_slot"
+   ]
+  },
+  {
+   "head": "bk3",
+   "share": 0.234919,
+   "members": [
+    "bd_brkwh_d",
+    "bd_fbwh_d"
+   ]
+  },
+  {
+   "head": "double",
+   "share": 0.192853,
+   "members": [
+    "bipd_ev",
+    "xpa_x_rbi"
+   ]
+  },
+  {
+   "head": "hit",
+   "share": 0.203889,
+   "members": [
+    "c_h_ab",
+    "slot",
+    "xpa_x_tb"
+   ]
+  },
+  {
+   "head": "hit",
+   "share": 0.039284,
+   "members": [
+    "r15_k_pct_sh",
+    "s_k_pct"
+   ]
+  },
+  {
+   "head": "hit",
+   "share": 0.017351,
+   "members": [
+    "r15_sb_pa_sh",
+    "r30_sb_pa_sh",
+    "sb_chain",
+    "xpa_x_sb_d"
+   ]
+  },
+  {
+   "head": "hits2",
+   "share": 0.046486,
+   "members": [
+    "r15_k_pct_sh",
+    "ump_k_x_bk"
+   ]
+  },
+  {
+   "head": "hits2",
+   "share": 0.006483,
+   "members": [
+    "bat_hp1b",
+    "bat_sprint"
+   ]
+  },
+  {
+   "head": "hr",
+   "share": 0.012082,
+   "members": [
+    "bat_velo_matchup",
+    "p_fblou_d"
+   ]
+  },
+  {
+   "head": "hrr2",
+   "share": 0.214499,
+   "members": [
+    "bipd_ev105",
+    "c_hrr2_g_sh",
+    "xpa_x_hr_d"
+   ]
+  },
+  {
+   "head": "hrr2",
+   "share": 0.007285,
+   "members": [
+    "bip_air_def",
+    "opp_oaa"
+   ]
+  },
+  {
+   "head": "hrr2",
+   "share": 0.016237,
+   "members": [
+    "sb_att1",
+    "xpa_x_sb",
+    "xpa_x_sb_d"
+   ]
+  },
+  {
+   "head": "hrr3",
+   "share": 0.243418,
+   "members": [
+    "c_hrr2_g_sh",
+    "c_hrr3_g_sh",
+    "c_hrr4_g_sh",
+    "mix_xwcon",
+    "slot"
+   ]
+  },
+  {
+   "head": "hrr4",
+   "share": 0.249977,
+   "members": [
+    "bip_ev105",
+    "mix_xwcon"
+   ]
+  },
+  {
+   "head": "hrr4",
+   "share": 0.010017,
+   "members": [
+    "p_starts_season",
+    "pbipd_n"
+   ]
+  },
+  {
+   "head": "rbi",
+   "share": 0.253715,
+   "members": [
+    "bip_ev105",
+    "s_xbh_ab"
+   ]
+  },
+  {
+   "head": "rbi2",
+   "share": 0.291242,
+   "members": [
+    "bip_ev105",
+    "bip_hh",
+    "bipd_brl",
+    "bipd_xwoba",
+    "bvh_xwoba",
+    "c_iso_sh",
+    "c_tb_ab_sh",
+    "hrq_ev_avg",
+    "vsh_hr_pa_sh",
+    "xpa_x_tb"
+   ]
+  },
+  {
+   "head": "run",
+   "share": 0.214208,
+   "members": [
+    "bip_ev",
+    "bipd_ev105",
+    "c_tb_ab",
+    "c_xbh_ab",
+    "mix_xwcon",
+    "s_iso"
+   ]
+  },
+  {
+   "head": "run",
+   "share": 0.019857,
+   "members": [
+    "s_sb_pa_sh",
+    "xpa_x_sb"
+   ]
+  },
+  {
+   "head": "run2",
+   "share": 0.221187,
+   "members": [
+    "c_run2_g_sh",
+    "mix_xwcon",
+    "slot"
+   ]
+  },
+  {
+   "head": "run2",
+   "share": 0.018141,
+   "members": [
+    "bat_velo_damage",
+    "p_fbv_d"
+   ]
+  },
+  {
+   "head": "run2",
+   "share": 0.009389,
+   "members": [
+    "bipd_n",
+    "d_PA"
+   ]
+  },
+  {
+   "head": "run2",
+   "share": 0.006565,
+   "members": [
+    "pbipd_n",
+    "ps_BF"
+   ]
+  },
+  {
+   "head": "single",
+   "share": 0.081206,
+   "members": [
+    "bd_tswh_d",
+    "bd_zwsw_d",
+    "c_k_pct",
+    "r15_k_pct_sh"
+   ]
+  },
+  {
+   "head": "single",
+   "share": 0.017368,
+   "members": [
+    "d_bb_pct_sh",
+    "s_bb_pct_sh",
+    "ump_bb_x_bb"
+   ]
+  },
+  {
+   "head": "single",
+   "share": 0.014353,
+   "members": [
+    "sb_chain",
+    "xpa_x_sb"
+   ]
+  },
+  {
+   "head": "single",
+   "share": 0.00841,
+   "members": [
+    "pc_k_bf",
+    "pvloc_k_bf",
+    "ump_k_x_pk"
+   ]
+  },
+  {
+   "head": "tb2",
+   "share": 0.243303,
+   "members": [
+    "bvh_brl",
+    "c_hrr3_g_sh",
+    "c_iso",
+    "hrq_dist_avg",
+    "vsh_tb_ab_sh",
+    "xpa_x_r"
+   ]
+  },
+  {
+   "head": "tb3",
+   "share": 0.262932,
+   "members": [
+    "bip_ev",
+    "c_hrr2_g_sh",
+    "s_hr_pa",
+    "s_iso"
+   ]
+  },
+  {
+   "head": "tb3",
+   "share": 0.023858,
+   "members": [
+    "r7_PA",
+    "xpa_bat"
+   ]
+  },
+  {
+   "head": "tb4",
+   "share": 0.292062,
+   "members": [
+    "bvh_xwoba",
+    "s_iso"
+   ]
+  },
+  {
+   "head": "tb4",
+   "share": 0.005778,
+   "members": [
+    "mix_air",
+    "mix_gb"
+   ]
+  },
+  {
+   "head": "xbb",
+   "share": 0.026861,
+   "members": [
+    "d_hrr4_g_sh",
+    "r30_PA",
+    "r7_PA"
+   ]
+  },
+  {
+   "head": "xbk",
+   "share": 0.00856,
+   "members": [
+    "hrq_n",
+    "vsh_PA"
+   ]
+  },
+  {
+   "head": "xhrr",
+   "share": 0.233589,
+   "members": [
+    "bip_hh",
+    "c_h_ab_sh",
+    "mix_xwcon",
+    "xpa_x_hr_d",
+    "xpa_x_r"
+   ]
+  },
+  {
+   "head": "xhrr",
+   "share": 0.008911,
+   "members": [
+    "bip_air_def",
+    "opp_oaa"
+   ]
+  },
+  {
+   "head": "xhrr",
+   "share": 0.011825,
+   "members": [
+    "r15_sb_pa_sh",
+    "r30_sb_pa_sh"
+   ]
+  },
+  {
+   "head": "xrbi",
+   "share": 0.292661,
+   "members": [
+    "bip_hh",
+    "bipd_brl",
+    "c_tb_ab",
+    "vsh_hr_pa_sh",
+    "xpa_x_hr",
+    "xpa_x_tb_d"
+   ]
+  },
+  {
+   "head": "xrbi",
+   "share": 0.013133,
+   "members": [
+    "bat_velo_matchup",
+    "p_fbv_d"
+   ]
+  },
+  {
+   "head": "xrun",
+   "share": 0.0238,
+   "members": [
+    "c_sb_pa_sh",
+    "s_sb_pa_sh"
+   ]
+  },
+  {
+   "head": "xtb",
+   "share": 0.264244,
+   "members": [
+    "c_hrr3_g_sh",
+    "mix_xwcon",
+    "s_hr_pa",
+    "s_iso",
+    "slot"
+   ]
+  },
+  {
+   "head": "xtb",
+   "share": 0.008165,
+   "members": [
+    "bat_hp1b",
+    "bat_leg_hits",
+    "bat_sprint"
+   ]
+  }
+ ],
+ "keep_diff": {
+  "bak": "feature_keep.pre_chain_0715.bak",
+  "new_heads": [],
+  "gone_heads": [],
+  "heads": {
+   "bb": {
+    "n_old": 40,
+    "n_new": 46,
+    "added": [
+     "Temp",
+     "bd_tssw_d",
+     "bd_zsw_d",
+     "c_run2_g_sh",
+     "d_PA",
+     "d_rbi2_g_sh",
+     "milb_b3",
+     "p_chase_d",
+     "p_fbv_sd",
+     "pc_hbp_bf",
+     "ps_era",
+     "r30_k_pct",
+     "xpen_k"
+    ],
+    "dropped": [
+     "c_bb_pct_sh",
+     "d_hrr4_g_sh",
+     "fp_matchup",
+     "ps_chaos_bf",
+     "r15_PA",
+     "tr15_tb",
+     "ump_r_g"
+    ]
+   },
+   "bk": {
+    "n_old": 58,
+    "n_new": 64,
+    "added": [
+     "Temp",
+     "bat_velo_damage",
+     "bd_fbkxw_d",
+     "hrq_dist_max",
+     "milb_n",
+     "oppo_air_porch",
+     "p_fblou_d",
+     "p_np_l3",
+     "pbip_ld",
+     "r15_hr_pa_sh",
+     "r15_k_pct_sh",
+     "ts_fb95_matchup"
+    ],
+    "dropped": [
+     "bd_fb95wh_d",
+     "bd_fbmidwh_d",
+     "bd_wsw_c",
+     "bipd_flyd",
+     "lg_sb_pa",
+     "pc_k_bf"
+    ]
+   },
+   "bk2": {
+    "n_old": 40,
+    "n_new": 57,
+    "added": [
+     "bat_velo_damage",
+     "bd_brkwh_d",
+     "bd_fbkxw_d",
+     "bd_fpsw_d",
+     "bd_tsfb95wh_d",
+     "bd_zsw_d",
+     "d_k_pct_sh",
+     "opp_cat_csaa",
+     "p_brkmov_d",
+     "p_hit_luck",
+     "park_3b_pg",
+     "park_hand_hr_edge",
+     "pars_whiff",
+     "pen_h_bf",
+     "pen_k_bf",
+     "r15_k_pct",
+     "r15_k_pct_sh",
+     "s_iso",
+     "same_hand",
+     "vloc_k_pct_sh"
+    ],
+    "dropped": [
+     "c_k_pct_sh",
+     "p_fbv_d",
+     "pc_k_bf"
+    ]
+   },
+   "bk3": {
+    "n_old": 40,
+    "n_new": 40,
+    "added": [
+     "Condition",
+     "c_k_pct_sh",
+     "d_k_pct_sh",
+     "m_kpct",
+     "xpa_x_hr_d"
+    ],
+    "dropped": [
+     "bip_xwoba",
+     "called_k_matchup",
+     "r30_k_pct_sh",
+     "s_k_pct_sh",
+     "s_xbh_ab"
+    ]
+   },
+   "double": {
+    "n_old": 40,
+    "n_new": 33,
+    "added": [
+     "bat_weight",
+     "oppo_air_porch",
+     "vloc_h_pa_sh",
+     "xpen_k"
+    ],
+    "dropped": [
+     "air_dens",
+     "bat_hp1b",
+     "bd_f32b_c",
+     "g_l7d",
+     "p_brkmov_d",
+     "p_relsep_d",
+     "p_swstr_d",
+     "park_3b_pg",
+     "park_r_pg",
+     "pen_bb_bf",
+     "pen_h_bf"
+    ]
+   },
+   "hit": {
+    "n_old": 58,
+    "n_new": 68,
+    "added": [
+     "bat_hp1b",
+     "bd_chase_c",
+     "bip_gb_def",
+     "bip_oppo",
+     "bipd_ev105",
+     "ctx_behind_slg",
+     "p_brkmov_d",
+     "p_fbv_sd",
+     "p_ivb_d",
+     "p_stretch_d",
+     "park_r_pg",
+     "park_x_3b",
+     "pars_xslg",
+     "pen_h_bf",
+     "pmilb_b2",
+     "s_bb_pct"
+    ],
+    "dropped": [
+     "bd_fblowh_d",
+     "hum_eff",
+     "r15_sb_pa_sh",
+     "slot",
+     "xpa_x_tb",
+     "xpen_k"
+    ]
+   },
+   "hits2": {
+    "n_old": 65,
+    "n_new": 70,
+    "added": [
+     "CF",
+     "arsenal_whiff",
+     "bat_leg_hits",
+     "bat_velo_damage",
+     "bd_f32b_c",
+     "bip_pullair",
+     "bipd_n",
+     "c_bb_pct",
+     "d_PA",
+     "opp_def_p_oaa",
+     "p5_h_bf",
+     "p_effprem_d",
+     "park_r_pg",
+     "xpa_x_r"
+    ],
+    "dropped": [
+     "bat_velo_matchup",
+     "bd_brkwh_d",
+     "bd_fpsw_d",
+     "c_h_ab",
+     "mix_pullair",
+     "p_outs_sd",
+     "pvloc_k_bf",
+     "r15_PA",
+     "ump_bb_x_bb"
+    ]
+   },
+   "hr": {
+    "n_old": 62,
+    "n_new": 41,
+    "added": [],
+    "dropped": [
+     "Season",
+     "bat_velo_matchup",
+     "bip_gb",
+     "bip_gb_def_if",
+     "bip_hh",
+     "c_r_pa_sh",
+     "d_hr_pa_sh",
+     "lg_hr_pa",
+     "milb_n",
+     "mix_brl",
+     "opp_def_p_oaa",
+     "p5_k_bf",
+     "p_fb95u_d",
+     "p_fbv_d",
+     "p_tswh_d",
+     "park_3b_pg",
+     "pbipd_pullair",
+     "phrq_ev_avg",
+     "pvh_brl",
+     "pvh_xwoba",
+     "ump_k_pct"
+    ]
+   },
+   "hrr2": {
+    "n_old": 105,
+    "n_new": 80,
+    "added": [
+     "air_porch",
+     "bat_sprint",
+     "bat_velo_damage",
+     "opp_def_p_oaa",
+     "p_fbloxw_d",
+     "pen_np_l3",
+     "vloc_h_pa_sh"
+    ],
+    "dropped": [
+     "CF",
+     "bat_leg_hits",
+     "bd_chase_c",
+     "bd_zsw_d",
+     "bip_air_def",
+     "bip_air_def_of",
+     "bip_pull",
+     "bipd_ev105",
+     "bvh_n",
+     "c_hrr2_g_sh",
+     "opp_def_p_of",
+     "opp_oaa",
+     "p5_hr_trend",
+     "p_fbv_d",
+     "p_stretch_d",
+     "pars_rv100",
+     "pars_whiff",
+     "pars_xslg",
+     "pbipd_n",
+     "pmilb_b2",
+     "pmilb_k",
+     "ps_h_bf",
+     "r15_tb_ab",
+     "r30_k_pct",
+     "r30_sb_pa_sh",
+     "sb_att1",
+     "tsb_sb_g",
+     "tsb_stop",
+     "ump_k_pct",
+     "ump_k_x_take",
+     "vsh_PA",
+     "xpa_x_sb_d"
+    ]
+   },
+   "hrr3": {
+    "n_old": 83,
+    "n_new": 72,
+    "added": [
+     "bat_velo_damage",
+     "c_k_pct",
+     "c_tb_ab",
+     "opp_cat_csaa",
+     "opp_cat_pop",
+     "p_fb95xw_d",
+     "pen_hr_bf",
+     "pvh_xwoba",
+     "sb_cat_env",
+     "xpa_x_sb_d"
+    ],
+    "dropped": [
+     "air_porch",
+     "bat_hp1b",
+     "bat_velo_matchup",
+     "bip_air_def",
+     "carry_air",
+     "ctx_behind_slg",
+     "ctx_behind_slg_d",
+     "g_l7d",
+     "milb_b3",
+     "mix_xwcon",
+     "p5_h_bf",
+     "p_f32b_d",
+     "p_relsep_d",
+     "park_3b_pg",
+     "pen_h_bf",
+     "slot",
+     "toff_k_pct",
+     "toff_loc_hr_pa",
+     "ts_matchup",
+     "tsb_sb_g",
+     "ump_k_pct"
+    ]
+   },
+   "hrr4": {
+    "n_old": 65,
+    "n_new": 73,
+    "added": [
+     "bat_sprint",
+     "bip_air_def",
+     "c_tb_ab",
+     "mix_k",
+     "park_2b_pg",
+     "park_x_3b",
+     "pmilb_b2",
+     "pvloc_era",
+     "r30_sb_pa_sh",
+     "tsb_stop",
+     "vsh_tb_ab_sh",
+     "xpa_x_r"
+    ],
+    "dropped": [
+     "bip_hh",
+     "p_fbv_d",
+     "ump_k_pct",
+     "xpa_x_hit"
+    ]
+   },
+   "k": {
+    "n_old": 63,
+    "n_new": 70,
+    "added": [
+     "lu_fb95wh",
+     "lu_fbmidwh",
+     "lu_fbmidxw",
+     "lu_velo_k",
+     "pars_paway",
+     "pc_k_bf",
+     "pd_brkxw_d",
+     "pd_fb95xw_d",
+     "ps_strike_pct",
+     "travel_km",
+     "vs_k_pct"
+    ],
+    "dropped": [
+     "lu_fbwh",
+     "pd_stretch_vdelta_d",
+     "pd_tswh_d",
+     "vs_bb_pct"
+    ]
+   },
+   "outs": {
+    "n_old": 54,
+    "n_new": 68,
+    "added": [
+     "WindDir",
+     "frame_x_edge",
+     "lu_fb95xw",
+     "lu_fbloxw",
+     "lu_fbmidxw",
+     "lu_fpsw",
+     "lu_gidp",
+     "own_cat_frame",
+     "p_il_ret_days",
+     "pbipd_gb",
+     "pc_bb_bf",
+     "pc_hr_bf",
+     "pd_brkwh_d",
+     "psb_stop",
+     "pvloc_era",
+     "vs_hr_pa"
+    ],
+    "dropped": [
+     "lu_xwcon",
+     "pd_trsame_d"
+    ]
+   },
+   "pbb": {
+    "n_old": 40,
+    "n_new": 49,
+    "added": [
+     "air_dens",
+     "lu_fb95xw",
+     "lu_whiff",
+     "own_def_p_of",
+     "p_tto_decay",
+     "pd_brkxw_d",
+     "pd_offwh_d",
+     "pmilb_b2",
+     "pmilb_n",
+     "ps_bb_bf"
+    ],
+    "dropped": [
+     "pd_f32b_d"
+    ]
+   },
+   "per": {
+    "n_old": 53,
+    "n_new": 61,
+    "added": [
+     "lu_fbloxw",
+     "lu_offxw",
+     "lu_velo_k",
+     "lu_vsh_k",
+     "own_cat_pop",
+     "p_il_ret_days",
+     "pd_off_d",
+     "pd_w02_d",
+     "pmilb_n",
+     "ump_r_g"
+    ],
+    "dropped": [
+     "pars_kpct",
+     "pd_fbwh_d"
+    ]
+   },
+   "pha": {
+    "n_old": 40,
+    "n_new": 56,
+    "added": [
+     "lg_r_pa",
+     "lu_gidp",
+     "lu_offxw",
+     "lu_vsh_k",
+     "own_cat_pop",
+     "own_def_p_oaa",
+     "p_il_ret_days",
+     "park_tb_pg",
+     "pbip_flyd",
+     "pbipd_gb",
+     "pc_bb_bf",
+     "pd_edge_d",
+     "pd_f32b_d",
+     "pd_fbv_tr",
+     "pd_zone_d",
+     "pmilb_bb"
+    ],
+    "dropped": []
+   },
+   "rbi": {
+    "n_old": 61,
+    "n_new": 65,
+    "added": [
+     "carry_air",
+     "opp_cat_csaa",
+     "p_stretch_d",
+     "park_2b_pg",
+     "park_r_pg",
+     "pen_np_l3",
+     "pmilb_k",
+     "pmilb_n",
+     "ps_BF",
+     "ps_era",
+     "pvloc_era",
+     "s_iso"
+    ],
+    "dropped": [
+     "bat_weight",
+     "bip_ev105",
+     "c_ibb_pa",
+     "opp_def_p_oaa",
+     "p_relsep_d",
+     "park_3b_pg",
+     "s_xbh_ab",
+     "slot"
+    ]
+   },
+   "rbi2": {
+    "n_old": 56,
+    "n_new": 61,
+    "added": [
+     "bat_velo_damage",
+     "c_ibb_pa",
+     "c_tb_ab",
+     "d_rbi2_g_sh",
+     "g_l7d",
+     "opp_def_p_oaa",
+     "p_fbv_d",
+     "p_starts_season",
+     "p_swstr_d",
+     "p_tswh_d",
+     "pmilb_k",
+     "pmilb_n",
+     "ps_BF",
+     "ps_k_bf",
+     "r7_PA"
+    ],
+    "dropped": [
+     "bipd_gb",
+     "c_iso_sh",
+     "c_tb_ab_sh",
+     "ctx_ahead_brr",
+     "hrq_dist_max",
+     "p_stretch_d",
+     "pbipd_n",
+     "pmilb_b1",
+     "tsb_sb_g",
+     "xpa_x_tb"
+    ]
+   },
+   "run": {
+    "n_old": 88,
+    "n_new": 82,
+    "added": [
+     "bat_velo_damage",
+     "bat_velo_matchup",
+     "milb_hr",
+     "mix_bb",
+     "p_effprem_d",
+     "p_fb95xw_d",
+     "psb_sb27",
+     "sb_cat_env",
+     "toff_hr_pa"
+    ],
+    "dropped": [
+     "bip_gb_def",
+     "bipd_ev105",
+     "c_run2_g_sh",
+     "c_tb_ab",
+     "d_hrr4_g_sh",
+     "d_r_pa_sh",
+     "mix_hr",
+     "p_fbv_d",
+     "p_swstr_d",
+     "park_x_3b",
+     "pen_h_bf",
+     "ps_bb_bf",
+     "s_sb_pa_sh",
+     "xpa_x_sb",
+     "xpen_k"
+    ]
+   },
+   "run2": {
+    "n_old": 60,
+    "n_new": 66,
+    "added": [
+     "WindDir",
+     "c_tb_ab",
+     "hum_eff",
+     "milb_sb_succ",
+     "p_relsep_d",
+     "pbipd_ev",
+     "pc_chaos_bf",
+     "pc_h_bf",
+     "pmilb_k",
+     "sb_cat_env",
+     "toff_bsr_luck",
+     "xpa_x_bb_d"
+    ],
+    "dropped": [
+     "bat_weight",
+     "d_PA",
+     "mix_xwcon",
+     "p_fbv_d",
+     "ps_chaos_bf",
+     "slot"
+    ]
+   },
+   "sb": {
+    "n_old": 40,
+    "n_new": 40,
+    "added": [
+     "WindDir",
+     "bat_weight",
+     "bd_offxw_d",
+     "c_3b_ab_sh",
+     "frame_x_take",
+     "mix_bb",
+     "p_off_d",
+     "ps_bb_bf",
+     "sb_cat_env"
+    ],
+    "dropped": [
+     "bat_age",
+     "called_k_matchup",
+     "carry_air",
+     "off_matchup",
+     "pbipd_brl",
+     "pc_bb_bf",
+     "pen_hr_bf",
+     "pmilb_bb",
+     "pos_dh_share"
+    ]
+   },
+   "single": {
+    "n_old": 59,
+    "n_new": 76,
+    "added": [
+     "air_fly",
+     "bat_weight",
+     "bip_gb_def",
+     "bip_pu",
+     "c_tb_ab",
+     "lg_sb_pa",
+     "mix_bb",
+     "oppo_air_porch",
+     "p_kbb",
+     "p_stretch_d",
+     "park_2b_pg",
+     "park_x_hr",
+     "pbip_hh",
+     "pbipd_pullair",
+     "pen_k_bf",
+     "pull_fence",
+     "ride_air",
+     "ump_k_x_bk",
+     "xpa_x_sb_d"
+    ],
+    "dropped": [
+     "bd_tswh_d",
+     "d_bb_pct_sh"
+    ]
+   },
+   "tb2": {
+    "n_old": 72,
+    "n_new": 63,
+    "added": [
+     "bat_velo_damage",
+     "hit_luck",
+     "opp_cat_csaa",
+     "pen_bb_bf",
+     "pmilb_k",
+     "s_bb_pct"
+    ],
+    "dropped": [
+     "c_hrr3_g_sh",
+     "c_iso",
+     "carry_air",
+     "hrq_dist_avg",
+     "p_effprem_d",
+     "p_f32b_d",
+     "p_fbv_d",
+     "p_kbb",
+     "pars_whiff",
+     "pbip_ev",
+     "pvh_brl",
+     "r15_PA",
+     "toff_loc_r_pg",
+     "ump_k_pct",
+     "vsh_tb_ab_sh"
+    ]
+   },
+   "tb3": {
+    "n_old": 52,
+    "n_new": 40,
+    "added": [
+     "bat_velo_matchup",
+     "bd_zsw_d",
+     "bip_ev105",
+     "c_iso",
+     "hrq_ev_avg",
+     "pc_k_bf",
+     "pvh_xwoba",
+     "r15_PA",
+     "r30_PA"
+    ],
+    "dropped": [
+     "bat_leg_hits",
+     "bd_chase_d",
+     "bip_ev",
+     "bipd_gb",
+     "bvh_xwoba",
+     "carry_air",
+     "g_l7d",
+     "hit_luck",
+     "milb_hr",
+     "mix_xwcon",
+     "p_effprem_d",
+     "p_fbv_d",
+     "p_relsep_d",
+     "pbipd_ev",
+     "phrq_n",
+     "pmilb_n",
+     "s_hr_pa",
+     "slot",
+     "toff_loc_r_pg",
+     "xpa_bat",
+     "xpa_x_hit"
+    ]
+   },
+   "tb4": {
+    "n_old": 64,
+    "n_new": 42,
+    "added": [
+     "bip_ev105",
+     "c_rbi2_g_sh",
+     "ump_k_pct"
+    ],
+    "dropped": [
+     "Season",
+     "bat_velo_matchup",
+     "bip_oppo",
+     "bvh_xwoba",
+     "c_obp",
+     "ctx_behind_obp",
+     "ctx_behind_slg",
+     "hrpt_score",
+     "mix_air",
+     "mix_gb",
+     "mix_xwcon",
+     "opp_def_p_oaa",
+     "p_fb95u_d",
+     "p_fbv_d",
+     "pbipd_ev",
+     "pbipd_gb",
+     "pbipd_pullair",
+     "phrq_ev_avg",
+     "phrq_n",
+     "ps_k_bf",
+     "pvh_brl",
+     "s_1b_ab_sh",
+     "s_iso",
+     "tsb_sb_g",
+     "xpa_x_tb_d"
+    ]
+   },
+   "total": {
+    "n_old": 40,
+    "n_new": 35,
+    "added": [],
+    "dropped": [
+     "lg_hr_pa",
+     "off_lu_brr_xb",
+     "off_lu_vsh_kedge",
+     "opp_ps_xwcon_d",
+     "opp_st_outs_pg"
+    ]
+   },
+   "triple": {
+    "n_old": 40,
+    "n_new": 23,
+    "added": [
+     "ctx_ahead_slg_d",
+     "milb_hbp"
+    ],
+    "dropped": [
+     "CF",
+     "air_dens",
+     "bat_age",
+     "bat_hand",
+     "bat_weight",
+     "bip_air_def_of",
+     "bip_pu",
+     "called_k_matchup",
+     "hrq_angle_avg",
+     "milb_att",
+     "milb_hr",
+     "p_brk_d",
+     "pen_h_bf",
+     "pmilb_k",
+     "pvloc_k_bf",
+     "same_hand",
+     "sb_att1",
+     "sb_chain_env",
+     "tr15_hr"
+    ]
+   },
+   "winner": {
+    "n_old": 40,
+    "n_new": 23,
+    "added": [],
+    "dropped": [
+     "away_pc_hr_bf",
+     "away_pen_era",
+     "away_ps_era",
+     "away_ps_hr_bf",
+     "d_bsr_luck",
+     "d_lu_arswh",
+     "d_lu_obp_gap",
+     "d_pc_era",
+     "d_ps_xwcon_d",
+     "d_r_pg",
+     "d_win_pct",
+     "home_p_days_rest",
+     "home_pc_era",
+     "home_r_pg",
+     "home_ra_pg",
+     "home_rd20",
+     "home_w20"
+    ]
+   },
+   "xbb": {
+    "n_old": 40,
+    "n_new": 47,
+    "added": [
+     "WindDir",
+     "bipd_pullair",
+     "carry_air",
+     "pbip_xba",
+     "pmilb_n",
+     "ps_hr_bf",
+     "ps_k_bf",
+     "pvh_brl",
+     "s_obp",
+     "toff_bsr_luck"
+    ],
+    "dropped": [
+     "d_hrr4_g_sh",
+     "mix_xwcon",
+     "r7_PA"
+    ]
+   },
+   "xbk": {
+    "n_old": 53,
+    "n_new": 94,
+    "added": [
+     "Temp",
+     "bat_height",
+     "bat_velo_damage",
+     "bat_weight",
+     "bd_brkwh_c",
+     "bd_brkwh_d",
+     "bd_chase_d",
+     "bd_fb95wh_d",
+     "bd_fbkxw_d",
+     "bd_tssw_c",
+     "bd_zsw_c",
+     "bip_la",
+     "bip_xwoba",
+     "bipd_pullair",
+     "bvh_n",
+     "c_3b_ab_sh",
+     "c_bb_pct",
+     "d_k_pct_sh",
+     "day_after_night",
+     "mix_bb",
+     "opp_cat_csaa",
+     "oppo_air_porch",
+     "p_brkxw_d",
+     "p_fb95xw_d",
+     "p_fbv_sd",
+     "p_tswh_d",
+     "park_3b_pg",
+     "park_h_pg",
+     "pbip_ld",
+     "pmilb_gs_share",
+     "pmilb_hr",
+     "r15_k_pct_sh",
+     "r15_r_pa_sh",
+     "ride_air",
+     "s_bb_pct",
+     "s_iso",
+     "s_xbh_ab",
+     "ump_bb_pct",
+     "ump_k_x_bk",
+     "xpa_x_bb_d",
+     "xpa_x_r"
+    ],
+    "dropped": []
+   },
+   "xh": {
+    "n_old": 72,
+    "n_new": 71,
+    "added": [
+     "CF",
+     "bat_velo_damage",
+     "bd_brkwh_d",
+     "p_outs_sd",
+     "pbipd_ev"
+    ],
+    "dropped": [
+     "bat_velo_matchup",
+     "bip_gb_def",
+     "c_h_ab",
+     "p_fblou_d",
+     "p_stretch_d",
+     "ump_k_x_take"
+    ]
+   },
+   "xhrr": {
+    "n_old": 127,
+    "n_new": 102,
+    "added": [
+     "CF",
+     "bat_velo_damage",
+     "opp_cat_csaa",
+     "opp_cat_pop",
+     "pen_k_bf"
+    ],
+    "dropped": [
+     "bat_velo_matchup",
+     "bip_air_def",
+     "bip_hh",
+     "c_run2_g_sh",
+     "lg_sb_pa",
+     "mix_xwcon",
+     "opp_def_uer",
+     "opp_oaa",
+     "p5_h_bf",
+     "p5_k_trend",
+     "p_effprem_d",
+     "p_f32b_d",
+     "p_fps_d",
+     "p_outs_sd",
+     "pars_rv100",
+     "pbip_hh",
+     "pvh_brl",
+     "pvloc_era",
+     "r15_k_pct",
+     "r15_sb_pa_sh",
+     "r15_tb_ab",
+     "r30_sb_pa_sh",
+     "rbi_conv",
+     "ride_air",
+     "slot",
+     "toff_r_pg",
+     "ump_bb_pct",
+     "velo_band_whiff",
+     "xpa_x_hr_d",
+     "xpen_k"
+    ]
+   },
+   "xrbi": {
+    "n_old": 77,
+    "n_new": 81,
+    "added": [
+     "bat_height",
+     "bat_velo_damage",
+     "bd_chase_c",
+     "bd_chase_d",
+     "bip_ev105",
+     "milb_b3",
+     "mix_hr",
+     "p_relsep_d",
+     "park_r_pg",
+     "pc_k_bf",
+     "pen_h_bf",
+     "pen_hl_era",
+     "pen_hr_bf",
+     "pmilb_gs_share",
+     "pmilb_n",
+     "ps_era",
+     "pvloc_era",
+     "r15_PA",
+     "s_xbh_ab"
+    ],
+    "dropped": [
+     "bat_velo_matchup",
+     "c_tb_ab",
+     "hrq_dist_max",
+     "opp_def_p_oaa",
+     "p5_h_bf",
+     "p_fbv_d",
+     "p_outs_sd",
+     "p_stretch_d",
+     "park_3b_pg",
+     "pbipd_n",
+     "slot",
+     "ts_matchup",
+     "ump_bb_pct",
+     "xpa_x_hr",
+     "xpa_x_tb_d"
+    ]
+   },
+   "xrun": {
+    "n_old": 99,
+    "n_new": 103,
+    "added": [
+     "bat_velo_damage",
+     "bipd_flyd",
+     "c_xbh_ab",
+     "d_PA",
+     "d_hrr4_g_sh",
+     "d_sb_pa_sh",
+     "p_effprem_d",
+     "p_fb95xw_d",
+     "p_tswh_d",
+     "pbip_ev",
+     "s_xbh_ab",
+     "sb_cat_env",
+     "toff_bsr_luck"
+    ],
+    "dropped": [
+     "c_tb_ab",
+     "carry_air",
+     "mix_hr",
+     "p_fb95u_d",
+     "p_fbv_d",
+     "pbipd_pullair",
+     "ps_bb_bf",
+     "psb_sb27",
+     "pvloc_hr_bf"
+    ]
+   },
+   "xtb": {
+    "n_old": 106,
+    "n_new": 66,
+    "added": [
+     "bat_velo_damage",
+     "opp_cat_csaa",
+     "park_r_pg",
+     "pvh_xwoba"
+    ],
+    "dropped": [
+     "Condition",
+     "Season",
+     "bat_hp1b",
+     "bat_leg_hits",
+     "bat_sprint",
+     "bd_chase_d",
+     "bd_f32b_c",
+     "bip_gb_def",
+     "bip_la",
+     "bipd_brl",
+     "bipd_gb",
+     "c_hrr3_g_sh",
+     "c_iso",
+     "d_bb_pct_sh",
+     "g_l7d",
+     "hit_luck",
+     "hrpt_score",
+     "hrq_angle_avg",
+     "milb_b3",
+     "mix_gb",
+     "mix_xwcon",
+     "p_effprem_d",
+     "p_fbv_d",
+     "p_relsep_d",
+     "p_stretch_d",
+     "park_hr_pg",
+     "park_x_2b",
+     "pars_xslg",
+     "pbipd_n",
+     "pen_bb_bf",
+     "pen_h_bf",
+     "pmilb_b1",
+     "pmilb_b2",
+     "pmilb_k",
+     "ps_BF",
+     "pvh_brl",
+     "r15_tb_ab",
+     "s_hr_pa",
+     "s_iso",
+     "slot",
+     "toff_loc_hr_pa",
+     "toff_loc_r_pg",
+     "toff_r_pg",
+     "xpen_bb"
+    ]
+   }
+  }
+ }
+}

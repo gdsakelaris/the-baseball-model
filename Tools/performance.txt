@@ -1,0 +1,819 @@
+==============================================================================
+MODEL HEAD PERFORMANCE - most recent retrain
+==============================================================================
+generated  2026-07-14 22:38
+SELECTION year 2025   metrics_select.json @ 2026-07-14 14:54
+          note: eval_baseline_select_2025.json is older than its metrics file - total MAE / observed dispersion may lag
+SHIPPING  year 2026   metrics.json @ 2026-07-14 16:48
+          note: eval_baseline_2026.json is older than its metrics file - total MAE / observed dispersion may lag
+
+Suites: SELECTION = the decision year | SHIPPING = the season the serving models are scored on.
+NEITHER is an untouched test: 2025 carries calibration + feature-selection information, and
+2026 is a partial season already seen by past decisions - read both as UPPER-BOUND estimates.
+The leakage-free read is the graded forward record: python Tools/4_grade_results.py --all
+
+Probability heads: logloss/edge/AUC/Brier/ECE/top-10-a-day.  Count heads: MAE/dispersion.
+edge = base-rate logloss - model logloss.  ECE from the metrics.json decile table.
+dispersion: variance/mean, 1.0 = Poisson-ideal (>1 = real counts wilder than modeled).
+
+------------------------------------------------------------------------------
+SUMMARY - probability heads
+------------------------------------------------------------------------------
+head    suite       n   base  logloss    edge     AUC   Brier     ECE  top10
+------  -----  ------  -----  -------  ------  ------  ------  ------  -----
+hr       SELE  43,740  11.7%   0.3486  0.0127  0.6389  0.1008  0.0034  23.0%
+hr       SHIP  25,992  11.6%   0.3476  0.0123  0.6365  0.1003  0.0061  26.1%
+hit      SELE  43,740  61.2%   0.6583  0.0095  0.5801  0.2330  0.0070  73.4%
+hit      SHIP  25,992  60.7%   0.6620  0.0081  0.5736  0.2347  0.0074  70.5%
+hits2    SELE  43,740  21.9%   0.5159  0.0103  0.5964  0.1677  0.0056  34.8%
+hits2    SHIP  25,992  21.5%   0.5108  0.0100  0.5951  0.1655  0.0047  33.2%
+tb2      SELE  43,740  35.6%   0.6409  0.0103  0.5833  0.2246  0.0057  50.1%
+tb2      SHIP  25,992  35.2%   0.6389  0.0100  0.5832  0.2237  0.0084  45.6%
+run      SELE  43,740  37.5%   0.6509  0.0110  0.5861  0.2294  0.0080  54.4%
+run      SHIP  25,992  38.2%   0.6547  0.0102  0.5837  0.2312  0.0076  51.8%
+rbi      SELE  43,740  29.8%   0.6014  0.0075  0.5758  0.2060  0.0057  42.1%
+rbi      SHIP  25,992  29.5%   0.6002  0.0067  0.5732  0.2053  0.0098  40.5%
+bb       SELE  43,740  28.6%   0.5797  0.0189  0.6214  0.1964  0.0075  50.8%
+bb       SHIP  25,992  30.3%   0.5937  0.0204  0.6208  0.2029  0.0098  53.2%
+sb       SELE  43,740   6.7%   0.2248  0.0245  0.7346  0.0599  0.0074  20.5%
+sb       SHIP  25,992   6.5%   0.2182  0.0234  0.7367  0.0578  0.0031  21.2%
+single   SELE  43,740  45.0%   0.6800  0.0082  0.5725  0.2435  0.0072  58.5%
+single   SHIP  25,992  44.8%   0.6806  0.0071  0.5670  0.2438  0.0082  58.9%
+double   SELE  43,740  15.9%   0.4359  0.0026  0.5541  0.1332  0.0059  22.2%
+double   SHIP  25,992  15.5%   0.4295  0.0029  0.5573  0.1306  0.0065  18.8%
+bk       SELE  43,740  61.9%   0.6388  0.0260  0.6312  0.2238  0.0054  79.4%
+bk       SHIP  25,992  61.1%   0.6400  0.0282  0.6362  0.2245  0.0121  82.3%
+bk2      SELE  43,740  22.0%   0.5023  0.0244  0.6494  0.1634  0.0063  41.3%
+bk2      SHIP  25,992  21.8%   0.4988  0.0258  0.6532  0.1620  0.0084  43.1%
+hrr2     SELE  43,740  45.9%   0.6783  0.0115  0.5856  0.2427  0.0048  61.7%
+hrr2     SHIP  25,992  45.6%   0.6791  0.0103  0.5811  0.2431  0.0093  56.2%
+hrr3     SELE  43,740  29.4%   0.5946  0.0115  0.5935  0.2030  0.0051  46.3%
+hrr3     SHIP  25,992  29.3%   0.5956  0.0095  0.5865  0.2033  0.0074  41.6%
+bk3      SELE  43,740   4.5%   0.1743  0.0106  0.6939  0.0424  0.0027  13.7%
+bk3      SHIP  25,992   4.6%   0.1777  0.0103  0.6882  0.0433  0.0021  14.6%
+tb3      SELE  43,740  20.7%   0.5003  0.0105  0.5999  0.1610  0.0051  33.3%
+tb3      SHIP  25,992  20.5%   0.4981  0.0097  0.5969  0.1600  0.0068  30.9%
+tb4      SELE  43,740  14.6%   0.4053  0.0113  0.6189  0.1222  0.0056  25.9%
+tb4      SHIP  25,992  14.4%   0.4015  0.0114  0.6196  0.1207  0.0051  27.7%
+hrr4     SELE  43,740  17.4%   0.4533  0.0097  0.6032  0.1412  0.0049  30.1%
+hrr4     SHIP  25,992  17.4%   0.4543  0.0081  0.5962  0.1415  0.0073  27.1%
+triple   SELE  43,740   1.4%   0.0692  0.0032  0.6812  0.0133  0.0023   4.0%
+triple   SHIP  25,992   1.4%   0.0711  0.0030  0.6623  0.0137  0.0027   4.9%
+rbi2     SELE  43,740  10.4%   0.3291  0.0056  0.5985  0.0925  0.0047  18.3%
+rbi2     SHIP  25,992  10.7%   0.3366  0.0044  0.5883  0.0950  0.0067  16.8%
+run2     SELE  43,740   8.3%   0.2775  0.0081  0.6282  0.0746  0.0048  20.3%
+run2     SHIP  25,992   8.1%   0.2752  0.0058  0.6133  0.0735  0.0050  15.8%
+winner   SELE   2,430  54.3%   0.6810  0.0086  0.5757  0.2440       -      -
+winner   SHIP   1,444  52.2%   0.6889  0.0035  0.5508  0.2479       -      -
+
+------------------------------------------------------------------------------
+SUMMARY - count / regression heads
+------------------------------------------------------------------------------
+head        suite       n     MAE    gain  disp_cal  disp_obs  mean_act  mean_prd     bias
+----------  -----  ------  ------  ------  --------  --------  --------  --------  -------
+xbk          SELE  43,740  0.6663  0.0034    0.7853    0.7873    0.8886    0.8848  -0.0038
+xbk          SHIP  25,992  0.6691  0.0089    0.7841    0.7911    0.8810    0.8871   0.0061
+xhrr         SELE  43,740  1.5063  0.0214    1.9364    1.9646    1.8128    1.8657   0.0529
+xhrr         SHIP  25,992  1.5011  0.0232    1.9973    1.9864    1.8037    1.8301   0.0264
+xtb          SELE  43,740  1.3514  0.0322    1.9904    2.0323    1.4633    1.5132   0.0499
+xtb          SHIP  25,992  1.3326  0.0414    2.0732    2.0318    1.4416    1.4669   0.0254
+xh           SELE  43,740  0.6824  0.0015    0.8186         -    0.8865    0.9080   0.0215
+xh           SHIP  25,992  0.6802  0.0004    0.8383         -    0.8737    0.8892   0.0156
+xrun         SELE  43,740  0.5770  0.0127    0.9149         -    0.4710    0.4886   0.0176
+xrun         SHIP  25,992  0.5756  0.0125    0.9469         -    0.4755    0.4838   0.0082
+xrbi         SELE  43,740  0.6310  0.0095    1.4833         -    0.4553    0.4662   0.0109
+xrbi         SHIP  25,992  0.6311  0.0103    1.5278         -    0.4545    0.4580   0.0036
+xbb          SELE  43,740  0.4599  0.0204    0.9390         -    0.3370    0.3359  -0.0011
+xbb          SHIP  25,992  0.4755  0.0160    0.9644         -    0.3596    0.3467  -0.0129
+k            SELE   4,860  1.7347  0.1835    0.9881    1.0116    4.7823    4.7507  -0.0316
+k            SHIP   2,888  1.7239  0.2079    1.0026    0.9879    4.7413    4.7681   0.0267
+outs         SELE   4,860  2.6912  0.3039    0.8341    0.8099   15.5630   15.6835   0.1205
+outs         SHIP   2,888  2.6569  0.4342    0.8085    0.8199   15.2389   15.4532   0.2143
+pbb          SELE   4,860  1.0001  0.0827    0.9062    0.9089    1.7088    1.6771  -0.0318
+pbb          SHIP   2,888  1.0036  0.1173    0.9061    0.9048    1.7985    1.7361  -0.0624
+pha          SELE   4,860  1.6906  0.1616    0.9052    0.8731    4.9004    5.0469   0.1464
+pha          SHIP   2,888  1.6714  0.2131    0.8755    0.8862    4.7500    4.9221   0.1721
+per          SELE   4,860  1.5703  0.0857    1.5165    1.5169    2.4276    2.4881   0.0606
+per          SHIP   2,888  1.5677  0.1289    1.5287    1.5937    2.4013    2.4053   0.0040
+team_runs    SELE   4,860  2.5013  0.0415         -         -    4.4473    4.4933   0.0460
+team_runs    SHIP   2,888  2.5210  0.0834         -         -    4.5163    4.4706  -0.0457
+total        SELE       -  3.5895       -    2.0265    2.2745         -         -        -
+total        SHIP       -  3.5442       -    2.2893    2.2415         -         -        -
+team_total   SELE       -       -       -    2.0762         -         -         -        -
+team_total   SHIP       -       -       -    2.2922         -         -         -        -
+
+==============================================================================
+PER-HEAD DETAIL - every metric each head has, both suites
+==============================================================================
+
+##############################################################################
+# Batter - probability heads
+##############################################################################
+
+=== hr  -  home run ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         11.7%          11.6%
+logloss                (lower better)            0.3486         0.3476
+  base-rate logloss                              0.3614         0.3598
+  naive season-rate logloss                           -         0.4488
+  edge = base - model   (higher better)          0.0127         0.0123
+AUC                    (higher better)           0.6389         0.6365
+Brier                  (lower better)            0.1008         0.1003
+  base-rate Brier                                0.1035         0.1029
+  naive season-rate Brier                             -         0.1055
+ECE                    (lower better)            0.0034         0.0061
+accuracy                                          88.3%          88.4%
+top-10/day hit rate    (higher better)            23.0%          26.1%
+best iteration                                      203            160
+GBM blend weight                                 0.5500         0.5000
+n (train rows)                                  361,746        405,468
+
+=== hit  -  1+ hit ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         61.2%          60.7%
+logloss                (lower better)            0.6583         0.6620
+  base-rate logloss                              0.6678         0.6701
+  edge = base - model   (higher better)          0.0095         0.0081
+AUC                    (higher better)           0.5801         0.5736
+Brier                  (lower better)            0.2330         0.2347
+  base-rate Brier                                0.2374         0.2386
+ECE                    (lower better)            0.0070         0.0074
+accuracy                                          61.5%          61.1%
+top-10/day hit rate    (higher better)            73.4%          70.5%
+best iteration                                      156            141
+GBM blend weight                                 0.9000         0.8500
+n (train rows)                                  361,746        405,468
+
+=== hits2  -  2+ hits ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         21.9%          21.5%
+logloss                (lower better)            0.5159         0.5108
+  base-rate logloss                              0.5262         0.5208
+  edge = base - model   (higher better)          0.0103         0.0100
+AUC                    (higher better)           0.5964         0.5951
+Brier                  (lower better)            0.1677         0.1655
+  base-rate Brier                                0.1712         0.1689
+ECE                    (lower better)            0.0056         0.0047
+accuracy                                          78.1%          78.5%
+top-10/day hit rate    (higher better)            34.8%          33.2%
+best iteration                                      138            210
+GBM blend weight                                 0.8000         0.7000
+n (train rows)                                  361,746        405,468
+
+=== tb2  -  2+ total bases ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         35.6%          35.2%
+logloss                (lower better)            0.6409         0.6389
+  base-rate logloss                              0.6512         0.6490
+  edge = base - model   (higher better)          0.0103         0.0100
+AUC                    (higher better)           0.5833         0.5832
+Brier                  (lower better)            0.2246         0.2237
+  base-rate Brier                                0.2293         0.2282
+ECE                    (lower better)            0.0057         0.0084
+accuracy                                          64.6%          64.8%
+top-10/day hit rate    (higher better)            50.1%          45.6%
+best iteration                                      115            264
+GBM blend weight                                 0.7500         0.7000
+n (train rows)                                  361,746        405,468
+
+=== run  -  run scored ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         37.5%          38.2%
+logloss                (lower better)            0.6509         0.6547
+  base-rate logloss                              0.6618         0.6648
+  edge = base - model   (higher better)          0.0110         0.0102
+AUC                    (higher better)           0.5861         0.5837
+Brier                  (lower better)            0.2294         0.2312
+  base-rate Brier                                0.2345         0.2360
+ECE                    (lower better)            0.0080         0.0076
+accuracy                                          62.9%          62.1%
+top-10/day hit rate    (higher better)            54.4%          51.8%
+best iteration                                       96            131
+GBM blend weight                                 0.9000         0.7500
+n (train rows)                                  361,746        405,468
+
+=== rbi  -  1+ RBI ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         29.8%          29.5%
+logloss                (lower better)            0.6014         0.6002
+  base-rate logloss                              0.6089         0.6068
+  edge = base - model   (higher better)          0.0075         0.0067
+AUC                    (higher better)           0.5758         0.5732
+Brier                  (lower better)            0.2060         0.2053
+  base-rate Brier                                0.2091         0.2081
+ECE                    (lower better)            0.0057         0.0098
+accuracy                                          70.2%          70.5%
+top-10/day hit rate    (higher better)            42.1%          40.5%
+best iteration                                      129            165
+GBM blend weight                                 0.8000         0.8000
+n (train rows)                                  361,746        405,468
+
+=== bb  -  1+ walk ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         28.6%          30.3%
+logloss                (lower better)            0.5797         0.5937
+  base-rate logloss                              0.5985         0.6141
+  edge = base - model   (higher better)          0.0189         0.0204
+AUC                    (higher better)           0.6214         0.6208
+Brier                  (lower better)            0.1964         0.2029
+  base-rate Brier                                0.2042         0.2115
+ECE                    (lower better)            0.0075         0.0098
+accuracy                                          71.6%          70.0%
+top-10/day hit rate    (higher better)            50.8%          53.2%
+best iteration                                      168            239
+GBM blend weight                                 0.6000         0.7500
+n (train rows)                                  361,746        405,468
+
+=== sb  -  stolen base ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                          6.7%           6.5%
+logloss                (lower better)            0.2248         0.2182
+  base-rate logloss                              0.2493         0.2416
+  edge = base - model   (higher better)          0.0245         0.0234
+AUC                    (higher better)           0.7346         0.7367
+Brier                  (lower better)            0.0599         0.0578
+  base-rate Brier                                0.0631         0.0608
+ECE                    (lower better)            0.0074         0.0031
+accuracy                                          93.3%          93.5%
+top-10/day hit rate    (higher better)            20.5%          21.2%
+best iteration                                      103            142
+GBM blend weight                                 1.0000         0.8500
+n (train rows)                                  361,746        405,468
+
+=== single  -  1+ single ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         45.0%          44.8%
+logloss                (lower better)            0.6800         0.6806
+  base-rate logloss                              0.6882         0.6876
+  edge = base - model   (higher better)          0.0082         0.0071
+AUC                    (higher better)           0.5725         0.5670
+Brier                  (lower better)            0.2435         0.2438
+  base-rate Brier                                0.2475         0.2473
+ECE                    (lower better)            0.0072         0.0082
+accuracy                                          56.7%          56.6%
+top-10/day hit rate    (higher better)            58.5%          58.9%
+best iteration                                      121            115
+GBM blend weight                                 0.7500         0.7500
+n (train rows)                                  361,746        405,468
+
+=== double  -  1+ double ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         15.9%          15.5%
+logloss                (lower better)            0.4359         0.4295
+  base-rate logloss                              0.4385         0.4323
+  edge = base - model   (higher better)          0.0026         0.0029
+AUC                    (higher better)           0.5541         0.5573
+Brier                  (lower better)            0.1332         0.1306
+  base-rate Brier                                0.1339         0.1314
+ECE                    (lower better)            0.0059         0.0065
+accuracy                                          84.1%          84.5%
+top-10/day hit rate    (higher better)            22.2%          18.8%
+best iteration                                       79            130
+GBM blend weight                                 0.7500         0.7500
+n (train rows)                                  361,746        405,468
+
+=== bk  -  1+ batter K ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         61.9%          61.1%
+logloss                (lower better)            0.6388         0.6400
+  base-rate logloss                              0.6648         0.6683
+  edge = base - model   (higher better)          0.0260         0.0282
+AUC                    (higher better)           0.6312         0.6362
+Brier                  (lower better)            0.2238         0.2245
+  base-rate Brier                                0.2360         0.2377
+ECE                    (lower better)            0.0054         0.0121
+accuracy                                          63.9%          63.4%
+top-10/day hit rate    (higher better)            79.4%          82.3%
+best iteration                                      194            230
+GBM blend weight                                 0.8000         0.5500
+n (train rows)                                  361,746        405,468
+
+=== bk2  -  2+ batter K ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         22.0%          21.8%
+logloss                (lower better)            0.5023         0.4988
+  base-rate logloss                              0.5267         0.5246
+  edge = base - model   (higher better)          0.0244         0.0258
+AUC                    (higher better)           0.6494         0.6532
+Brier                  (lower better)            0.1634         0.1620
+  base-rate Brier                                0.1715         0.1706
+ECE                    (lower better)            0.0063         0.0084
+accuracy                                          78.0%          78.1%
+top-10/day hit rate    (higher better)            41.3%          43.1%
+best iteration                                      237            232
+GBM blend weight                                 0.7000         0.6500
+n (train rows)                                  361,746        405,468
+
+=== hrr2  -  2+ H+R+RBI ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         45.9%          45.6%
+logloss                (lower better)            0.6783         0.6791
+  base-rate logloss                              0.6898         0.6894
+  edge = base - model   (higher better)          0.0115         0.0103
+AUC                    (higher better)           0.5856         0.5811
+Brier                  (lower better)            0.2427         0.2431
+  base-rate Brier                                0.2483         0.2481
+ECE                    (lower better)            0.0048         0.0093
+accuracy                                          57.0%          56.2%
+top-10/day hit rate    (higher better)            61.7%          56.2%
+best iteration                                      167            280
+GBM blend weight                                 0.9000         0.7500
+n (train rows)                                  361,746        405,468
+
+=== hrr3  -  3+ H+R+RBI ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         29.4%          29.3%
+logloss                (lower better)            0.5946         0.5956
+  base-rate logloss                              0.6061         0.6051
+  edge = base - model   (higher better)          0.0115         0.0095
+AUC                    (higher better)           0.5935         0.5865
+Brier                  (lower better)            0.2030         0.2033
+  base-rate Brier                                0.2077         0.2073
+ECE                    (lower better)            0.0051         0.0074
+accuracy                                          70.6%          70.6%
+top-10/day hit rate    (higher better)            46.3%          41.6%
+best iteration                                      116            176
+GBM blend weight                                 0.7000         0.7000
+n (train rows)                                  361,746        405,468
+
+=== bk3  -  3+ batter K ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                          4.5%           4.6%
+logloss                (lower better)            0.1743         0.1777
+  base-rate logloss                              0.1849         0.1880
+  edge = base - model   (higher better)          0.0106         0.0103
+AUC                    (higher better)           0.6939         0.6882
+Brier                  (lower better)            0.0424         0.0433
+  base-rate Brier                                0.0434         0.0443
+ECE                    (lower better)            0.0027         0.0021
+accuracy                                          95.5%          95.4%
+top-10/day hit rate    (higher better)            13.7%          14.6%
+best iteration                                      147            208
+GBM blend weight                                 0.6000         0.7000
+n (train rows)                                  361,746        405,468
+
+=== tb3  -  3+ total bases ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         20.7%          20.5%
+logloss                (lower better)            0.5003         0.4981
+  base-rate logloss                              0.5108         0.5078
+  edge = base - model   (higher better)          0.0105         0.0097
+AUC                    (higher better)           0.5999         0.5969
+Brier                  (lower better)            0.1610         0.1600
+  base-rate Brier                                0.1645         0.1632
+ECE                    (lower better)            0.0051         0.0068
+accuracy                                          79.3%          79.5%
+top-10/day hit rate    (higher better)            33.3%          30.9%
+best iteration                                      145            214
+GBM blend weight                                 0.5500         0.7000
+n (train rows)                                  361,746        405,468
+
+=== tb4  -  4+ total bases ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         14.6%          14.4%
+logloss                (lower better)            0.4053         0.4015
+  base-rate logloss                              0.4165         0.4129
+  edge = base - model   (higher better)          0.0113         0.0114
+AUC                    (higher better)           0.6189         0.6196
+Brier                  (lower better)            0.1222         0.1207
+  base-rate Brier                                0.1250         0.1235
+ECE                    (lower better)            0.0056         0.0051
+accuracy                                          85.4%          85.6%
+top-10/day hit rate    (higher better)            25.9%          27.7%
+best iteration                                      225            255
+GBM blend weight                                 0.5500         0.6000
+n (train rows)                                  361,746        405,468
+
+=== hrr4  -  4+ H+R+RBI ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         17.4%          17.4%
+logloss                (lower better)            0.4533         0.4543
+  base-rate logloss                              0.4630         0.4624
+  edge = base - model   (higher better)          0.0097         0.0081
+AUC                    (higher better)           0.6032         0.5962
+Brier                  (lower better)            0.1412         0.1415
+  base-rate Brier                                0.1441         0.1438
+ECE                    (lower better)            0.0049         0.0073
+accuracy                                          82.6%          82.6%
+top-10/day hit rate    (higher better)            30.1%          27.1%
+best iteration                                      135            185
+GBM blend weight                                 0.7000         0.7500
+n (train rows)                                  361,746        405,468
+
+=== triple  -  1+ triple ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                          1.4%           1.4%
+logloss                (lower better)            0.0692         0.0711
+  base-rate logloss                              0.0724         0.0741
+  edge = base - model   (higher better)          0.0032         0.0030
+AUC                    (higher better)           0.6812         0.6623
+Brier                  (lower better)            0.0133         0.0137
+  base-rate Brier                                0.0135         0.0139
+ECE                    (lower better)            0.0023         0.0027
+accuracy                                          98.6%          98.6%
+top-10/day hit rate    (higher better)             4.0%           4.9%
+best iteration                                       94            137
+GBM blend weight                                 0.7000         0.5000
+n (train rows)                                  361,746        405,468
+
+=== rbi2  -  2+ RBI ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                         10.4%          10.7%
+logloss                (lower better)            0.3291         0.3366
+  base-rate logloss                              0.3348         0.3409
+  edge = base - model   (higher better)          0.0056         0.0044
+AUC                    (higher better)           0.5985         0.5883
+Brier                  (lower better)            0.0925         0.0950
+  base-rate Brier                                0.0935         0.0958
+ECE                    (lower better)            0.0047         0.0067
+accuracy                                          89.6%          89.3%
+top-10/day hit rate    (higher better)            18.3%          16.8%
+best iteration                                      154            217
+GBM blend weight                                 0.6000         0.8000
+n (train rows)                                  361,746        405,468
+
+=== run2  -  2+ runs ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+base rate                                          8.3%           8.1%
+logloss                (lower better)            0.2775         0.2752
+  base-rate logloss                              0.2857         0.2810
+  edge = base - model   (higher better)          0.0081         0.0058
+AUC                    (higher better)           0.6282         0.6133
+Brier                  (lower better)            0.0746         0.0735
+  base-rate Brier                                0.0760         0.0744
+ECE                    (lower better)            0.0048         0.0050
+accuracy                                          91.7%          91.9%
+top-10/day hit rate    (higher better)            20.3%          15.8%
+best iteration                                      117            122
+GBM blend weight                                 0.7000         0.6500
+n (train rows)                                  361,746        405,468
+
+##############################################################################
+# Batter - count / mean heads
+##############################################################################
+
+=== xbk  -  batter Ks (mean) ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+MAE                    (lower better)            0.6663         0.6691
+  baseline MAE                                   0.6697         0.6780
+  MAE gain=base-model   (higher better)          0.0034         0.0089
+mean actual                                      0.8886         0.8810
+mean predicted                                   0.8848         0.8871
+  bias = pred - actual                          -0.0038         0.0061
+dispersion cal-yr model (1.0 ideal)              0.7853         0.7841
+dispersion observed     (1.0 ideal)              0.7873         0.7911
+best iteration                                      788            619
+n (train rows)                                  361,746        405,468
+
+=== xhrr  -  H+R+RBI (mean) ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+MAE                    (lower better)            1.5063         1.5011
+  baseline MAE                                   1.5278         1.5243
+  MAE gain=base-model   (higher better)          0.0214         0.0232
+mean actual                                      1.8128         1.8037
+mean predicted                                   1.8657         1.8301
+  bias = pred - actual                           0.0529         0.0264
+dispersion cal-yr model (1.0 ideal)              1.9364         1.9973
+dispersion observed     (1.0 ideal)              1.9646         1.9864
+best iteration                                      254            365
+n (train rows)                                  361,746        405,468
+
+=== xtb  -  total bases (mean) ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+MAE                    (lower better)            1.3514         1.3326
+  baseline MAE                                   1.3836         1.3740
+  MAE gain=base-model   (higher better)          0.0322         0.0414
+mean actual                                      1.4633         1.4416
+mean predicted                                   1.5132         1.4669
+  bias = pred - actual                           0.0499         0.0254
+dispersion cal-yr model (1.0 ideal)              1.9904         2.0732
+dispersion observed     (1.0 ideal)              2.0323         2.0318
+best iteration                                      302            302
+n (train rows)                                  361,746        405,468
+
+=== xh  -  hits (mean) ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+MAE                    (lower better)            0.6824         0.6802
+  baseline MAE                                   0.6840         0.6806
+  MAE gain=base-model   (higher better)          0.0015         0.0004
+mean actual                                      0.8865         0.8737
+mean predicted                                   0.9080         0.8892
+  bias = pred - actual                           0.0215         0.0156
+dispersion cal-yr model (1.0 ideal)              0.8186         0.8383
+best iteration                                      442            480
+n (train rows)                                  361,746        405,468
+
+=== xrun  -  runs (mean) ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+MAE                    (lower better)            0.5770         0.5756
+  baseline MAE                                   0.5897         0.5881
+  MAE gain=base-model   (higher better)          0.0127         0.0125
+mean actual                                      0.4710         0.4755
+mean predicted                                   0.4886         0.4838
+  bias = pred - actual                           0.0176         0.0082
+dispersion cal-yr model (1.0 ideal)              0.9149         0.9469
+best iteration                                      324            471
+n (train rows)                                  361,746        405,468
+
+=== xrbi  -  RBIs (mean) ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+MAE                    (lower better)            0.6310         0.6311
+  baseline MAE                                   0.6405         0.6414
+  MAE gain=base-model   (higher better)          0.0095         0.0103
+mean actual                                      0.4553         0.4545
+mean predicted                                   0.4662         0.4580
+  bias = pred - actual                           0.0109         0.0036
+dispersion cal-yr model (1.0 ideal)              1.4833         1.5278
+best iteration                                      195            123
+n (train rows)                                  361,746        405,468
+
+=== xbb  -  walks (mean) ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                    43,740         25,992
+MAE                    (lower better)            0.4599         0.4755
+  baseline MAE                                   0.4804         0.4915
+  MAE gain=base-model   (higher better)          0.0204         0.0160
+mean actual                                      0.3370         0.3596
+mean predicted                                   0.3359         0.3467
+  bias = pred - actual                          -0.0011        -0.0129
+dispersion cal-yr model (1.0 ideal)              0.9390         0.9644
+best iteration                                      780            379
+n (train rows)                                  361,746        405,468
+
+##############################################################################
+# Pitcher heads
+##############################################################################
+
+=== k  -  starter strikeouts ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                     4,860          2,888
+MAE                    (lower better)            1.7347         1.7239
+  baseline MAE                                   1.9182         1.9318
+  MAE gain=base-model   (higher better)          0.1835         0.2079
+mean actual                                      4.7823         4.7413
+mean predicted                                   4.7507         4.7681
+  bias = pred - actual                          -0.0316         0.0267
+dispersion cal-yr model (1.0 ideal)              0.9881         1.0026
+dispersion observed     (1.0 ideal)              1.0116         0.9879
+best iteration                                      434            391
+n (train rows)                                   40,194         45,052
+
+=== outs  -  starter outs ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                     4,860          2,888
+MAE                    (lower better)            2.6912         2.6569
+  baseline MAE                                   2.9951         3.0911
+  MAE gain=base-model   (higher better)          0.3039         0.4342
+mean actual                                     15.5630        15.2389
+mean predicted                                  15.6835        15.4532
+  bias = pred - actual                           0.1205         0.2143
+dispersion cal-yr model (1.0 ideal)              0.8341         0.8085
+dispersion observed     (1.0 ideal)              0.8099         0.8199
+best iteration                                      666            447
+n (train rows)                                   40,194         45,052
+
+=== pbb  -  starter walks ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                     4,860          2,888
+MAE                    (lower better)            1.0001         1.0036
+  baseline MAE                                   1.0828         1.1209
+  MAE gain=base-model   (higher better)          0.0827         0.1173
+mean actual                                      1.7088         1.7985
+mean predicted                                   1.6771         1.7361
+  bias = pred - actual                          -0.0318        -0.0624
+dispersion cal-yr model (1.0 ideal)              0.9062         0.9061
+dispersion observed     (1.0 ideal)              0.9089         0.9048
+best iteration                                      410            378
+n (train rows)                                   40,194         45,052
+
+=== pha  -  starter hits allowed ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                     4,860          2,888
+MAE                    (lower better)            1.6906         1.6714
+  baseline MAE                                   1.8523         1.8846
+  MAE gain=base-model   (higher better)          0.1616         0.2131
+mean actual                                      4.9004         4.7500
+mean predicted                                   5.0469         4.9221
+  bias = pred - actual                           0.1464         0.1721
+dispersion cal-yr model (1.0 ideal)              0.9052         0.8755
+dispersion observed     (1.0 ideal)              0.8731         0.8862
+best iteration                                      308            670
+n (train rows)                                   40,194         45,052
+
+=== per  -  starter earned runs ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                     4,860          2,888
+MAE                    (lower better)            1.5703         1.5677
+  baseline MAE                                   1.6560         1.6966
+  MAE gain=base-model   (higher better)          0.0857         0.1289
+mean actual                                      2.4276         2.4013
+mean predicted                                   2.4881         2.4053
+  bias = pred - actual                           0.0606         0.0040
+dispersion cal-yr model (1.0 ideal)              1.5165         1.5287
+dispersion observed     (1.0 ideal)              1.5169         1.5937
+best iteration                                      428            345
+n (train rows)                                   40,194         45,052
+
+##############################################################################
+# Game heads
+##############################################################################
+
+=== team_runs  -  team runs (per-team mean) ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                     4,860          2,888
+MAE                    (lower better)            2.5013         2.5210
+  baseline MAE                                   2.5429         2.6044
+  MAE gain=base-model   (higher better)          0.0415         0.0834
+mean actual                                      4.4473         4.5163
+mean predicted                                   4.4933         4.4706
+  bias = pred - actual                           0.0460        -0.0457
+best iteration                                      209            288
+n (train rows)                                   40,194         45,052
+
+=== total  -  game total runs ===
+                                       SELECTION 2025  SHIPPING 2026
+-------------------------------------  --------------  -------------
+MAE                    (lower better)          3.5895         3.5442
+dispersion cal-yr model (1.0 ideal)            2.0265         2.2893
+dispersion observed     (1.0 ideal)            2.2745         2.2415
+
+=== team_total  -  team total runs ===
+                                     SELECTION 2025  SHIPPING 2026
+-----------------------------------  --------------  -------------
+dispersion cal-yr model (1.0 ideal)          2.0762         2.2922
+
+=== winner  -  home-win probability ===
+                                         SELECTION 2025  SHIPPING 2026
+---------------------------------------  --------------  -------------
+n (test rows)                                     2,430          1,444
+base rate                                         54.3%          52.2%
+logloss                (lower better)            0.6810         0.6889
+  base-rate logloss                              0.6896         0.6924
+  edge = base - model   (higher better)          0.0086         0.0035
+AUC                    (higher better)           0.5757         0.5508
+Brier                  (lower better)            0.2440         0.2479
+  base-rate Brier                                0.2483         0.2496
+accuracy                                          56.3%          55.3%
+  always-home accuracy                            54.3%          52.2%
+best iteration                                      178            104
+GBM blend weight                                 0.7500         0.6000
+ML blend weight                                  0.8500         0.8500
+n (train rows)                                   20,097         22,526
+
+------------------------------------------------------------------------------
+In-season recalibration offsets (drift guard; serving-OFF reference)
+------------------------------------------------------------------------------
+prop     offset
+------  -------
+hr       0.0324
+hit      0.0007
+hits2   -0.0069
+tb2     -0.0063
+run      0.0166
+rbi     -0.0076
+bb       0.0312
+sb      -0.0295
+single   0.0046
+double  -0.0237
+bk      -0.0242
+bk2     -0.0088
+hrr2    -0.0069
+hrr3     0.0000
+bk3      0.0051
+tb3      0.0102
+tb4      0.0176
+hrr4     0.0075
+triple   0.0503
+rbi2     0.0383
+run2    -0.0360
+
+------------------------------------------------------------------------------
+SIM_BLEND vs incumbent - SELECTION 2025  (sim_grade_2025.csv)
+------------------------------------------------------------------------------
+  incumbent vs PA-sim per head; AUC for prob heads, MAE for count ('(MAE)').
+  dAUC/dMAE & dLL negative = sim worse (INC+ = keep incumbent).
+head        n  inc_auc  sim_auc     dAUC  auc_v      dLL   ll_v
+------  -----  -------  -------  -------  -----  -------  -----
+hr      43740   0.6385   0.6229  -0.0157   INC+  -0.0028   INC+
+hit     43740   0.5803   0.5702  -0.0101   INC+   -0.003   INC+
+hits2   43740   0.5969   0.5859  -0.0111   INC+  -0.0023   INC+
+tb2     43740   0.5827    0.571  -0.0117   INC+  -0.0031   INC+
+run     43740   0.5858    0.576  -0.0098   INC+  -0.0029   INC+
+rbi     43740   0.5761   0.5649  -0.0113   INC+  -0.0032   INC+
+bb      43740    0.621   0.6142  -0.0068   INC+  -0.0022   INC+
+single  43740   0.5726   0.5673  -0.0054   INC+  -0.0014   INC+
+double  43740   0.5535   0.5434  -0.0099   INC+  -0.0013   INC+
+bk      43740    0.631   0.6254  -0.0056   INC+  -0.0048   INC+
+bk2     43740   0.6494   0.6426  -0.0068   INC+  -0.0046   INC+
+hrr2    43740   0.5854   0.5745  -0.0109   INC+  -0.0038   INC+
+hrr3    43740   0.5933   0.5801  -0.0133   INC+  -0.0033   INC+
+sb      43740    0.736   0.7133  -0.0227   INC+   -0.006   INC+
+xbk     43740    0.666   0.6758  -0.0098   INC+           (MAE)
+xhrr    43740   1.5072   1.5177  -0.0105   INC+           (MAE)
+xtb     43740   1.3523   1.3604   -0.008   INC+           (MAE)
+k        4860   1.7345   1.8224  -0.0883   INC+           (MAE)
+outs     4860   2.6898    2.958   -0.269   INC+           (MAE)
+pbb      4860   1.0005   1.0148  -0.0143   INC+           (MAE)
+pha      4860   1.6955   1.7403  -0.0444   INC+           (MAE)
+per      4860   1.5724   1.6268  -0.0543   INC+           (MAE)
+total    2430   3.5895   3.5955   -0.006    tie           (MAE)
+winner   2430   0.5757   0.5733  -0.0022    tie     -0.0    tie
+score    4860   2.5026   2.4968   0.0062    tie           (MAE)
+
+------------------------------------------------------------------------------
+SIM_BLEND vs incumbent - SHIPPING 2026  (sim_grade_2026.csv)
+------------------------------------------------------------------------------
+  incumbent vs PA-sim per head; AUC for prob heads, MAE for count ('(MAE)').
+  dAUC/dMAE & dLL negative = sim worse (INC+ = keep incumbent).
+head        n  inc_auc  sim_auc     dAUC  auc_v      dLL   ll_v
+------  -----  -------  -------  -------  -----  -------  -----
+hr      25992   0.6347   0.6134  -0.0211   INC+  -0.0035   INC+
+hit     25992   0.5734   0.5631  -0.0102   INC+  -0.0032   INC+
+hits2   25992   0.5944   0.5794  -0.0147   INC+  -0.0034   INC+
+tb2     25992   0.5832   0.5685  -0.0144   INC+  -0.0037   INC+
+run     25992   0.5834   0.5653  -0.0179   INC+  -0.0043   INC+
+rbi     25992   0.5739   0.5627  -0.0111   INC+  -0.0033   INC+
+bb      25992   0.6204   0.6137  -0.0067   INC+  -0.0022   INC+
+single  25992   0.5666   0.5599  -0.0066   INC+   -0.002   INC+
+double  25992   0.5569   0.5522  -0.0046    tie  -0.0009   INC+
+bk      25992   0.6364   0.6267  -0.0099   INC+   -0.009   INC+
+bk2     25992   0.6529   0.6411  -0.0119   INC+  -0.0078   INC+
+hrr2    25992   0.5806   0.5664   -0.014   INC+  -0.0048   INC+
+hrr3    25992   0.5864   0.5691   -0.017   INC+  -0.0041   INC+
+sb      25992   0.7368   0.7174  -0.0195   INC+  -0.0067   INC+
+xbk     25992    0.669    0.684   -0.015   INC+           (MAE)
+xhrr    25992   1.5024    1.517  -0.0146   INC+           (MAE)
+xtb     25992   1.3343   1.3468  -0.0124   INC+           (MAE)
+k        2888   1.7268   1.8635  -0.1367   INC+           (MAE)
+outs     2888   2.6612   3.1434  -0.4808   INC+           (MAE)
+pbb      2888   1.0028    1.039  -0.0359   INC+           (MAE)
+pha      2888   1.6728   1.7718  -0.0982   INC+           (MAE)
+per      2888   1.5673   1.6429  -0.0752   INC+           (MAE)
+total    1444   3.5442   3.5871  -0.0416   INC+           (MAE)
+winner   1444   0.5542    0.551  -0.0035    tie  -0.0003    tie
+score    2888   2.5182   2.5216   -0.003    tie           (MAE)
+
+==============================================================================
+sources: metrics_select.json, metrics.json + eval_baseline_*.json (Model/artifacts/)
+==============================================================================

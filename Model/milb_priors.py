@@ -58,6 +58,17 @@ SERVE_DECAY = 0.6             # per extra year back
 MILB_N_DISCOUNT = 0.5         # translated PA -> prior-evidence PA
 K_LG_MIX = 300.0              # league anchor inside the player prior
 
+# ---- audit-wave v1 extras (2026-07-14, fit-free — no level offsets) ----
+# Steal prior: constants MEASURED on milb_batting.csv; success is flat
+# 0.720-0.723 across the kept levels, the empirical license for skipping
+# per-level translation. Attempt-rate level drift is left to GBM ordering.
+K_ATT, LG_ATT = 40.0, 0.145   # league MiLB attempt rate per opportunity
+K_SUCC, LG_SUCC = 20.0, 0.72  # kept-level success rate
+# Workload: starter-role filter — season IP includes relief innings, so
+# outs/start is only meaningful on predominantly-starting seasons (naive
+# 3*IP/GS is impossible >30 on 17.3% of unfiltered GS>=1 rows).
+GS_ROLE_SHARE = 0.6           # GS >= this share of G to count as a starter
+
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -71,7 +82,10 @@ def _logit(p):
 # ------------------------------------------------------- class counts ---
 
 def _milb_counts(kind):
-    """One row per (PlayerId, Season, Level): n + the 8 class counts."""
+    """One row per (PlayerId, Season, Level): n + the 8 class counts,
+    plus the audit-wave v1 extras — bat: SB/CS/OPP steal counts; pit:
+    G/GS/IPthirds workload counts (IP converted to outs BEFORE pooling,
+    since the .1/.2 thirds notation does not sum)."""
     if kind == "bat":
         d = pd.read_csv(DATA / "milb_batting.csv")
         d["n"] = pd.to_numeric(d["PA"], errors="coerce")
@@ -84,7 +98,18 @@ def _milb_counts(kind):
     d["K"] = d["SO"]
     d["1B"] = (d["H"] - d["2B"] - d["3B"] - d["HR"]).clip(lower=0)
     d["OUT"] = (d["n"] - d["SO"] - d["BB"] - d["HBP"] - d["H"]).clip(lower=0)
-    out = d[["PlayerId", "Year", "Level", "n"] + CLASSES].rename(
+    if kind == "bat":
+        for c in ("SB", "CS"):
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0)
+        d["OPP"] = d["1B"] + d["BB"] + d["HBP"]   # times on first-ish
+        extras = ["SB", "CS", "OPP"]
+    else:
+        for c in ("G", "GS"):
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0)
+        ip = pd.to_numeric(d["IP"], errors="coerce").fillna(0)
+        d["IPthirds"] = np.floor(ip) * 3 + ((ip % 1) * 10).round()
+        extras = ["G", "GS", "IPthirds"]
+    out = d[["PlayerId", "Year", "Level", "n"] + CLASSES + extras].rename(
         columns={"Year": "Season"})
     return (out.groupby(["PlayerId", "Season", "Level"], as_index=False)
                .sum())                       # (rare) duplicate splits pooled
@@ -173,6 +198,72 @@ def prior_blend(lg, t, n_eff, k=K_LG_MIX):
     return (ne * t + k * lg) / (ne + k)
 
 
+# ------------------------------------------- audit-wave v1 extras -------
+
+def _bat_steal_extras(milb, offsets, seasons):
+    """Fit-free steal prior per (PlayerId, serve Season): shrunk attempt
+    rate per opportunity + shrunk success rate from decayed kept-level
+    COUNT sums (decay weight only — counts are already mass). No level
+    offsets (success measured flat 0.720-0.723 across kept levels)."""
+    d = milb[milb["Level"].isin(offsets)]
+    parts = []
+    for y in seasons:
+        win = d[(d["Season"] >= y - SERVE_LOOKBACK) & (d["Season"] <= y - 1)]
+        if not len(win):
+            continue
+        w = SERVE_DECAY ** (y - 1 - win["Season"]).to_numpy()
+        g = pd.DataFrame({"PlayerId": win["PlayerId"].to_numpy(),
+                          "sb_w": win["SB"].to_numpy() * w,
+                          "cs_w": win["CS"].to_numpy() * w,
+                          "opp_w": win["OPP"].to_numpy() * w})
+        agg = g.groupby("PlayerId", as_index=False).sum()
+        att = agg["sb_w"] + agg["cs_w"]
+        agg["milb_att"] = (att + K_ATT * LG_ATT) / (agg["opp_w"] + K_ATT)
+        agg["milb_sb_succ"] = ((agg["sb_w"] + K_SUCC * LG_SUCC)
+                               / (att + K_SUCC))
+        agg["Season"] = y
+        parts.append(agg[["PlayerId", "Season", "milb_att", "milb_sb_succ"]])
+    return pd.concat(parts, ignore_index=True)
+
+
+def _pit_workload_extras(milb, offsets, seasons):
+    """Workload pedigree per (PlayerId, serve Season): pmilb_outs_ps =
+    decayed outs per start over starter-role seasons only (GS >= 1 and
+    GS >= GS_ROLE_SHARE * G — season IP includes relief innings, so
+    mixed-role rows are excluded); pmilb_gs_share = decayed GS/G over ALL
+    kept-level rows (a pure-reliever pedigree of 0 is the signal)."""
+    d = milb[milb["Level"].isin(offsets)]
+    starter = d[(d["GS"] >= 1) & (d["GS"] >= GS_ROLE_SHARE * d["G"])]
+    parts = []
+    for y in seasons:
+        win = d[(d["Season"] >= y - SERVE_LOOKBACK) & (d["Season"] <= y - 1)]
+        if not len(win):
+            continue
+        w = SERVE_DECAY ** (y - 1 - win["Season"]).to_numpy()
+        g = pd.DataFrame({"PlayerId": win["PlayerId"].to_numpy(),
+                          "gs_w": win["GS"].to_numpy() * w,
+                          "g_w": win["G"].to_numpy() * w})
+        agg = g.groupby("PlayerId", as_index=False).sum()
+        agg["pmilb_gs_share"] = agg["gs_w"] / agg["g_w"].where(agg["g_w"] > 0)
+        st = starter[(starter["Season"] >= y - SERVE_LOOKBACK)
+                     & (starter["Season"] <= y - 1)]
+        if len(st):
+            ws = SERVE_DECAY ** (y - 1 - st["Season"]).to_numpy()
+            s = pd.DataFrame({"PlayerId": st["PlayerId"].to_numpy(),
+                              "outs_w": st["IPthirds"].to_numpy() * ws,
+                              "gs_w2": st["GS"].to_numpy() * ws})
+            s = s.groupby("PlayerId", as_index=False).sum()
+            s["pmilb_outs_ps"] = s["outs_w"] / s["gs_w2"].where(s["gs_w2"] > 0)
+            agg = agg.merge(s[["PlayerId", "pmilb_outs_ps"]],
+                            on="PlayerId", how="left")
+        else:
+            agg["pmilb_outs_ps"] = np.nan
+        agg["Season"] = y
+        parts.append(agg[["PlayerId", "Season",
+                          "pmilb_gs_share", "pmilb_outs_ps"]])
+    return pd.concat(parts, ignore_index=True)
+
+
 # -------------------------------------------------------------- build ---
 
 def build_all(force=False):
@@ -185,6 +276,10 @@ def build_all(force=False):
         milb = _milb_counts(kind)
         offsets, diag = fit_offsets(milb, _mlb_counts(pa, key))
         serve = build_serving(milb, offsets, seasons)
+        # audit-wave v1 extras (2026-07-14): fit-free, same window/levels
+        extras = (_bat_steal_extras if kind == "bat"
+                  else _pit_workload_extras)(milb, offsets, seasons)
+        serve = serve.merge(extras, on=["PlayerId", "Season"], how="left")
         out[kind] = {"serve": serve, "offsets": offsets, "diag": diag}
         log(f"{kind}: levels kept {sorted(offsets)} | serve rows "
             f"{len(serve):,} ({serve['PlayerId'].nunique():,} players)")

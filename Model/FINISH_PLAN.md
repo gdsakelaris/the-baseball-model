@@ -1,5 +1,55 @@
 # FINISH PLAN — the one-shot completion batch (2026-07-14)
 
+> **2026-07-15 addendum:** backlog **#33 (v8 damage-on-contact wave)** and **#34/#35
+> (IL transactions + team-grain battery — two new scrapers, four new Data files)**
+> were built and wired AFTER the 07-14 superset retrain (user asks; see
+> FEATURE_BACKLOG #33–#35 + Log). Daily pitch CSVs re-agged (pre-v8 columns verified
+> identical), frames.joblib REBUILT with all new columns (pre-v8 cache:
+> `artifacts/frames.pre_v8_0715.joblib`), selection NOT regenerated. The next
+> superset retrain picks #33–#35 up automatically — whatever chain runs next must
+> count them in scope. Open decision for the user at that point: the PA-sim
+> steal-layer battery modulation (see #35's "deliberately not done" note).
+
+> **2026-07-15 addendum 2 — audit-fix batch (all 16 findings addressed; user
+> adjudicated the four that reverted prior decisions). Changes the next chain
+> MUST account for:**
+> 1. **ES split (audit #2):** boosters now early-stop on a ~10% GamePk slice of
+>    the TRAINING rows (`train._es_split`), never the cal year. Every retrain
+>    shifts vs pre-07-15 baselines — the chain's Phase-0/4 re-baseline covers it.
+> 2. **Artifact roles (audit #8):** superset trains write
+>    `models_superset*.joblib` + `meta_stamp`; `models.joblib`/`models_bt.joblib`
+>    are written ONLY by keep-trains. predict.py REFUSES superset/shadow
+>    artifacts; evaluate_deep gained `--superset` for the dev loop and a
+>    shadow-contract guard; feature_select reads the superset artifacts first.
+>    The current stale `models.joblib` (superset intermediate) will be refused
+>    by serving until the chain's keep-train rewrites it — intended.
+> 3. **FDR gate (audit #1):** `evaluate_deep --paired` verdicts now require
+>    Benjamini–Hochberg q ≤ `--fdr` (default 0.10) across the read's ~100+
+>    tests; cal-slope keeps its band rule. Phase-5's mega-read runs under this
+>    gate (G1's "CI-clear" language now means BH-surviving). `--fdr 0` restores
+>    raw-CI verdicts for comparison.
+> 4. **Selection (audit #3):** MIN_KEEP top-up restricted to both-suite votes
+>    ≥ 0.5 (heads may keep < 40 columns); per-head suite-vote Spearman
+>    (`vote_corr`) + electorate-regime stamps now persist in
+>    selection_report.json. The cheap-electorate regime itself was USER-KEPT.
+> 5. **SIM_BLEND (audit #7):** total=0.20 ledgered as a grandfathered
+>    2026-informed tune (Decline ledger #8); Phase-4/5 re-decides all three
+>    weights from 2025-only evidence when pa_blend reruns.
+> 6. **2026 touches (audit #6, user decision):** the daily job no longer runs
+>    `--confirm --set-baseline`; the 2026 snapshot refreshes only on deliberate
+>    confirms, and blue-mark/rankings inputs read that last deliberate snapshot.
+> 7. **Grading (audit #10):** workbooks carry a `G#` column; DH rows grade
+>    against their OWN game (legacy books fall back to day sums). Bets rows on
+>    multi-final days stay unsettled. Forward-record tooling updated.
+> 8. Also: routing tables deleted (G4 executed), pa_serve seed made
+>    process-deterministic (crc32), in-season offsets moved to
+>    `inseason_offsets.json`, `_prep` warns on missing serving columns,
+>    selftest now checks multiple game contexts + reports NaN-pair coverage,
+>    `Tests/` unit suite added (`python -m unittest discover -s Tests`),
+>    forecast weather archived to `Data/mlb_weather_forecast.csv` (audit #4),
+>    Data CSVs untracked from git going forward (G6 snapshot stays in
+>    history), README de-staled.
+
 **Goal (user directive):** bring the model to "finished" — no executable improvement,
 polish, or cleanup left on the board. Everything in `FEATURE_BACKLOG.md` that CAN be built
 goes in **one batch, one training chain, one verdict** — the all-at-once attribution risk
@@ -99,6 +149,35 @@ review; changes to `feature_select.py` + frame assembly, built before the Phase-
   ~[0.55, 0.75)) while the group's combined mean share is large — the clones-voting-
   each-other-out failure (risk R3, and #31's expected regime). REPORT only, never
   auto-keep: flagged groups are gray zones and go to the user.
+- **07-14 adopt package (pre-chain riders, BUILT)** — all cheap 1F-slot work, adopted
+  by the user 2026-07-14:
+  - **A1**: total/winner vote on held-out SHAP like every other head — `feature_select`
+    re-derives tg/wf from the cached gf exactly as train.py builds them (canonical
+    sorts; wf filters ShortGame, tg doesn't; same shadow seed ⇒ bit-identical values).
+    ShortGame filter guarded (tg lacks the column); the co-failure frame-key now comes
+    from `_cal_rows` routing (the old bf/sf column sniff would mis-key game heads).
+    Honest framing: winner's superset is ~55 real columns, total's ~64 — this is a
+    correctness/uniformity upgrade aimed at winner's overfit-when-widened history, not
+    a projected north-star win.
+  - **F1**: 3 repeated date-stratified SHAP subsamples per vote, member shares averaged
+    (batter frame only — the other frames fit under MAX_ROWS). ~3× SHAP cost in stage 2.
+  - **A3**: pre-top-up kept counts in the report (the MIN_KEEP floor-call evidence,
+    e.g. for triple).
+  - **F2**: the whole selection report persists to `artifacts/selection_report.json`
+    (eps A/B, visible/kept/pre-top-up, free PI-grid keep-sizes, per-family support,
+    co-failure groups, keep-diff). Report-only runs write
+    `selection_report.report_only.json` so they never clobber chain evidence.
+  - **F3**: train.py guards — WARN on a feature_keep.json entry below MIN_KEEP;
+    ASSERT no `shdw_` in any per-head serving column list on a keep train (catches a
+    head missing from the keep-list training on the shadowed superset, which would
+    silently serve NaN shadows via predict._prep).
+  - **A2b**: per-family shadow-quantile DIAGNOSTIC (print + report only; eps stays
+    pooled — ~2× family spread kills the per-family-eps idea, ~10× revives it as a
+    post-batch user-adjudicated amendment). Plus thin-frame shadow bump wf 8→16,
+    tg 10→16 (bf/sf untouched ⇒ cached frames unaffected).
+  - **Keep-diff vs the Phase-0 `.bak`**: per-head adds/drops printed and persisted —
+    operationalizes the decline ledger's churn-revisit trigger for time-block
+    subsampling with data from the biggest regen ever.
 - **Declined from the same review** (recorded so they aren't re-proposed): hard
   correlation pre-cut (kills the multi-horizon `c_/s_/r*/d_` variants and standalone-
   useless interaction feeders); time-block subsampling of the vote (two-suite era
@@ -161,14 +240,33 @@ Per the specs in FEATURE_BACKLOG Part 3 #H1/#H3/#H4/#H5/#H6:
 1. **Hazard v2** (bf-relative) — the queued outs fix; the single biggest unknown in this
    plan (engine work in `pa_engine`/`pa_sim`, then `pa_backtest` regrade).
 2. **Steal-layer blend re-sweep** — currently w=0; re-sweep after hazard v2 + the new sb
-   context lands (`pa_blend`).
+   context lands (`pa_blend`). **Battery-modulation rider (user-adjudicated 2026-07-15,
+   backlog #35):** BUILD the steal-table battery modulation HERE, before this re-sweep —
+   scale each slate's attempt rate by the opposing starter's steal permissiveness
+   (`psb_sb27` vs prior-season league, the sb_chain_env centering) and success rate by
+   the opposing team's battery stop value (`CSAA_att` / era-centered pop from
+   `mlb_catchers_team.csv`, prior-season). Runner-side tables stay the base; the
+   battery scales them per matchup. Deliberately NOT built 07-15: sb serves from the
+   GBM (blend w=0), and an engine change mid-forward-record would shift served
+   score/total/winner through stale SIM_BLEND weights — this step re-fits them anyway,
+   so the modulation gets graded properly (and is the most plausible path to sim-sb
+   finally earning weight, since runner-only tables were likely why it graded flat).
 3. **SIM_BLEND re-sweep** — the {.35/.20/.30} weights were fit against the incumbent
-   GBMs; after the mega-batch retrain they are stale by construction. Re-run `pa_blend`
-   cross-year, update `predict.py` weights.
+   GBMs; after the mega-batch retrain they are stale by construction. Re-run `pa_blend`,
+   update `predict.py` weights. **Year scope = 2025 ONLY (user decision 2026-07-14).
+   This is a FITTING step, not a check — the veto-only 2026 rule (Phase 5) is exactly
+   why: 2026 may confirm, never tune, and blend weights are pure tuning. Forward record
+   checks the weights. Hazard v1-vs-v2 keep/rollback = user call on the 2025 sweep
+   numbers (v2 raw-sim read 07-14 was ≈v1, slightly worse outs).**
 4. `pa_grade` + backtest parquets refresh; `pa_serve` smoke (15/15 precedent).
 
 ## Phase 4 — The one training chain (~4 h, overnight)
 
+0. **RESTORE THE FAMILIES FIRST**: flip `LGBM_ONLY_TEMP = False` in `train.py` (set
+   2026-07-14 to iterate the build batch on cheap LGBM-only retrains). The final chain
+   must ship the full 3-family ensemble (LGBM 6 + XGB 2 + CB 2) — an LGBM-only final
+   train is NOT the shipped recipe and its paired read against the 3-family Phase-0
+   baseline would be apples-to-oranges.
 1. `train.py --rebuild` (frame schema changed everywhere).
 2. **Full two-train superset recipe** (this IS the wholesale re-litigation case): superset
    train both suites (frames carrying the 1F shadow columns) →
@@ -187,10 +285,31 @@ Per the specs in FEATURE_BACKLOG Part 3 #H1/#H3/#H4/#H5/#H6:
    H3/H4 against the standing gates (no banked bars exist); H6 against the standing
    count-head gates (MAE vs naive, honest dispersion); H5's team-line calibration read
    is new in evaluate_deep, plus the H6 coherence read (Σ lineup xrun vs team_total).
-3. `evaluate_deep.py --confirm` ONCE on 2026 (same-sign requirement).
+3. `evaluate_deep.py --confirm` ONCE on 2026 — **VETO-ONLY (user decision 2026-07-14,
+   after reconsidering an earlier skip). The read may only VETO, never TUNE:**
+   - It exists to catch 2025-luck on the biggest batch ever shipped (12 heads, ~60
+     features, full selection regen) — single-period evidence is the wrong risk here.
+   - **NO mechanism-bisecting to make 2026 agree.** G1(c)'s bisect fallback is
+     DISABLED against 2026 — bisecting on a test year converts a passive check into an
+     optimization target and any resulting "both years agree" is circular. Bisect
+     remains available against 2025 only.
+   - If 2026 disagrees (large opposite-sign harm on north-star heads), the options are
+     exactly two and the USER picks: (a) ship anyway, disagreement documented, or
+     (b) revert the whole batch. Never "tweak until it passes".
+   - This is touch #6 on 2026's ledger — enumerate it in the README's graded-tiers
+     table rather than hiding it. 2026 stays "partial season, lightly touched"; it is
+     never called a holdout.
 4. Review the 1F co-failure report: any flagged clone group (members individually below
    PI, group share large) is a gray zone the user adjudicates before the verdict is final.
-5. Apply G1's pre-committed protocol. Gray zones → user decides, per standing policy.
+   Read it from `artifacts/selection_report.json` (F2 — survives the overnight chain),
+   alongside the pre-top-up counts (A3: floor-call evidence for thin heads like triple),
+   the per-family shadow floors (A2b: per-family-eps dead if within ~2×), and the
+   keep-diff vs `feature_keep.pre_chain_0714.bak` (the time-block-subsampling revisit
+   trigger's churn evidence — heavy churn on unchanged heads = grounds to re-open that
+   declined item).
+5. Claude presents the full evidence table + pros/cons + recommendation (G1's bar is the
+   recommendation framework); the USER makes the ship/revert call and all sub-calls
+   (policy v4, 2026-07-14 — nothing auto-applies).
 6. On ship: set BOTH baselines; verify next 06:00 daily runs full.
 
 ## Phase 6 — Serving & tools
@@ -209,7 +328,15 @@ Per the specs in FEATURE_BACKLOG Part 3 #H1/#H3/#H4/#H5/#H6:
   (adjudicated, documented); only unreachable-by-policy code goes.
 - **README.md refresh**: metrics table is pre-2026-07 ("~100 features per batter-game",
   "~2 min retrain", old holdout table) — regenerate from current `metrics.json`; document
-  28 heads, SIM_BLEND serving, MiLB riders, selection-as-curation, the 06:00 task.
+  36 heads, SIM_BLEND serving, MiLB riders, selection-as-curation, the 06:00 task.
+  **Data-role table = GRADED TIERS (user decision 2026-07-14):** 2015–2024 = training;
+  2025 = calibration + feature-selection influence; 2026 through 2026-07-14 = partial-
+  season check (~59% of games), lightly touched — the specific decision-influencing looks
+  enumerated; 2026-07-15 onward = timestamped forward predictions, the only untouched
+  test. No "holdout" or "validation year" language for 2026. Also document: the 2025
+  selection-contamination path (keep-list carries shipping-suite SHAP votes measured on
+  cal-2025) and the shrinkage-prior known limitation (pooled-era constants; fixes on the
+  Decline ledger).
 - **Artifacts hygiene**: prune stale `.bak`/`pre_*` snapshots, keep only the Phase-0 pair.
 - **Backlog + memory**: mark #15–32 and #H1 with their verdicts; log entry; update memory.
 - **Commit** (per G6 policy), message documenting the batch scope.

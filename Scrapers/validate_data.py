@@ -155,7 +155,19 @@ SPECS = {
                        "off_wh", "edge_n", "fp_n", "fp_sw", "fp_s",
                        "ts_n", "ts_sw", "ts_wh",
                        "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh",
-                       "fb_v2", "rp_n", "rp_x", "rp_x2", "rp_z", "rp_z2"],
+                       "fb_v2", "rp_n", "rp_x", "rp_x2", "rp_z", "rp_z2",
+                       # v6 sequencing/count-state/movement (2026-07-14)
+                       "c02_n", "c02_w", "ah_n", "ah_brk", "ah_off",
+                       "bh_n", "bh_brk", "bh_off",
+                       "tr_n", "tr_same", "tr_fbbrk",
+                       "ivb_n", "ivb_sum", "fade_w", "fade_num",
+                       # v7 audit wave (2026-07-14): stretch split,
+                       # perceived-velo premium, per-class release
+                       # centroids, breaking movement, 2K x breaking
+                       "fbstr_n", "fbstr_v", "fbe_n", "fbe_sum",
+                       "rpf_n", "rpf_x", "rpf_z", "rpb_n", "rpb_x", "rpb_z",
+                       "brkmov_n", "brkmov_sum",
+                       "ts_brk_n", "ts_brk_sw", "ts_brk_wh"],
         key=["PlayerId", "Date"], max_dup_frac=0.0, date_col="Date",
         fresh_days=6,
         numeric=[("PlayerId", 0.0), ("n", 0.001)],
@@ -169,7 +181,9 @@ SPECS = {
                        "brk_n", "brk_sw", "brk_wh", "off_n", "off_sw",
                        "off_wh", "edge_n", "fp_n", "fp_sw", "fp_s",
                        "ts_n", "ts_sw", "ts_wh",
-                       "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh"],
+                       "f32_n", "f32_z", "f32_b", "f32_sw", "f32_wh",
+                       # v7 audit wave (2026-07-14): 2K x breaking cell
+                       "ts_brk_n", "ts_brk_sw", "ts_brk_wh"],
         key=["PlayerId", "Date"], max_dup_frac=0.0, date_col="Date",
         fresh_days=6,
         numeric=[("PlayerId", 0.0), ("n", 0.001)],
@@ -201,11 +215,51 @@ SPECS = {
         key=["Year", "PlayerId"], max_dup_frac=0.0,
         numeric=[("PlayerId", 0.0), ("BatSpeed", 0.05)],
         min_rows=400, shrink_tol=0.999, shrink_abs=15, season_col="Year"),
+    # catcher defense (2026-07-15): framing 2015+, throwing metrics 2016+
+    # (CSAA NaN in 2015 by design — no throwing leaderboard that year)
+    "mlb_catchers.csv": dict(                   # per (Year, catcher)
+        required_cols=["Year", "PlayerId", "Team", "Pitches", "FrameRV",
+                       "StrikePct", "SBAtt", "CSAA", "PopTime"],
+        key=["Year", "PlayerId"], max_dup_frac=0.0,
+        numeric=[("PlayerId", 0.0), ("FrameRV", 0.05)],
+        min_rows=1000, shrink_tol=0.999, shrink_abs=15, season_col="Year"),
+    "mlb_catchers_team.csv": dict(              # per (Year, Team) battery
+        required_cols=["Year", "Team", "Pitches", "FrameRV", "FrameRV_pt",
+                       "SBAtt", "CSAA_att", "PopTime"],
+        key=["Year", "Team"], max_dup_frac=0.0,
+        numeric=[("FrameRV_pt", 0.02), ("PopTime", 0.02)],
+        min_rows=300, shrink_tol=0.999, season_col="Year"),
+    # IL transactions (2026-07-15): raw events (incremental cache) and the
+    # paired stints the model consumes. Events accrue near-daily in season;
+    # fresh_days is loose because IL announcements aren't game-guaranteed.
+    "mlb_il_events.csv": dict(
+        required_cols=["PlayerId", "Date", "Kind", "ILDays"],
+        key=["PlayerId", "Date", "Kind"], max_dup_frac=0.02,
+        date_col="Date", fresh_days=10,
+        numeric=[("PlayerId", 0.0)],
+        min_rows=20000, shrink_tol=0.999),
+    "mlb_il.csv": dict(
+        required_cols=["PlayerId", "PlaceDate", "ActDate", "StintDays",
+                       "IL60", "Rehab"],
+        key=["PlayerId", "PlaceDate"], max_dup_frac=0.01,
+        date_col="PlaceDate",
+        numeric=[("PlayerId", 0.0), ("IL60", 0.0)],
+        min_rows=6000, shrink_tol=0.999),
     "mlb_umpires.csv": dict(                    # one row per game, grows daily
         required_cols=["GamePk", "Date", "Season", "HpUmpId", "HpUmp"],
         key=["GamePk"], max_dup_frac=0.0, date_col="Date", fresh_days=6,
         numeric=[("GamePk", 0.0)],              # HpUmpId may be NaN (data gaps)
         min_rows=12000, shrink_tol=0.999, season_col="Season"),
+    # per-inning linescores (G5, 2026-07-14): F5-market grading history.
+    # LONG format — one row per (GamePk, Inning); accrues incrementally
+    # like the umpire file (min_rows sized for the first full backfill).
+    "mlb_linescores.csv": dict(
+        required_cols=["GamePk", "Date", "Season", "Inning", "AwayRuns",
+                       "HomeRuns"],
+        key=["GamePk", "Inning"], max_dup_frac=0.0, date_col="Date",
+        fresh_days=6,
+        numeric=[("GamePk", 0.0), ("Inning", 0.0), ("AwayRuns", 0.02)],
+        min_rows=1000, shrink_tol=0.999, season_col="Season"),
     # MiLB season aggregates (Scrapers/scrape_milb.py; consumed by
     # Model/milb_priors.py). No date column — season-grain files; the
     # season_col check is the history guard, and completed seasons come from

@@ -405,6 +405,78 @@ def section_count_heads(bf_y, sf_y, art):
     return out
 
 
+def section_h1_bars(results, bf_y, art):
+    """H1 acceptance bars (2026-07-14): each deep binary head must BEAT the
+    banked count-calibrator pricing of the same line (count_vs_binary
+    verdict — a loser ships count-priced, a measured mixed board is fine).
+    Recomputed LIVE on this year's rows: the count head's banked per-line
+    calibrator vs the binary head, same rows, logloss + AUC."""
+    pairs = [("bk3", "xbk", 2.5), ("tb3", "xtb", 2.5),
+             ("tb4", "xtb", 3.5), ("hrr4", "xhrr", 3.5)]
+    cm = art.get("count_models", {})
+    have = [(b, c, ln) for b, c, ln in pairs
+            if b in results and c in cm and ln in cm[c].get("line_cals", {})]
+    if not have:
+        return
+    print("\n=== 7c. H1 acceptance bars: deep binaries vs their banked "
+          "count calibrators ===")
+    rows = []
+    for bname, cname, line in have:
+        head = cm[cname]
+        d = bf_y
+        mu = head["model"].predict(prep(d, head["cols"], art["cat_levels"]))
+        p_cal = count_over(head, mu, line)
+        r = results[bname]
+        y = r["y"]
+        p_bin = np.clip(r["p"], 1e-4, 1 - 1e-4)
+        p_cal = np.clip(p_cal, 1e-4, 1 - 1e-4)
+        ll_b, ll_c = log_loss(y, p_bin), log_loss(y, p_cal)
+        auc_b, auc_c = roc_auc_score(y, p_bin), roc_auc_score(y, p_cal)
+        rows.append({"head": bname, "vs": f"{cname}>{line}",
+                     "logloss bin": f"{ll_b:.5f}", "logloss cal": f"{ll_c:.5f}",
+                     "AUC bin": f"{auc_b:.4f}", "AUC cal": f"{auc_c:.4f}",
+                     "verdict": ("BINARY wins" if ll_b < ll_c and auc_b > auc_c
+                                 else "count wins" if ll_c < ll_b and auc_c > auc_b
+                                 else "MIXED")})
+    print(pd.DataFrame(rows).to_string(index=False))
+    print("  A head that loses BOTH metrics ships count-priced instead "
+          "(measured mixed board, per the 07-13 verdict).")
+
+
+def section_coherence(bf_y, gf_y, art):
+    """H6 coherence read (2026-07-14): the lineup's summed expected runs
+    (xrun, batter grain) against the team-runs model's per-team mean (team
+    grain) — two grains, one quantity; a large systematic gap flags a
+    frame-plumbing or dispersion problem neither grain sees alone."""
+    cm = art.get("count_models", {})
+    if "xrun" not in cm or art.get("team_runs_model") is None:
+        return
+    head = cm["xrun"]
+    mu = head["model"].predict(prep(bf_y, head["cols"], art["cat_levels"]))
+    lu = (pd.DataFrame({"GamePk": bf_y["GamePk"].to_numpy(),
+                        "Team": bf_y["Team"].to_numpy(), "xrun": mu})
+          .groupby(["GamePk", "Team"], as_index=False)["xrun"].sum())
+    tg = F.build_team_game_frame(gf_y)
+    tp = art["team_runs_model"].predict(prep(tg, art["tg_cols"],
+                                             art["cat_levels"]))
+    n_g = len(gf_y)
+    team = pd.concat([
+        pd.DataFrame({"GamePk": gf_y["GamePk"], "Team": gf_y["AwayTeam"],
+                      "mu_team": tp[:n_g]}),
+        pd.DataFrame({"GamePk": gf_y["GamePk"], "Team": gf_y["HomeTeam"],
+                      "mu_team": tp[n_g:]})])
+    m = lu.merge(team, on=["GamePk", "Team"])
+    if not len(m):
+        return
+    diff = m["xrun"] - m["mu_team"]
+    corr = float(np.corrcoef(m["xrun"], m["mu_team"])[0, 1])
+    print("\n=== 7d. Coherence: sum(lineup xrun) vs team_total mean ===")
+    print(f"  {len(m):,} team-games | mean gap (lineup - team) "
+          f"{diff.mean():+.3f} runs | SD {diff.std():.3f} | corr {corr:.3f}")
+    print("  (lineup xrun omits bench/pinch runs, so a small negative gap "
+          "is expected; watch for drift or low corr)")
+
+
 def section_games(gf_y, art):
     tg = F.build_team_game_frame(gf_y)
     Xt = prep(tg, art["tg_cols"], art["cat_levels"])
@@ -436,6 +508,31 @@ def section_games(gf_y, art):
                      "logloss": f"{log_loss(actual, np.clip(p_over, 1e-4, 1 - 1e-4)):.4f}",
                      "base logloss": f"{log_loss(actual, np.full_like(p_over, actual.mean())):.4f}"})
     print(pd.DataFrame(rows).to_string(index=False))
+
+    # H5 team_total (2026-07-14): the per-TEAM line surface off the same
+    # per-team means — its own dispersion + calibrators (the game total's
+    # do not transfer)
+    if art.get("team_line_cals") or art.get("team_total_disp"):
+        from predict import team_over, TEAM_TOTAL_LINES
+        team_mu = np.concatenate([mu_away, mu_home])
+        team_y = np.concatenate([away_y, home_y])
+        t_disp = float(np.mean((team_y - team_mu) ** 2) / np.mean(team_mu))
+        print(f"\n--- team_total (per-team lines): observed dispersion "
+              f"{t_disp:.2f} | model disp "
+              f"{float(art.get('team_total_disp', 1.0)):.2f} (cal year) ---")
+        rows = []
+        for line in TEAM_TOTAL_LINES:
+            p_over = team_over(art, team_mu, line)
+            actual = (team_y > line).astype(int)
+            rows.append({
+                "line": line,
+                "cal": "logit" if line in art.get("team_line_cals", {})
+                       else "nb",
+                "mean P(over)": f"{p_over.mean():.3f}",
+                "actual over rate": f"{actual.mean():.3f}",
+                "logloss": f"{log_loss(actual, np.clip(p_over, 1e-4, 1 - 1e-4)):.4f}",
+                "base logloss": f"{log_loss(actual, np.full_like(p_over, actual.mean(), dtype=float)):.4f}"})
+        print(pd.DataFrame(rows).to_string(index=False))
 
     # winner: dedicated model when the artifact has one
     win_cols = art.get("win_model", {}).get("cols", [])
@@ -1027,6 +1124,20 @@ def build_count_preds(art, bf_y, sf_y, gf_y):
         df["y"] = (pd.to_numeric(gf_y["AwayScore"], errors="coerce").to_numpy()
                    + pd.to_numeric(gf_y["HomeScore"], errors="coerce").to_numpy())
         out["total"] = {"df": df.reset_index(drop=True), "keycols": gk}
+        # H5 team_total (2026-07-14): the per-TEAM line family, two rows per
+        # game — the paired MAE read + prop_rankings' 'Team Runs > x' family
+        if art.get("team_line_cals") or art.get("team_total_disp"):
+            tk = ["Date", "GamePk", "Home"]
+            tdf = pd.DataFrame({
+                "Date": np.concatenate([gf_y["Date"].to_numpy()] * 2),
+                "GamePk": np.concatenate([gf_y["GamePk"].to_numpy()] * 2),
+                "Home": np.concatenate([np.zeros(n_g, dtype=int),
+                                        np.ones(n_g, dtype=int)]),
+                "mu": tp,
+                "y": np.concatenate([
+                    pd.to_numeric(gf_y["AwayScore"], errors="coerce").to_numpy(),
+                    pd.to_numeric(gf_y["HomeScore"], errors="coerce").to_numpy()])})
+            out["team_total"] = {"df": tdf, "keycols": tk}
     return out
 
 
@@ -1143,12 +1254,36 @@ CALSLOPE_BAND = 0.03   # |slope-1| move to count cal-slope (point est, no CI)
 
 def paired_verdict(lo, hi):
     """CI decides (policy v2): entirely good = improved, entirely bad = harm,
-    straddling 0 = no effect (keep). Metrics are oriented so + is always good."""
+    straddling 0 = no effect (keep). Metrics are oriented so + is always good.
+    RAW verdict only — run_paired re-verdicts under the BH-FDR gate (audit #1)
+    unless --fdr 0."""
     if lo > 0:
         return "IMPROVED"
     if hi < 0:
         return "HARM"
     return "no effect"
+
+
+DEFAULT_FDR = 0.10
+
+
+def bh_qvalues(ps):
+    """Benjamini-Hochberg q-values (audit fix #1). A --paired read makes
+    ~100+ simultaneous CI calls; at plain 95% CIs ~5 spurious 'CI-clear'
+    verdicts are EXPECTED under the null per read. Verdicts therefore gate
+    on BH q <= --fdr instead of raw CI exclusion. (Sequential re-testing of
+    the same season across many reads is NOT corrected here — that residual
+    risk is why the forward record, not any backtest, is the true test.)"""
+    ps = np.asarray(ps, dtype=float)
+    m = len(ps)
+    order = np.argsort(ps)
+    q = np.empty(m)
+    prev = 1.0
+    for rank_pos in range(m - 1, -1, -1):
+        i = order[rank_pos]
+        prev = min(prev, ps[i] * m / (rank_pos + 1))
+        q[i] = prev
+    return q
 
 
 def paired_day_bootstrap(dates, y, base_val, cand_val, kind, n_boot, seed=0):
@@ -1180,9 +1315,14 @@ def paired_day_bootstrap(dates, y, base_val, cand_val, kind, n_boot, seed=0):
             out.append(mean_absolute_error(yy, pb) - mean_absolute_error(yy, pc))
     a = np.asarray(out)
     if a.size == 0:
-        return float("nan"), float("nan"), float("nan")
+        return float("nan"), float("nan"), float("nan"), float("nan")
+    sd = float(a.std(ddof=1)) if a.size > 1 else 0.0
+    if sd > 0:      # bootstrap-normal two-sided p (finer than 1/n_boot)
+        pval = float(2.0 * stats.norm.sf(abs(a.mean()) / sd))
+    else:
+        pval = 1.0 if a.mean() == 0 else 0.0
     return (float(a.mean()), float(np.percentile(a, 2.5)),
-            float(np.percentile(a, 97.5)))
+            float(np.percentile(a, 97.5)), pval)
 
 
 # The Model sources that define what a train run produces (train imports
@@ -1229,7 +1369,8 @@ def _frames_fingerprint():
     return (p.stat().st_size, int(p.stat().st_mtime)) if p.exists() else None
 
 
-def run_paired(art, results, count_preds, tag, year, n_boot, era=None):
+def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
+               fdr=DEFAULT_FDR):
     """Print the paired keep/bench verdict against the --set-baseline snapshot,
     plus the ② feature-usage gate for columns added since that snapshot.
     `era` names a frozen archive dir under artifacts/ (e.g.
@@ -1307,11 +1448,12 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None):
         d, y = m["Date"].to_numpy(), m["y_c"].to_numpy()
         pb, pc = m["p_b"].to_numpy(), m["p_c"].to_numpy()
         for metric, kind in (("AUC", "auc"), ("edge", "edge"), ("ECE", "ece")):
-            mean, lo, hi = paired_day_bootstrap(d, y, pb, pc, kind, n_boot)
+            mean, lo, hi, pv = paired_day_bootstrap(d, y, pb, pc, kind, n_boot)
             rows.append({"prop": name, "metric": "*" + metric,
                          "delta": f"{mean:+.4f}",
                          "95% CI": f"[{lo:+.4f}, {hi:+.4f}]", "n": len(m),
-                         "verdict": paired_verdict(lo, hi), "_star": True})
+                         "verdict": paired_verdict(lo, hi), "_star": True,
+                         "_p": pv, "_mean": mean})
         # cal-slope: point estimate (a logistic per resample would triple the
         # run); classified against CALSLOPE_BAND since there's no CI. Counted in
         # the net vote like the others. delta + = candidate nearer the ideal 1.0.
@@ -1330,16 +1472,47 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None):
         kc = comp["count"][name]["keycols"]
         m = comp["count"][name]["df"].merge(cp["df"], on=kc, suffixes=("_b", "_c"))
         d, y = m["Date"].to_numpy(), m["y_c"].to_numpy()
-        mean, lo, hi = paired_day_bootstrap(
+        mean, lo, hi, pv = paired_day_bootstrap(
             d, y, m["mu_b"].to_numpy(), m["mu_c"].to_numpy(), "mae", n_boot)
         rows.append({"prop": name, "metric": "*MAE", "delta": f"{mean:+.4f}",
                      "95% CI": f"[{lo:+.4f}, {hi:+.4f}]", "n": len(m),
-                     "verdict": paired_verdict(lo, hi), "_star": True})
+                     "verdict": paired_verdict(lo, hi), "_star": True,
+                     "_p": pv, "_mean": mean})
     if not rows:
         print("  (no props overlap between this model and the snapshot)")
         return
+    # ---- multiplicity gate (audit fix #1): a read this wide makes ~100+
+    # simultaneous tests; raw 95% CIs alone EXPECT ~5 false CI-clears under
+    # the null. Verdicts on the CI'd metrics therefore require BH q <= fdr;
+    # cal-slope has no CI and keeps its band rule (marked "(band)").
+    pidx = [i for i, r in enumerate(rows)
+            if r.get("_p") is not None and np.isfinite(r["_p"])]
+    if fdr and fdr > 0 and pidx:
+        qv = bh_qvalues([rows[i]["_p"] for i in pidx])
+        n_rawclear = sum(1 for i in pidx
+                         if rows[i]["verdict"] in ("IMPROVED", "HARM"))
+        n_pass = 0
+        for j, i in enumerate(pidx):
+            rows[i]["q"] = f"{qv[j]:.3f}"
+            sig = qv[j] <= fdr
+            n_pass += int(sig)
+            rows[i]["verdict"] = ("IMPROVED" if sig and rows[i]["_mean"] > 0
+                                  else "HARM" if sig and rows[i]["_mean"] < 0
+                                  else "no effect")
+        for r in rows:
+            if r.get("_p") is None:
+                r["q"] = "(band)"
+        print(f"  multiplicity gate ON: {len(pidx)} simultaneous tests; "
+              f"~{0.05 * len(pidx):.1f} raw CI-clears expected under the "
+              f"null; verdicts require Benjamini-Hochberg q <= {fdr:g} "
+              f"(--fdr 0 restores raw-CI verdicts). {n_rawclear} raw "
+              f"CI-clear, {n_pass} survive the gate.")
+        print("  NOTE: repeated reads against the same season are sequential "
+              "tests this gate does NOT correct — the forward record is the "
+              "only uncorrectable-free test.")
     df = pd.DataFrame(rows)
-    print(df.drop(columns="_star").to_string(index=False))
+    drop = [c for c in ("_star", "_p", "_mean") if c in df.columns]
+    print(df.drop(columns=drop).to_string(index=False))
     star = df[df["_star"]]
     # Balanced NET VOTE per prop across the gated metrics — AUC (rank), edge
     # (score), ECE + cal-slope (calibration) for binaries; MAE for counts.
@@ -1411,6 +1584,17 @@ def main():
     ap.add_argument("--odds", default=str(O.DEFAULT_STORE),
                     help="odds store CSV for the vs-market section "
                          "(Tools/2_scrape_odds.py writes it)")
+    ap.add_argument("--fdr", type=float, default=DEFAULT_FDR,
+                    help="Benjamini-Hochberg false-discovery-rate level for "
+                         "the --paired verdicts (audit #1). A read makes "
+                         "100+ simultaneous tests, so raw 95%% CIs alone "
+                         "expect ~5 false CI-clears; 0 disables the gate "
+                         "(legacy raw-CI verdicts).")
+    ap.add_argument("--superset", action="store_true",
+                    help="score the SUPERSET electorate artifacts "
+                         "(models_superset*.joblib) instead of the serving "
+                         "keep-train artifacts — the dev-loop read under "
+                         "the 2026-07-15 artifact-role split")
     args = ap.parse_args()
     if args.select and args.confirm:
         sys.exit("--select and --confirm are mutually exclusive")
@@ -1422,9 +1606,10 @@ def main():
     tag = "select_" if select else ""
 
     if select:
-        art_path = ART / "models_bt.joblib"
+        art_path = ART / ("models_superset_bt.joblib" if args.superset
+                          else "models_bt.joblib")
         if not art_path.exists():
-            sys.exit("no selection artifacts found — run "
+            sys.exit(f"no artifacts at {art_path.name} — run "
                      "`python Model/train.py --select` (or a plain train.py "
                      "run) first")
         art = joblib.load(art_path)
@@ -1442,7 +1627,9 @@ def main():
               f"confirm a finished\n*** change there once, with --confirm. "
               f"***")
     else:
-        art = joblib.load(ART / "models.joblib")
+        art_path = ART / ("models_superset.joblib" if args.superset
+                          else "models.joblib")
+        art = joblib.load(art_path)
         yrs = art.get("years") or {"train": [2020, 2021, 2022, 2023, 2024],
                                    "cal": 2025, "test": 2026}
         if args.year is None:
@@ -1463,6 +1650,34 @@ def main():
     frames = joblib.load(ART / "frames.joblib")
     bf, sf, gf = frames["bf"], frames["sf"], frames["gf"]
 
+    # shadow-contract guard (audit #8, approved 07-15): a shadow-superset
+    # artifact whose serving lists need shdw_ columns these frames don't
+    # carry would die deep in prep() with a raw KeyError. Refuse up front
+    # with a message instead. tg/wf are re-derived here WITHOUT shadows, so
+    # any shdw_ in the game-head contracts is an automatic refusal.
+    stamp = art.get("meta_stamp") or {}
+    if stamp.get("role") == "superset":
+        print(f"note: scoring a SUPERSET artifact (role=superset, created "
+              f"{stamp.get('created')}) — the dev electorate, not the "
+              f"serving model")
+    problems = [f"bf:{c}" for c in art.get("bat_cols", [])
+                if c.startswith("shdw_") and c not in bf.columns]
+    problems += [f"sf:{c}" for c in art.get("st_cols", [])
+                 if c.startswith("shdw_") and c not in sf.columns]
+    problems += [f"tg:{c}" for c in art.get("tg_cols", [])
+                 if c.startswith("shdw_")]
+    problems += [f"wf:{c}" for c in (art.get("win_model") or {}).get(
+        "cols", []) if c.startswith("shdw_")]
+    if problems:
+        sys.exit(
+            f"REFUSING (audit #8 guard): {art_path.name} "
+            f"carries a shadow-superset serving contract these frames can't "
+            f"score ({len(problems)} shdw_ columns, e.g. "
+            f"{', '.join(problems[:4])}). tg/wf are rebuilt shadow-free "
+            f"here. Score the keep-train artifacts instead, or regenerate "
+            f"the keep-lists (feature_select.py --write) and rerun the "
+            f"keep train. This replaces what used to be a raw KeyError.")
+
     bf_y = bf[(bf["Season"] == args.year) & ~bf["ShortGame"].fillna(False)]
     print(f"Scoring {len(bf_y):,} batter-games, {args.year}...")
     # raw pass first, so stacked props (single/double borrow hit/tb2 scores,
@@ -1475,7 +1690,7 @@ def main():
     if args.paired:
         count_preds = build_count_preds(art, bf_y, sf_y, gf_y)
         run_paired(art, results, count_preds, tag, args.year, args.boot,
-                   era=args.era)
+                   era=args.era, fdr=args.fdr)
         return
 
     section_confidence(results, args.boot)
@@ -1489,6 +1704,8 @@ def main():
 
     summary.update(section_strikeouts(sf_y, art))
     summary.update(section_count_heads(bf_y, sf_y, art))
+    section_h1_bars(results, bf_y, art)       # H1 deep-binary acceptance
+    section_coherence(bf_y, gf_y, art)        # H6 grain-coherence read
     summary.update(section_games(gf_y, art))
 
     if select:

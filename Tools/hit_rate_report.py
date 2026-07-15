@@ -32,6 +32,7 @@ import importlib
 
 _gr = importlib.import_module("4_grade_results")
 BAT_EVENTS, LINE_RE, LINE_STAT = _gr.BAT_EVENTS, _gr.LINE_RE, _gr.LINE_STAT
+TEAM_RUNS_RE = _gr.TEAM_RUNS_RE
 RUNS_RE, PRED_DIR, load_actuals = _gr.RUNS_RE, _gr.PRED_DIR, _gr.load_actuals
 
 
@@ -44,7 +45,7 @@ def collect_file(path):
         return [], 0
     date = m.group(1)
     try:
-        batters, starters, games = load_actuals(date)
+        batters, starters, games, bg, sg = load_actuals(date)
     except Exception as e:
         print(f"  ! {Path(path).name}: {e}")
         return [], 0
@@ -63,6 +64,17 @@ def collect_file(path):
         head = [str(c.value) for c in next(ws.iter_rows(min_row=1, max_row=1))]
         return ws, {h: j for j, h in enumerate(head)}
 
+    def tag_gnum(r, hidx):
+        """(Game tag, G#) for per-game DH grading (audit #10); (None, None)
+        on legacy books -> day-sum fallback in _gr._row_stats."""
+        g_j, gn_j = hidx.get("Game"), hidx.get("G#")
+        if g_j is None or gn_j is None:
+            return None, None
+        try:
+            return str(r[g_j]), int(r[gn_j])
+        except (TypeError, ValueError):
+            return None, None
+
     if "Batter Props" in wb.sheetnames:
         ws, hidx = sheet_head("Batter Props")
         if "ID" not in hidx:
@@ -73,7 +85,8 @@ def collect_file(path):
             cols = {h: j for h, j in hidx.items() if h in BAT_EVENTS}
         for r in (ws.iter_rows(min_row=2, values_only=True) if cols else ()):
             pid = r[hidx["ID"]]
-            s = batters.get(int(pid)) if pid is not None else None
+            tag, gnum = tag_gnum(r, hidx)
+            s = _gr._row_stats(bg, batters, games, pid, tag, gnum)
             if s is None:
                 skipped += 1
                 continue
@@ -89,7 +102,8 @@ def collect_file(path):
         for r in (ws.iter_rows(min_row=2, values_only=True)
                   if line_cols else ()):
             pid = r[hidx["ID"]]
-            a = starters.get(int(pid)) if pid is not None else None
+            tag, gnum = tag_gnum(r, hidx)
+            a = _gr._row_stats(sg, starters, games, pid, tag, gnum)
             if a is None:
                 skipped += 1
                 continue
@@ -103,6 +117,10 @@ def collect_file(path):
         ws, hidx = sheet_head("Games")
         run_cols = [(h, j, float(RUNS_RE.match(h).group(1)))
                     for h, j in hidx.items() if RUNS_RE.match(h)]
+        # H5 team-total lines (2026-07-14): 'Away/Home Runs > x'
+        team_cols = [(h, j, TEAM_RUNS_RE.match(h).group(1).lower(),
+                      float(TEAM_RUNS_RE.match(h).group(2)))
+                     for h, j in hidx.items() if TEAM_RUNS_RE.match(h)]
         # doubleheader-safe: match a tag's i-th row to the day's i-th final
         # for that matchup (same rule as 4_grade_results); rows whose finals
         # aren't all in yet are skipped, never graded against the wrong game
@@ -128,6 +146,10 @@ def collect_file(path):
                 p = prob(r[j])
                 if p is not None:
                     rows.append((h, float(p), g["total"] > line))
+            for h, j, side, line in team_cols:
+                p = prob(r[j])
+                if p is not None:
+                    rows.append((h, float(p), g[side] > line))
     wb.close()
     return rows, skipped
 

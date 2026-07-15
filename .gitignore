@@ -1,12 +1,16 @@
-# Data/ CSVs are tracked (G6 decision 2026-07-14), with two exceptions:
-# raw_pitches/ (~1 GB parquet archive, regenerable via --from-raw source data)
-# and mlb_statcast_bip.csv (146 MB — over GitHub's 100 MB hard push limit)
-Data/raw_pitches/
-Data/mlb_statcast_bip.csv
+# Data/ policy (2026-07-15, audit #16 — user decision, supersedes G6):
+# data files are NOT tracked going forward. The one-off G6 restore-point
+# snapshot lives in history at commit 338e91a; daily scrapes rewrite these
+# files, so tracking them grows git history by GBs per month.
+Data/*
+!Data/GLOSSARY.md
 cache
 backups
 todays_games.json
-!Data/GLOSSARY.md
+
+# editor/office junk
+~$*
+tempCodeRunnerFile*
 Logs/
 *.log
 Predictions/

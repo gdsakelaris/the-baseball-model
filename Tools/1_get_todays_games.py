@@ -309,7 +309,7 @@ def scrape_mlb():
             "away_lineup": lineup("away"), "home_lineup": lineup("home"),
             "names": names,
             "temp": None, "wind_speed": None, "wind_dir": "", "condition": "",
-            "humidity": None, "pressure": None,
+            "humidity": None, "pressure": None, "precip": None,
         })
     return games
 
@@ -317,11 +317,13 @@ def scrape_mlb():
 # ------------------------------------------------------------- open-meteo
 
 def forecast_weather(games):
-    """Fill humidity (%) + surface pressure (hPa) at each game's start hour
-    from the Open-Meteo forecast (keyless). One request per venue; arrays are
-    requested in ET so start_et indexes them directly. Real ambient values are
-    reported even for roofed parks — the model neutralizes weather on
-    Condition == Dome itself, same as it does for historical games."""
+    """Fill humidity (%), surface pressure (hPa) and precipitation (mm, at
+    the start hour — the rain-shortening input wired 2026-07-14) at each
+    game's start hour from the Open-Meteo forecast (keyless). One request
+    per venue; arrays are requested in ET so start_et indexes them
+    directly. Real ambient values are reported even for roofed parks — the
+    model neutralizes weather on Condition == Dome itself, same as it does
+    for historical games."""
     try:
         coords = venue_coords()
     except Exception as e:                          # noqa: BLE001
@@ -341,14 +343,16 @@ def forecast_weather(games):
             r = requests.get(
                 "https://api.open-meteo.com/v1/forecast",
                 params={"latitude": ll[0], "longitude": ll[1],
-                        "hourly": "relative_humidity_2m,surface_pressure",
+                        "hourly": ("relative_humidity_2m,surface_pressure,"
+                                   "precipitation"),
                         "timezone": "America/New_York", "forecast_days": 3},
                 headers=HEADERS, timeout=30)
             r.raise_for_status()
             h = r.json()["hourly"]
             hours = dict(zip(h["time"],
                              zip(h["relative_humidity_2m"],
-                                 h["surface_pressure"])))
+                                 h["surface_pressure"],
+                                 h["precipitation"])))
         except Exception as e:                      # noqa: BLE001
             print(f"  weather forecast failed for {venue} ({e})",
                   file=sys.stderr)
@@ -363,6 +367,8 @@ def forecast_weather(games):
                 g["humidity"] = float(got[0])
                 g["pressure"] = (round(float(got[1]), 1)
                                  if got[1] is not None else None)
+                g["precip"] = (round(float(got[2]), 2)
+                               if got[2] is not None else None)
                 filled += 1
     return filled
 
@@ -673,11 +679,44 @@ def main():
 
     games.sort(key=lambda g: (g.get("start_et") or "99:99",
                               g["away_team"]))
+    # doubleheader flags (2026-07-14 #24): same matchup twice today; game 2
+    # = the later first pitch (games are start-time sorted right above).
+    # The GUI passes these through to the spec; the model's training-side
+    # flags derive identically from the games file.
+    seen_dh = Counter()
+    for g in games:
+        key = (g["away_team"], g["home_team"])
+        g["is_dh"] = 1.0 if pair_n[key] > 1 else 0.0
+        g["dh_game2"] = 1.0 if seen_dh[key] >= 1 else 0.0
+        seen_dh[key] += 1
     payload = {"scraped_at": dt.datetime.now().isoformat(timespec="seconds"),
                "date": games[0]["date"] if games else None,
                "games": games}
     with open(OUT_FILE, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=1)
+
+    # Forecast archive (audit #4, 2026-07-15): training weather is the
+    # ACTUAL observed game weather, but serving feeds these FORECASTS — a
+    # structural backtest-vs-live optimism channel on weather-sensitive
+    # heads. Nothing can remove it retroactively; this append-only log
+    # makes it MEASURABLE (join to mlb_games/mlb_weather on date+matchup to
+    # quantify forecast error over the forward record).
+    fc_path = DATA_DIR / "mlb_weather_forecast.csv"
+    fc_new = not fc_path.exists()
+    with open(fc_path, "a", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        if fc_new:
+            w.writerow(["Date", "AwayTeam", "HomeTeam", "Venue", "Temp",
+                        "WindSpeed", "WindDir", "Condition", "Humidity",
+                        "Pressure", "Precip", "DhGame2", "ScrapedAt"])
+        for g in games:
+            w.writerow([g.get("date"), g.get("away_team"),
+                        g.get("home_team"), g.get("venue"), g.get("temp"),
+                        g.get("wind_speed"), g.get("wind_dir"),
+                        g.get("condition"), g.get("humidity"),
+                        g.get("pressure"), g.get("precip"),
+                        int(g.get("dh_game2") or 0), payload["scraped_at"]])
+    print(f"  forecast archive: +{len(games)} rows -> {fc_path.name}")
 
     posted = sum(1 for g in games if len(g["away_lineup"]) == 9
                  and len(g["home_lineup"]) == 9)

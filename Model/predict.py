@@ -32,17 +32,25 @@ ART = Path(__file__).resolve().parent / "artifacts"
 
 K_LINES = [3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
 TOTAL_LINES = [6.5, 7.5, 8.5, 9.5, 10.5]
+# per-TEAM total-runs lines (H5 team_total head, 2026-07-14)
+TEAM_TOTAL_LINES = [2.5, 3.5, 4.5, 5.5]
 
-# prop key -> output column, in display order
+# prop key -> output column, in display order (2026-07-14: + the H1 deep
+# binaries, H3 triple, H4 2+ RBI / 2+ runs)
 PROP_COLS = {"hr": "P_HR", "hit": "P_Hit", "hits2": "P_2Hits",
-             "tb2": "P_TB2", "run": "P_Run", "rbi": "P_RBI",
+             "tb2": "P_TB2", "tb3": "P_TB3", "tb4": "P_TB4",
+             "run": "P_Run", "run2": "P_Run2",
+             "rbi": "P_RBI", "rbi2": "P_RBI2",
              "bb": "P_BB", "sb": "P_SB",
-             "single": "P_1B", "double": "P_2B",
-             "bk": "P_K", "bk2": "P_2K",
-             "hrr2": "P_HRR2", "hrr3": "P_HRR3"}
+             "single": "P_1B", "double": "P_2B", "triple": "P_3B",
+             "bk": "P_K", "bk2": "P_2K", "bk3": "P_3K",
+             "hrr2": "P_HRR2", "hrr3": "P_HRR3", "hrr4": "P_HRR4"}
 
 # batter count heads -> mean column; starter count heads -> (mean, P prefix)
-BAT_COUNT_COLS = {"xbk": "xSO", "xhrr": "xHRR", "xtb": "xTB"}
+# (2026-07-14: + the H6 expected-stat-line means — means ONLY, their line
+# calibrators stay banked; binaries own the batter lines)
+BAT_COUNT_COLS = {"xbk": "xSO", "xhrr": "xHRR", "xtb": "xTB",
+                  "xh": "xH", "xrun": "xR", "xrbi": "xRBI", "xbb": "xBB"}
 ST_COUNT_COLS = {"outs": ("xOuts", "P_outs_over"),
                  "pbb": ("xBB", "P_bb_over"),
                  "pha": ("xHits", "P_hits_over"),
@@ -105,10 +113,15 @@ NB_PRICED_TARGETS = {"y_per", "y_so", "total_runs"}
 # to the sim outputs from Model/pa_serve.py — score/total means linear,
 # winner on logits. Evidence (fixed-w day-block CI vs the shipped
 # incumbent, hook engine): score CI-clear SIM+ both years at w=.3
-# (+.0068/+.0046); total CI-clear 2025 (+.010) / flat 2026 -> USER call
-# 07-13: in at half-weight; winner positive-tie both years -> USER call
-# 07-13: in at .30. Empty dict (or missing sim artifacts) = incumbent
-# alone; batter/starter heads and sb stay incumbent (w=0 verdicts).
+# (+.0068/+.0046); winner positive-tie both years -> USER call 07-13: in
+# at .30. Empty dict (or missing sim artifacts) = incumbent alone;
+# batter/starter heads and sb stay incumbent (w=0 verdicts).
+# LEDGERED EXCEPTION (audit #7, user decision 2026-07-15): total's 0.20
+# was chosen half-weight AFTER seeing 2026 flat — a 2026-informed tune
+# that predates the "2026 may veto, never tune" rule. Kept as-is,
+# recorded in FEATURE_BACKLOG's Decline/exception ledger, and marked for
+# a 2025-ONLY re-decision when the finish chain reruns pa_blend (the raw
+# 2025 fit was w=0.50).
 SIM_BLEND = {"score": 0.35, "total": 0.20, "winner": 0.30}
 
 
@@ -149,12 +162,28 @@ def k_over(art, mu, line):
     return np.array([nb_over(m, line, disp) for m in mu])
 
 
-def total_over(art, mu, line):
+def _vmr_scaled_disp(art, disp, park_vmr):
+    """Audit wave rank 32: scale the NB total dispersion by the venue's
+    run variance-to-mean ratio, disp * (park_vmr/VMR0)^a. FAIL-SAFE and
+    GATED: the exponent `a` is fit on 2025 ONLY (evaluate_deep, Phase-5)
+    and stored as art['total_vmr_exp']; when it is absent (default) or
+    park_vmr is missing, this returns the constant disp unchanged, so the
+    column ships live but the pricing change only activates once the 2025
+    fit lands and clears the paired gate."""
+    a = art.get("total_vmr_exp")
+    if a is None or park_vmr is None or not np.isfinite(park_vmr):
+        return disp
+    from features import PARK_VMR0
+    scaled = disp * (float(park_vmr) / PARK_VMR0) ** float(a)
+    return float(np.clip(scaled, 1.6, 3.0))
+
+
+def total_over(art, mu, line, park_vmr=None):
     """P(game total runs > line): cal-year per-line logistic when present
     (same 2026-07-13 pass — total lines were the worst-calibrated family on
     the board under the raw NB tail), else nb_over with the cal-year total
-    dispersion. Lines outside TOTAL_LINES (odds-store exotics) always fall
-    back to NB."""
+    dispersion (venue-scaled when the gated 2025 vmr fit is present). Lines
+    outside TOTAL_LINES (odds-store exotics) always fall back to NB."""
     mu = np.atleast_1d(np.asarray(mu, dtype=float))
     if len(mu) == 0:
         return np.array([])
@@ -162,7 +191,22 @@ def total_over(art, mu, line):
           else art.get("total_line_cals", {}).get(line))
     if lc is not None:
         return lc.predict_proba(mu.reshape(-1, 1))[:, 1]
-    disp = float(art.get("total_disp", 1.0))
+    disp = _vmr_scaled_disp(art, float(art.get("total_disp", 1.0)), park_vmr)
+    return np.array([nb_over(m, line, disp) for m in mu])
+
+
+def team_over(art, mu, line):
+    """P(one TEAM's runs > line) — the H5 team_total head's line surface
+    (2026-07-14): cal-year per-line logistic when the artifact carries one,
+    else nb_over with the TEAM-level dispersion (the game total's does not
+    transfer). Old artifacts (no team cals/disp) degrade to Poisson."""
+    mu = np.atleast_1d(np.asarray(mu, dtype=float))
+    if len(mu) == 0:
+        return np.array([])
+    lc = art.get("team_line_cals", {}).get(line)
+    if lc is not None:
+        return lc.predict_proba(mu.reshape(-1, 1))[:, 1]
+    disp = float(art.get("team_total_disp", 1.0))
     return np.array([nb_over(m, line, disp) for m in mu])
 
 
@@ -271,12 +315,44 @@ class Predictor:
         tick = progress or (lambda msg: None)
         tick("loading models...")
         self.art = joblib.load(ART / "models.joblib")
+        # serving guard (audit #8, approved 07-15): a superset/experiment
+        # intermediate must never serve. Refuse on the role stamp or on any
+        # shdw_ column in a serving contract, with a clear message instead
+        # of silently NaN-imputing shadow features.
+        stamp = self.art.get("meta_stamp") or {}
+        serving_lists = {"bat_cols": self.art.get("bat_cols", []),
+                         "st_cols": self.art.get("st_cols", []),
+                         "tg_cols": self.art.get("tg_cols", [])}
+        for n, p in (self.art.get("props") or {}).items():
+            serving_lists[f"prop:{n}"] = p.get("cols", [])
+        shadowed = sorted(n for n, cols in serving_lists.items()
+                          if any(str(c).startswith("shdw_") for c in cols))
+        if stamp.get("role") == "superset" or shadowed:
+            raise SystemExit(
+                f"REFUSING to serve models.joblib: it is a SUPERSET/"
+                f"experiment intermediate (role={stamp.get('role')!r}, "
+                f"shadowed contracts: {shadowed[:5]}"
+                f"{'...' if len(shadowed) > 5 else ''}). Run the keep-train "
+                f"(train.py with feature_keep.json present) to restore a "
+                f"servable artifact. [audit #8 guard]")
         # serving XGB inference on CPU -> immune to GPU contention/absence
         _force_xgb_cpu(self.art)
         # opt-in in-season drift correction (evaluate_deep Section 10 is the
-        # evidence for turning it on); offsets are refreshed by the daily retrain
+        # evidence for turning it on). 2026-07-15 (audit #16): offsets live
+        # in a sidecar JSON, not inside the serving artifact; the art key is
+        # only the pre-07-15 fallback.
         self.recal = recal
-        self.offsets = self.art.get("inseason_offsets") or {}
+        self.offsets = {}
+        off_path = ART / "inseason_offsets.json"
+        if off_path.exists():
+            try:
+                import json as _json
+                self.offsets = _json.loads(
+                    off_path.read_text()).get("offsets", {})
+            except Exception:
+                self.offsets = {}
+        if not self.offsets:
+            self.offsets = self.art.get("inseason_offsets") or {}
         self.stores = stores or F.Stores(progress=progress)
         self._slate_sim = None      # lazy PA-sim (False = unavailable)
         tick("indexing names...")
@@ -320,7 +396,19 @@ class Predictor:
                 "Condition": txt(spec.get("condition")),
                 "Humidity": num(spec.get("humidity")),
                 "Pressure": num(spec.get("pressure")),
+                "Precip": num(spec.get("precip")),
                 "DayNight": spec.get("day_night") or ""}
+
+    def _sched(self, spec, team):
+        """Schedule context for one team (2026-07-14 #18/#24): previous-game
+        travel/day-night from the games history + tonight's doubleheader
+        flags from the spec (the slate scrape knows the game number;
+        historical replays derive it in spec_from_game)."""
+        out = self.stores.team_sched(team, pd.Timestamp(spec["date"]),
+                                     spec["venue"], spec.get("day_night"))
+        out["is_dh"] = float(spec.get("is_dh") or 0.0)
+        out["dh_game2"] = float(spec.get("dh_game2") or 0.0)
+        return out
 
     def _batter_rows(self, spec):
         date = pd.Timestamp(spec["date"])
@@ -329,6 +417,9 @@ class Predictor:
         wx = self._weather(spec)
         park = s.park(spec["venue"], date)
         env = s.league_env(date)
+        # audit wave ranks 4/24: prior-season league SB/27 (regime centering
+        # for the steal-permissiveness products), game-level
+        lg_sb27 = {"lg_sb27_prior": s.lg_sb27_prior(season)}
 
         # HP-umpire tendency: one game-level value shared by every batter
         ump = s.ump_feats(spec.get("hp_ump_id"), date)
@@ -349,7 +440,10 @@ class Predictor:
             # unknown opposing starter -> sentinel id; every starter-derived
             # feature (incl. arsenal matchup, platoon) comes back NaN
             opp_starter = opp_starter if opp_starter else -1
-            st_feats = s.starter_feats(opp_starter, date, season)
+            # the opposing starter's venue context is the mirror of ours
+            st_feats = s.starter_feats(opp_starter, date, season,
+                                       home=1 - home)
+            sched = self._sched(spec, team)
             toff = s.team_offense(team, season, date)
             toff_loc = s.team_offense_loc(team, season, home, date)
             pen = s.bullpen(opp, season, date)
@@ -365,6 +459,24 @@ class Predictor:
             pprior = s.pitcher_prior(opp_starter, season)
             p_bio = s.bio(opp_starter)
             opp_hand = p_bio["pit_throws"]
+            # audit wave: the opposing starter's MiLB prior (rank 17) +
+            # arsenal breadth/trajectory (#22), this team's BaseRuns luck
+            # (rank 15) + the opponent's HL-arm availability (#22)
+            pmilb_opp = s.milb_feats(opp_starter, season, "pit")
+            arsdyn_opp = s.arsenal_dynamics(opp_starter, season)
+            side_extra = {"toff_bsr_luck": s.team_bsr(team, date),
+                          "pen_hl_unavail": s.pen_unavail(opp, date),
+                          "p_age": ((date - p_bio["dob"]).days / 365.25
+                                    if pd.notna(p_bio["dob"]) else np.nan),
+                          "p_effprem_d": pdo["pd_effprem_d"],
+                          "p_brkmov_d": pdo["pd_brkmov_d"],
+                          "p_stretch_d": pdo["pd_stretch_vdelta_d"],
+                          "p_relsep_d": pdo["pd_relsep_d"],
+                          # battery + IL wave (2026-07-15): the opponent's
+                          # battery quality + the opposing starter's IL
+                          # return context (side-level, same for all nine)
+                          **s.catcher_feats(opp, season, "opp"),
+                          **s.il_feats(opp_starter, date, "p_")}
             side_rows = []
             for pid, slot in lineup:
                 b = s.batter_feats(pid, date, season, opp_hand=opp_hand,
@@ -372,7 +484,7 @@ class Predictor:
                 bio = s.bio(pid)
                 row = {"slot": slot, "Home": home, "Season": season,
                        "month": date.month,
-                       "xpa_slot": s.xpa_slot(slot, date), **ump,
+                       "xpa_slot": s.xpa_slot(slot, date), **ump, **sched,
                        **b, **st_feats, **toff,
                        **toff_loc, **pen, **pen_hl, **pen_fat, **tsb, **phrq,
                        **pbip, **s.bip_batter(pid, date),
@@ -392,9 +504,19 @@ class Predictor:
                        "p_f32b_d": pdo["pd_f32b_d"],
                        "p_fbv_sd": pdo["pd_fbv_sd"],
                        "p_rel_sd": pdo["pd_rel_sd"],
+                       "p_ivb_d": pdo["pd_ivb_d"],
+                       # v8: his damage-allowed splits (band + class)
+                       "p_fbloxw_d": pdo["pd_fbloxw_d"],
+                       "p_fbmidxw_d": pdo["pd_fbmidxw_d"],
+                       "p_fb95xw_d": pdo["pd_fb95xw_d"],
+                       "p_brkxw_d": pdo["pd_brkxw_d"],
+                       "p_offxw_d": pdo["pd_offxw_d"],
+                       "p_fbkxw_d": pdo["pd_fbkxw_d"],
                        "opp_oaa": oaa_opp, "opp_def_uer": uer_opp,
+                       **lg_sb27, **pmilb_opp, **arsdyn_opp, **side_extra,
                        **ldef[side], **tto,
                        **s.batter_brr(pid, season),
+                       **s.il_feats(pid, date),
                        **pprior, **park, **wx, **env,
                        "hrpt_score": s.hrpt(pid, opp_starter, season, date),
                        **s.fatigue(pid, date),
@@ -440,7 +562,16 @@ class Predictor:
                         "ctx_behind_slg_d": ("_slgp_d", (1, 2)),
                         # runners-ahead advancement (RBI): neighbors'
                         # prior-season extra-base rate, from batter_brr
-                        "ctx_ahead_brr": ("bat_brr_xb", (-2, -1))}
+                        "ctx_ahead_brr": ("bat_brr_xb", (-2, -1)),
+                        # audit wave rank 12: the missing neighbor directions
+                        # — ahead-SLG (which base the runners occupy),
+                        # behind-OBP (chain continuation), behind-GIDP (the
+                        # rally-kill axis)
+                        "ctx_ahead_slg": ("_slgp", (-2, -1)),
+                        "ctx_ahead_slg_d": ("_slgp_d", (-2, -1)),
+                        "ctx_behind_obp": ("_obpp", (1, 2)),
+                        "ctx_behind_obp_d": ("_obpp_d", (1, 2)),
+                        "ctx_behind_gidp": ("c_gidp_pa_sh", (1, 2))}
 
             def _nmean(vals):
                 vals = [v for v in vals if v is not None and pd.notna(v)]
@@ -478,7 +609,26 @@ class Predictor:
                 "lu_whiff": "m_whiff", "lu_vsh_k": "vsh_k_pct_sh",
                 "lu_wsw": "bd_wsw_d", "lu_chase": "bd_chase_d",
                 "lu_brkwh": "bd_brkwh_d", "lu_offwh": "bd_offwh_d",
-                "lu_fbwh": "bd_fbwh_d"}
+                "lu_fbwh": "bd_fbwh_d",
+                # audit wave: rank 18 (damage/OBP/first-pitch), rank 5c
+                # (rally-kill), rank 24 (running game) — all means of
+                # already-served batter columns
+                "lu_obp": "_obpp", "lu_slg": "_slgp",
+                "lu_xwcon": "bipd_xwoba", "lu_brl": "bipd_brl",
+                "lu_fpsw": "bd_fpsw_d", "lu_gidp": "c_gidp_pa_sh",
+                "lu_sb": "d_sb_pa_sh", "lu_sprint": "bat_sprint",
+                # rank 33: the platoon-edge components (means of per-row
+                # values computed below and attached to bdf)
+                "lu_vsh_edge": "_vsh_tb_edge", "lu_vsh_kedge": "_vsh_k_edge",
+                # v8 (2026-07-15): banded whiff + damage lineup views
+                # (career damage reads — PD_SHRINK v8 note), mirroring the
+                # vectorized lu aggregation exactly
+                "lu_fblowh": "bd_fblowh_d", "lu_fbmidwh": "bd_fbmidwh_d",
+                "lu_fb95wh": "bd_fb95wh_d",
+                "lu_fbloxw": "bd_fbloxw_c", "lu_fbmidxw": "bd_fbmidxw_c",
+                "lu_fb95xw": "bd_fb95xw_c",
+                "lu_brkxw": "bd_brkxw_c", "lu_offxw": "bd_offxw_c",
+                "lu_fbkxw": "bd_fbkxw_c"}
 
     def _starter_rows(self, spec, bdf=None, bmeta=None):
         """K-model rows. bdf/bmeta (the batter rows) supply the
@@ -499,8 +649,9 @@ class Predictor:
             if not pid:  # starter not specified -> no K projection for side
                 continue
             self._starter_sanity(pid, spec)
-            f = s.starter_feats(pid, date, season)
+            f = s.starter_feats(pid, date, season, home=home)
             vs = s.team_offense(opp, season, date, prefix="vs")
+            p_bio = s.bio(pid)
             row = {"Season": season, "month": date.month, "Home": home,
                    **f, **vs, **park, **wx, **env, **ump,
                    **s.pd_pitcher_feats(pid, date),
@@ -509,7 +660,32 @@ class Predictor:
                    **s.lineup_oaa([p for p, _ in spec[f"{side}_lineup"]],
                                   season, prefix="own"),
                    # MiLB translated prior, allowed side (2026-07-13)
-                   **s.milb_feats(pid, season, "pit")}
+                   **s.milb_feats(pid, season, "pit"),
+                   # 2026-07-14 finish batch: his contact quality allowed
+                   # (the p_conv chain's damage half, #28), the manager's
+                   # leash (#16), and his team's schedule context (#18/#24)
+                   **s.bip_pitcher(pid, date),
+                   "team_st_outs_pg": s.team_st_outs(team, season, date),
+                   # audit wave: his OWN bullpen state (#6), own defense's
+                   # unearned-run rate (#26), his SB-allowed permissiveness
+                   # + league SB/27 centering (#24), his bio (#20), and his
+                   # arsenal breadth/trajectory (#22)
+                   **s.bullpen(team, season, date, prefix="own_pen"),
+                   "own_pen_hl_era": s.bullpen_hl(
+                       team, season, date, prefix="own_pen_hl")["own_pen_hl_era"],
+                   "own_pen_np_l3": s.pen_fatigue(team, date),
+                   "own_def_uer": s.team_defense(team, season, date),
+                   **s.pitcher_prior(pid, season),
+                   "lg_sb27_prior": s.lg_sb27_prior(season),
+                   # battery + IL wave (2026-07-15): his own battery + his
+                   # own IL return context
+                   **s.catcher_feats(team, season, "own"),
+                   **s.il_feats(pid, date, "p_"),
+                   "pit_age": ((date - p_bio["dob"]).days / 365.25
+                               if pd.notna(p_bio["dob"]) else np.nan),
+                   "pit_height": p_bio["height"], "pit_weight": p_bio["weight"],
+                   **s.arsenal_dynamics(pid, season),
+                   **self._sched(spec, team)}
             F.add_pit_trends(row)
             # the starter's own arsenal, K-model view (same helper as training)
             pa = F.pitcher_arsenal_feats(
@@ -567,15 +743,18 @@ class Predictor:
             print(f"note: listed starter {self._name(pid, spec)} is a "
                   f"bullpen arm on the current roster — check the pick")
 
-    def _team_rows(self, spec):
+    def _team_rows(self, spec, bdf=None, bmeta=None):
         """One row per team: own offense vs opposing pitching (order:
-        away first, home second)."""
+        away first, home second). bdf/bmeta (the batter rows) supply the
+        posted-lineup aggregates (#19/#30/#32); without them those
+        features are NaN."""
         date = pd.Timestamp(spec["date"])
         season = date.year
         s = self.stores
         wx = self._weather(spec)
         park = s.park(spec["venue"], date)
         env = s.league_env(date)
+        ump = s.ump_feats(spec.get("hp_ump_id"), date)
         rows = []
         sides = [(spec["away_team"], spec["home_starter"],
                   spec["home_team"], 0, "away", "home"),
@@ -592,6 +771,8 @@ class Predictor:
             pen_hl = s.bullpen_hl(opp, season, date, prefix="opp_pen_hl")
             stf = s.starter_feats(opp_starter, date, season)
             pb = s.bip_pitcher(opp_starter, date)
+            lu = self._lineup_agg(bdf, bmeta, team)
+            sc = self._sched(spec, team)
             rows.append({
                 "Season": season, "month": date.month, "Home": home,
                 "off_hr_pa": toff["off_hr_pa"], "off_r_pg": toff["off_r_pg"],
@@ -621,20 +802,73 @@ class Predictor:
                 **s.lineup_oaa(opp_lu, season, prefix="opp"),
                 **s.lineup_brr(own_lu, season),
                 **s.tto(opp_starter, date),
+                # 2026-07-14 finish batch: B-lineup gap (#19), lineup air
+                # profile + arsenal collision (#30/#32), BaseRuns luck
+                # (#20), ump run environment (#21), schedule/travel + DH
+                # flags (#18/#24)
+                "off_lu_obp_gap": lu["lu_obp"] - toff["off_obp"],
+                "off_lu_slg_gap": lu["lu_slg"] - toff["off_slg"],
+                "off_lu_pullair": lu["lu_pullair"],
+                "off_lu_arswh": lu["lu_arswh"],
+                "off_bsr_luck": s.team_bsr(team, date),
+                "ump_r_g": ump["ump_r_g"],
+                "off_dan": sc["day_after_night"],
+                "off_travel_km": sc["travel_km"],
+                "off_tz_delta": sc["tz_delta"],
+                "is_dh": sc["is_dh"], "dh_game2": sc["dh_game2"],
+                # audit wave: walk channel (#8; patience_wild computed in
+                # add_team_game_derived), starter length/leash + handoff gap
+                # (#9; xpen_r_gap in the shared helper) + HL-outs share
+                # rider, venue dispersion (#32), platoon edge (#33)
+                "off_bb_pct": toff["off_bb_pct"],
+                "opp_ps_bb_bf": stf["ps_bb_bf"],
+                "lg_bb_pa": env["lg_bb_pa"],
+                "opp_ps_len": stf["p_ip_per_start"],
+                "opp_st_outs_pg": s.team_st_outs(opp, season, date),
+                "opp_penhl_share": s.penhl_share(opp, season, date),
+                "park_vmr": park["park_vmr"],
+                "off_lu_vsh_edge": lu["lu_vsh_edge"],
+                "off_lu_vsh_kedge": lu["lu_vsh_kedge"],
             })
         df = pd.DataFrame(rows)
         df["opp_ps_tto_decay"] = F.tto_decay_from_sums(df)
         # shared weather derivation (parity with build_game_frame ->
-        # build_team_game_frame); the totals head reads hum_eff/air_dens too
-        return F.add_weather_derived(df)
+        # build_team_game_frame); the totals head reads hum_eff/air_dens
+        # too, then the general carry wind (2026-07-14: was missing from
+        # the serving team rows — served NaN; caught by the new team-row
+        # selftest) and the shared team-game derived features (#30)
+        F.add_wind_carry(df)
+        return F.add_team_game_derived(F.add_weather_derived(df))
+
+    @staticmethod
+    def _lineup_agg(bdf, bmeta, team):
+        """Posted-lineup aggregates from the served batter rows, mirroring
+        features.lineup_aggregates (NaN-skipping means over the lineup)."""
+        nan = {"lu_obp": np.nan, "lu_slg": np.nan, "lu_pullair": np.nan,
+               "lu_arswh": np.nan, "lu_vsh_edge": np.nan,
+               "lu_vsh_kedge": np.nan}
+        if bdf is None or bmeta is None or not len(bdf):
+            return nan
+        mask = (bmeta["Team"] == team).to_numpy()
+        if not mask.any():
+            return nan
+        return {"lu_obp": bdf.loc[mask, "_obpp"].mean(),
+                "lu_slg": bdf.loc[mask, "_slgp"].mean(),
+                "lu_pullair": bdf.loc[mask, "bip_pullair"].mean(),
+                "lu_arswh": bdf.loc[mask, "arsenal_whiff"].mean(),
+                # rank 33: the platoon edges (precomputed per batter row)
+                "lu_vsh_edge": bdf.loc[mask, "_vsh_tb_edge"].mean(),
+                "lu_vsh_kedge": bdf.loc[mask, "_vsh_k_edge"].mean()}
 
     # starter features the winner model consumes, per side
     _WIN_ST = ["ps_era", "ps_k_bf", "ps_hr_bf", "ps_bb_bf",
                "pc_era", "pc_hr_bf", "p_days_rest", "p5_k_bf"]
 
-    def _win_row(self, spec):
+    def _win_row(self, spec, bdf=None, bmeta=None):
         """One row for the home-win classifier: both teams' records,
-        offenses, bullpens, and starters, mirroring build_game_frame."""
+        offenses, bullpens, and starters, mirroring build_game_frame.
+        bdf/bmeta supply the posted-lineup aggregates for the B-lineup
+        gap diff (#19) and the arsenal-collision diff (#32)."""
         date = pd.Timestamp(spec["date"])
         season = date.year
         s = self.stores
@@ -657,8 +891,15 @@ class Predictor:
                 row[f"{side}_{k}"] = stf[k]
             row[f"{side}_ps_xwcon_d"] = s.bip_pitcher(
                 starter if starter else -1, date)["pbipd_xwoba"]
+            # 2026-07-14 finish batch: per-side BaseRuns luck, B-lineup
+            # gap, arsenal collision (diffs below feed the winner)
+            lu = self._lineup_agg(bdf, bmeta, team)
+            row[f"{side}_bsr_luck"] = s.team_bsr(team, date)
+            row[f"{side}_lu_obp_gap"] = lu["lu_obp"] - off["off_obp"]
+            row[f"{side}_lu_arswh"] = lu["lu_arswh"]
         for f in ["win_pct", "rd_pg", "pyth", "ra_pg", "r_pg", "w20", "rd20",
-                  "ps_era", "pc_era", "pen_era", "ps_k_bf", "ps_xwcon_d"]:
+                  "ps_era", "pc_era", "pen_era", "ps_k_bf", "ps_xwcon_d",
+                  "bsr_luck", "lu_obp_gap", "lu_arswh"]:
             row[f"d_{f}"] = row[f"home_{f}"] - row[f"away_{f}"]
         row["d_rest"] = row["home_p_days_rest"] - row["away_p_days_rest"]
         row["d_ps_kbb"] = ((row["home_ps_k_bf"] - row["home_ps_bb_bf"])
@@ -670,9 +911,21 @@ class Predictor:
     # ------------------------------------------------------- predict
 
     def _prep(self, df, cols):
-        for c in cols:
-            if c not in df.columns:
-                df[c] = np.nan
+        # audit #12: a serving column the row-builders failed to produce
+        # used to become silent NaN ("imputed missing"). Still filled — a
+        # missing optional source must not kill a slate — but now WARNED,
+        # once per column per session, so train/serve drift is visible.
+        missing = [c for c in cols if c not in df.columns]
+        new = [c for c in missing
+               if c not in getattr(self, "_warned_missing", set())]
+        if new:
+            self._warned_missing = getattr(self, "_warned_missing",
+                                           set()) | set(new)
+            print(f"WARNING: serving produced no value for {len(new)} model "
+                  f"column(s) — filled NaN (train/serve drift?): "
+                  f"{new[:8]}{'...' if len(new) > 8 else ''}")
+        for c in missing:
+            df[c] = np.nan
         df = df[cols].copy()
         for c, levels in self.art["cat_levels"].items():
             if c in df.columns:
@@ -690,6 +943,10 @@ class Predictor:
         X = self._prep(bdf, a["bat_cols"])
 
         batters = bmeta[["Team", "slot", "PlayerId", "Name"]].copy()
+        # G# (audit #10): game number within the day (2 = doubleheader game
+        # 2), so the grader scores each row against ITS game's box line
+        # instead of the day sum
+        batters.insert(1, "G#", 2 if spec.get("dh_game2") else 1)
         # career-games flag: picks on players with under ~50 MLB games were
         # the weakest segment in the holdout eval (AUC 0.58 vs 0.63 overall)
         batters["CareerG"] = pd.to_numeric(
@@ -726,6 +983,7 @@ class Predictor:
         starters = smeta if len(smeta) else pd.DataFrame(
             columns=["PlayerId", "Team", "Opponent", "Name"])
         starters = starters.copy()
+        starters["G#"] = 2 if spec.get("dh_game2") else 1   # audit #10
         starters["xK"] = np.round(k_pred, 2)
         # K P(over): cal-year per-line logistic (k_over), NB/Poisson fallback
         for line in K_LINES:
@@ -743,7 +1001,7 @@ class Predictor:
                 for line in head["lines"]:
                     starters[f"{pre}_{line}"] = np.round(
                         count_over(head, mu, line), 3)
-        gdf = self._team_rows(spec)
+        gdf = self._team_rows(spec, bdf, bmeta)
         Xg = self._prep(gdf, a["tg_cols"])
         mu_away, mu_home = a["team_runs_model"].predict(Xg)
         total_runs = float(mu_away + mu_home)
@@ -751,7 +1009,7 @@ class Predictor:
         # both starters, blended with the Poisson win prob); the bare
         # Poisson comparison is only the fallback for old artifacts
         if "win_model" in a:
-            Xw = self._prep(pd.DataFrame([self._win_row(spec)]),
+            Xw = self._prep(pd.DataFrame([self._win_row(spec, bdf, bmeta)]),
                             a["win_model"]["cols"])
             p_home = float(predict_win(a["win_model"], Xw,
                                        mu_home, mu_away)[0])
@@ -782,9 +1040,18 @@ class Predictor:
             "exp_total_runs": round(total_runs, 2),
             "home_team": spec["home_team"], "away_team": spec["away_team"],
             "home_win_prob": round(float(p_home), 3),
-            "P_over_runs": {str(l): round(float(total_over(a, total_runs,
-                                                           l)[0]), 3)
+            "P_over_runs": {str(l): round(float(total_over(
+                a, total_runs, l,
+                park_vmr=self.stores.park(
+                    spec["venue"], pd.Timestamp(spec["date"]))["park_vmr"])[0]),
+                3)
                             for l in TOTAL_LINES},
+            # H5 team_total (2026-07-14): per-team lines off the SIM-blended
+            # per-team means — coherent with the displayed expected scores
+            "P_over_away_runs": {str(l): round(float(
+                team_over(a, mu_away, l)[0]), 3) for l in TEAM_TOTAL_LINES},
+            "P_over_home_runs": {str(l): round(float(
+                team_over(a, mu_home, l)[0]), 3) for l in TEAM_TOTAL_LINES},
         }
         return {"batters": batters, "starters": starters, "totals": totals}
 
@@ -812,7 +1079,11 @@ class Predictor:
                           "exp_lineup_HR": t["exp_lineup_HR"],
                           "exp_total_runs": t["exp_total_runs"],
                           **{f"P_runs_over_{k}": v
-                             for k, v in t["P_over_runs"].items()}})
+                             for k, v in t["P_over_runs"].items()},
+                          **{f"P_away_runs_over_{k}": v
+                             for k, v in t["P_over_away_runs"].items()},
+                          **{f"P_home_runs_over_{k}": v
+                             for k, v in t["P_over_home_runs"].items()}})
             all_b.append(b)
             all_s.append(s)
         return {
@@ -831,10 +1102,14 @@ PRED_DIR = Path(__file__).resolve().parents[1] / "Predictions"
 # and summary_frame read those); the workbook gets short display names.
 BAT_HEADERS = {"slot": "Slot", "PlayerId": "ID", "CareerG": "Career G",
                "P_HR": "HR", "P_Hit": "Hit", "P_2Hits": "2+ Hits",
-               "P_1B": "Single", "P_2B": "Double", "P_TB2": "2+ TB",
-               "P_Run": "Run", "P_RBI": "RBI",
+               "P_1B": "Single", "P_2B": "Double", "P_3B": "Triple",
+               "P_TB2": "2+ TB", "P_TB3": "3+ TB", "P_TB4": "4+ TB",
+               "P_Run": "Run", "P_Run2": "2+ Runs",
+               "P_RBI": "RBI", "P_RBI2": "2+ RBI",
                "P_HRR2": "H+R+RBI 2+", "P_HRR3": "H+R+RBI 3+",
-               "P_BB": "BB", "P_SB": "SB", "P_K": "K", "P_2K": "2+ K"}
+               "P_HRR4": "H+R+RBI 4+",
+               "P_BB": "BB", "P_SB": "SB",
+               "P_K": "K", "P_2K": "2+ K", "P_3K": "3+ K"}
 ST_HEADERS = {"PlayerId": "ID"}
 GAME_HEADERS = {"WinProb": "Win Prob",
                 "exp_away_runs": "Away Score", "exp_home_runs": "Home Score",
@@ -846,30 +1121,35 @@ _OVER_PATTERNS = [(re.compile(r"^P_over_(.+)$"), "K > {}"),
                   (re.compile(r"^P_bb_over_(.+)$"), "BB > {}"),
                   (re.compile(r"^P_hits_over_(.+)$"), "Hits > {}"),
                   (re.compile(r"^P_er_over_(.+)$"), "ER > {}"),
+                  (re.compile(r"^P_away_runs_over_(.+)$"), "Away Runs > {}"),
+                  (re.compile(r"^P_home_runs_over_(.+)$"), "Home Runs > {}"),
                   (re.compile(r"^P_runs_over_(.+)$"), "Runs > {}")]
 
 # reading order per sheet; an entry ending in "> " pulls that whole family
 # of over columns, sorted by line
-BAT_ORDER = ["Game", "Team", "Slot", "Name", "ID", "Career G",
+BAT_ORDER = ["Game", "Team", "G#", "Slot", "Name", "ID", "Career G",
              "HR",
-             "xTB", "2+ TB",
-             "Hit", "2+ Hits",
-             "RBI",
-             "Run",
-             "xHRR", "H+R+RBI 2+", "H+R+RBI 3+",
+             "xTB", "2+ TB", "3+ TB", "4+ TB",
+             "xH", "Hit", "2+ Hits",
+             "xRBI", "RBI", "2+ RBI",
+             "xR", "Run", "2+ Runs",
+             "xHRR", "H+R+RBI 2+", "H+R+RBI 3+", "H+R+RBI 4+",
              "SB",
-             "xSO", "K", "2+ K",
+             "xSO", "K", "2+ K", "3+ K",
              "Single",
              "Double",
-             "BB"]
-ST_ORDER = ["Game", "Team", "Opponent", "Name", "ID",
+             "Triple",
+             "xBB", "BB"]
+ST_ORDER = ["Game", "Team", "Opponent", "G#", "Name", "ID",
             "xK", "K > ",
             "xER", "ER > ",
             "xOuts", "Outs > ",
             "xHits", "Hits > ",
             "xBB", "BB > "]
 GAME_ORDER = ["Game", "Date", "Venue", "Winner", "Win Prob",
-              "Away Score", "Home Score", "Total Runs", "Runs > ",
+              "Away Score", "Away Runs > ",
+              "Home Score", "Home Runs > ",
+              "Total Runs", "Runs > ",
               "Lineup HRs"]
 
 
@@ -915,19 +1195,27 @@ GLOSSARY = [
     ("2+ Hits", "Chance of two or more hits."),
     ("Single", "Chance of at least one single."),
     ("Double", "Chance of at least one double."),
+    ("Triple", "Chance of at least one triple — the rarest hit on the "
+     "board (about 1 batter-game in 80), so even the best numbers here "
+     "are small."),
     ("xTB", "Expected total bases (1B + 2x2B + 3x3B + 4xHR) — the headline "
      "count behind the total-bases market."),
-    ("2+ TB", "Chance of two or more total bases (e.g. a double, or two "
-     "singles)."),
-    ("Run", "Chance the batter scores a run."),
-    ("RBI", "Chance the batter drives in at least one run."),
+    ("2+ TB / 3+ TB / 4+ TB", "Chance of two / three / four or more total "
+     "bases (the total-bases prop at the 1.5 / 2.5 / 3.5 line)."),
+    ("xH", "Expected hits."),
+    ("Run / 2+ Runs", "Chance the batter scores at least one / two runs."),
+    ("xR", "Expected runs scored."),
+    ("RBI / 2+ RBI", "Chance the batter drives in at least one / two runs."),
+    ("xRBI", "Expected runs batted in."),
     ("xHRR", "Expected combined hits + runs + RBIs."),
-    ("H+R+RBI 2+ / 3+", "Chance of 2+ / 3+ combined hits + runs + RBIs "
-     "(the H+R+RBI prop at the 1.5 / 2.5 line)."),
+    ("H+R+RBI 2+ / 3+ / 4+", "Chance of 2+ / 3+ / 4+ combined hits + runs "
+     "+ RBIs (the H+R+RBI prop at the 1.5 / 2.5 / 3.5 line)."),
     ("BB", "Chance of at least one walk."),
+    ("xBB (Batter sheet)", "Expected walks drawn by the batter."),
     ("SB", "Chance of at least one stolen base."),
     ("xSO", "Expected strikeouts by the batter."),
-    ("K / 2+ K", "Chance the batter strikes out at least once / twice."),
+    ("K / 2+ K / 3+ K", "Chance the batter strikes out at least once / "
+     "twice / three times."),
     ("Career G", "The batter's career MLB games before today. Predictions "
      "for players under ~50 games are the least reliable (the model has "
      "little history to work from) - those show in red; treat their picks "
@@ -956,12 +1244,18 @@ GLOSSARY = [
     ("Lineup HRs", "Expected total home runs by the players entered."),
     ("Total Runs / Runs > X", "Expected combined runs scored by both "
      "teams, and the chance of more than X."),
+    ("Away/Home Runs > X", "Chance ONE team scores more than X runs (the "
+     "team-total market), priced off the same expected scores shown in "
+     "Away Score / Home Score."),
     ("Winner / Win Prob", "The team the model favors and its win "
      "probability (always the bigger side of the home/away split). Treat it "
      "as a probability, not a pick: on a half-season holdout the winner "
      "model shows no statistically significant edge over always taking the "
      "home team."),
     ("Slot", "Batting-order position (1 = leadoff)."),
+    ("G#", "Game number within the day: 1 normally, 2 for the second game "
+     "of a doubleheader. The grader uses it to score each row against its "
+     "own game's box line instead of the day's combined stats."),
     ("Bets sheet", "The model's betting signals for this slate: every side "
      "where the model's probability beats the best posted sportsbook price by "
      "an expected 5%+ per $1 staked, after removing the book's margin (vig). "
@@ -1099,8 +1393,10 @@ def summary_frame(specs, out):
 
 # display headers holding a probability (shown as a percent); over columns
 # ("K > 4.5" etc.) are recognized by the " > " in their name
-PCT_COLS = {"HR", "Hit", "2+ Hits", "Single", "Double", "2+ TB", "Run",
-            "RBI", "H+R+RBI 2+", "H+R+RBI 3+", "BB", "SB", "K", "2+ K",
+PCT_COLS = {"HR", "Hit", "2+ Hits", "Single", "Double", "Triple",
+            "2+ TB", "3+ TB", "4+ TB", "Run", "2+ Runs",
+            "RBI", "2+ RBI", "H+R+RBI 2+", "H+R+RBI 3+", "H+R+RBI 4+",
+            "BB", "SB", "K", "2+ K", "3+ K",
             "Win Prob"}
 # the headline columns get the red highlight: the expected counts, and the
 # Games sheet's predicted winner, win probability, total runs and lineup HRs
@@ -1814,7 +2110,13 @@ def _slate_totals(out, i):
             "home_win_prob": g["HomeWinProb"],
             "P_over_runs": {k.replace("P_runs_over_", ""): g[k]
                             for k in out["games"].columns
-                            if k.startswith("P_runs_over_")}}
+                            if k.startswith("P_runs_over_")},
+            "P_over_away_runs": {k.replace("P_away_runs_over_", ""): g[k]
+                                 for k in out["games"].columns
+                                 if k.startswith("P_away_runs_over_")},
+            "P_over_home_runs": {k.replace("P_home_runs_over_", ""): g[k]
+                                 for k in out["games"].columns
+                                 if k.startswith("P_home_runs_over_")}}
 
 
 # ------------------------------------------------------------ replay/test
@@ -1844,13 +2146,22 @@ def spec_from_game(stores, gamepk):
         if len(mu) and pd.notna(mu["HpUmpId"].iloc[0]):
             hp_ump = int(mu["HpUmpId"].iloc[0])
 
-    humidity = pressure = None        # real humidity/pressure, same reason
+    humidity = pressure = precip = None   # real weather, same reason
     wt = r.get("weather")
     if wt is not None:
         mw = wt[wt["GamePk"] == gamepk]
         if len(mw):
             humidity = mw["Humidity"].iloc[0]
             pressure = mw["Pressure"].iloc[0]
+            precip = mw["Precip"].iloc[0]
+
+    # doubleheader flags, derived exactly like the training table (#24):
+    # games per (Date, HomeTeam), game 2 = the higher GamePk of the day
+    day = r["games"][(r["games"]["Date"] == g["Date"])
+                     & (r["games"]["HomeTeam"] == g["HomeTeam"])]
+    pks = sorted(day["GamePk"].tolist())
+    is_dh = float(len(pks) >= 2)
+    dh_game2 = float(pks.index(gamepk) >= 1) if gamepk in pks else 0.0
 
     return {
         "date": str(g["Date"].date()), "away_team": g["AwayTeam"],
@@ -1858,84 +2169,135 @@ def spec_from_game(stores, gamepk):
         "day_night": g["DayNight"], "temp": g["Temp"],
         "wind_speed": g["WindSpeed"], "wind_dir": g["WindDir"],
         "condition": g["Condition"],
-        "humidity": humidity, "pressure": pressure,
+        "humidity": humidity, "pressure": pressure, "precip": precip,
         "away_starter": starter(g["AwayTeam"]),
         "home_starter": starter(g["HomeTeam"]),
         "away_lineup": lineup(g["AwayTeam"]),
         "home_lineup": lineup(g["HomeTeam"]),
         "hp_ump_id": hp_ump,
+        "is_dh": is_dh, "dh_game2": dh_game2,
     }
 
 
-def _compare_row(train_row, serve_row, cols, label, worst, counter):
-    """Fold one train-vs-serve row comparison into (worst, n_checked)."""
+def _compare_row(train_row, serve_row, cols, label, worst, stats):
+    """Fold one train-vs-serve row comparison into (worst, stats).
+    stats counts checked / both-NaN (unverifiable — audit #12: these used
+    to vanish silently, hiding features broken to NaN in both paths) /
+    NaN-mismatch pairs."""
     for c in cols:
         a = train_row.get(c, np.nan)
         b = serve_row.get(c, np.nan)
         a = np.nan if pd.isna(a) else float(a)
         b = np.nan if pd.isna(b) else float(b)
         if np.isnan(a) and np.isnan(b):
+            stats["both_nan"] += 1
             continue
         if np.isnan(a) != np.isnan(b):
+            stats["nan_mismatch"] += 1
             print(f"  NaN mismatch {label} {c}: train={a} serve={b}")
             continue
         d = abs(a - b) / max(1e-9, abs(a))
-        counter += 1
+        stats["checked"] += 1
         if d > worst[1]:
             worst = (f"{label} {c} (train={a:.6g} serve={b:.6g})", d)
-    return worst, counter
+    return worst, stats
+
+
+def _selftest_games(bf):
+    """GamePks to parity-check (audit #12): a one-game spot check passes
+    trivially for features broken only in contexts that game lacks. Cover
+    the newest game PLUS the newest doubleheader game 2 and the newest
+    renamed-franchise (ATH) game when the frames have them."""
+    season = int(bf["Season"].max())
+    recent = bf[(bf["Season"] == season) & bf["StarterId"].notna()]
+    picks = [int(recent["GamePk"].iloc[-1])]
+    if "dh_game2" in recent.columns:
+        dh = recent[recent["dh_game2"] == 1.0]
+        if len(dh):
+            picks.append(int(dh["GamePk"].iloc[-1]))
+    ath = recent[recent["Team"] == "ATH"]
+    if len(ath):
+        picks.append(int(ath["GamePk"].iloc[-1]))
+    return list(dict.fromkeys(picks))
 
 
 def selftest(pred):
-    """Compare inference-path features against the training frames for a
-    real game from the newest season in the frames: they must match, or
-    training and serving have drifted. Covers the batter rows, the starter
-    (K-model) rows, and (when the artifact has one) the winner row."""
+    """Compare inference-path features against the training frames for real
+    games from the newest season: they must match, or training and serving
+    have drifted. Covers batter rows, starter (K-model) rows, the winner
+    row, and the team-game rows, across several game CONTEXTS (plain, DH
+    game 2, renamed team), and reports how many pairs were unverifiable
+    (NaN in both paths) instead of silently skipping them."""
     frames = joblib.load(ART / "frames.joblib")
     bf = frames["bf"]
-    season = int(bf["Season"].max())
-    recent = bf[(bf["Season"] == season) & bf["StarterId"].notna()]
-    gamepk = int(recent["GamePk"].iloc[-1])
-    spec = spec_from_game(pred.stores, gamepk)
-    print(f"selftest on GamePk {gamepk}: {spec['away_team']} @ "
-          f"{spec['home_team']} {spec['date']}")
-
-    bdf, bmeta = pred._batter_rows(spec)
-    # check the FULL batter superset (not just the shipped model's selected
-    # subset) so every served feature is parity-verified regardless of selection
-    check_cols = [c for c in F.batter_feature_cols() if c not in F.CAT_COLS]
     worst = ("", 0.0)
-    n_checked = 0
-    for i, m in bmeta.iterrows():
-        trow = bf[(bf["GamePk"] == gamepk) & (bf["PlayerId"] == m["PlayerId"])]
-        if trow.empty:
-            continue
-        worst, n_checked = _compare_row(trow.iloc[0], bdf.iloc[i], check_cols,
-                                        m["Name"], worst, n_checked)
+    stats = {"checked": 0, "both_nan": 0, "nan_mismatch": 0}
+    check_cols = [c for c in F.batter_feature_cols() if c not in F.CAT_COLS]
 
-    if "sf" in frames:
-        sf = frames["sf"]
-        sdf, smeta = pred._starter_rows(spec, bdf, bmeta)
-        st_cols = [c for c in pred.art["st_cols"] if c not in F.CAT_COLS]
-        for i, m in smeta.iterrows():
-            trow = sf[(sf["GamePk"] == gamepk)
-                      & (sf["PlayerId"] == m["PlayerId"])]
+    for gamepk in _selftest_games(bf):
+        spec = spec_from_game(pred.stores, gamepk)
+        print(f"selftest on GamePk {gamepk}: {spec['away_team']} @ "
+              f"{spec['home_team']} {spec['date']}"
+              + (" [DH game 2]" if spec.get("dh_game2") else ""))
+
+        bdf, bmeta = pred._batter_rows(spec)
+        # the FULL batter superset (not just the shipped model's selected
+        # subset), so every served feature is parity-verified
+        for i, m in bmeta.iterrows():
+            trow = bf[(bf["GamePk"] == gamepk)
+                      & (bf["PlayerId"] == m["PlayerId"])]
             if trow.empty:
                 continue
-            worst, n_checked = _compare_row(trow.iloc[0], sdf.iloc[i], st_cols,
-                                            f'K:{m["Name"]}', worst, n_checked)
+            worst, stats = _compare_row(trow.iloc[0], bdf.iloc[i],
+                                        check_cols, m["Name"], worst, stats)
 
-    if "win_model" in pred.art and "gf" in frames:
-        grow = frames["gf"][frames["gf"]["GamePk"] == gamepk]
-        if not grow.empty:
-            wcols = [c for c in pred.art["win_model"]["cols"]
-                     if c not in F.CAT_COLS]
-            worst, n_checked = _compare_row(grow.iloc[0], pred._win_row(spec),
-                                            wcols, "win-row", worst, n_checked)
+        if "sf" in frames:
+            sf = frames["sf"]
+            sdf, smeta = pred._starter_rows(spec, bdf, bmeta)
+            st_cols = [c for c in F.starts_feature_cols()
+                       if c not in F.CAT_COLS and c in sf.columns]
+            for i, m in smeta.iterrows():
+                trow = sf[(sf["GamePk"] == gamepk)
+                          & (sf["PlayerId"] == m["PlayerId"])]
+                if trow.empty:
+                    continue
+                worst, stats = _compare_row(trow.iloc[0], sdf.iloc[i],
+                                            st_cols, f'K:{m["Name"]}',
+                                            worst, stats)
 
-    print(f"  compared {n_checked} feature values; "
+        if "win_model" in pred.art and "gf" in frames:
+            grow = frames["gf"][frames["gf"]["GamePk"] == gamepk]
+            if not grow.empty:
+                wcols = [c for c in F.win_feature_cols()
+                         if c not in F.CAT_COLS and c in grow.columns]
+                worst, stats = _compare_row(
+                    grow.iloc[0], pred._win_row(spec, bdf, bmeta),
+                    wcols, "win-row", worst, stats)
+
+        # team-game rows: the totals surface's lineup/sched/luck columns
+        if "gf" in frames:
+            grow = frames["gf"][frames["gf"]["GamePk"] == gamepk]
+            if not grow.empty:
+                tg = F.build_team_game_frame(grow)
+                gdf = pred._team_rows(spec, bdf, bmeta)
+                tg_cols = [c for c in F.team_game_feature_cols()
+                           if c not in F.CAT_COLS and c in tg.columns]
+                for i, home in ((0, 0), (1, 1)):
+                    trow = tg[tg["Home"] == home]
+                    if trow.empty:
+                        continue
+                    worst, stats = _compare_row(
+                        trow.iloc[0], gdf.iloc[i], tg_cols,
+                        f"team-row[{'home' if home else 'away'}]",
+                        worst, stats)
+
+    tot = stats["checked"] + stats["both_nan"]
+    print(f"  compared {stats['checked']} feature values "
+          f"({stats['both_nan']} pairs NaN in both paths — unverifiable, "
+          f"{stats['both_nan'] / max(tot, 1):.0%} of the surface; "
+          f"{stats['nan_mismatch']} NaN mismatches); "
           f"worst relative diff: {worst[1]:.2e} [{worst[0]}]")
-    ok = worst[1] < 1e-6
+    ok = worst[1] < 1e-6 and stats["nan_mismatch"] == 0
     print("  PARITY OK" if ok else "  PARITY FAILED")
     return ok
 

@@ -3,19 +3,30 @@ Batter Props:
     HR
     xTB
     2+ TB
+    3+ TB
+    4+ TB
+    xH
     Hit
     2+ Hits
+    xRBI
     RBI
+    2+ RBI
+    xR
     Run
+    2+ Runs
     xHRR
     H+R+RBI 2+
     H+R+RBI 3+
+    H+R+RBI 4+
     SB
     xSO
     K
     2+ K
+    3+ K
     Single
     Double
+    Triple
+    xBB
     BB
 
 Pitcher Props:
@@ -54,6 +65,14 @@ Game Props:
     Win Prob
     Away Score
     Home Score
+    Away Runs > 2.5
+    Away Runs > 3.5
+    Away Runs > 4.5
+    Away Runs > 5.5
+    Home Runs > 2.5
+    Home Runs > 3.5
+    Home Runs > 4.5
+    Home Runs > 5.5
     Total Runs
     Runs > 6.5
     Runs > 7.5
@@ -63,11 +82,7 @@ Game Props:
     Lineup HRs
 
 
-Proposed (NOT shipped — batched for a future retrain):
-
-    3+ K
-    3+ TB
-    4+ TB
-    H+R+RBI 4+
-    Triple
-    ...
+(2026-07-14 finish batch: the deep binaries 3+ K / 3+ TB / 4+ TB /
+H+R+RBI 4+, the Triple, 2+ RBI / 2+ Runs, the xH/xR/xRBI/xBB means, and
+the per-team total lines all shipped. Nothing left on the proposed list;
+F5 markets wait on linescore grading history + sim-blend trust.)

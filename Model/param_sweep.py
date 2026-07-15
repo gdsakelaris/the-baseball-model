@@ -25,9 +25,12 @@ Design (why it doesn't leak the verification set):
     val block is never seen during fitting, ES, or calibration, so the OOF score
     is clean.
 
-Scoring is balanced (per the north-star): binary heads by OOF logloss (a proper
-score that rewards ranking AND calibration) with AUC reported alongside; count
-heads by OOF MAE with the matching Poisson/Tweedie deviance alongside.
+Scoring targets what a betting engine needs — a calibrated distribution that
+prices lines. Both primaries are proper scores: binary heads by OOF logloss
+(rewards ranking AND calibration), guarded on AUC and calibration (ECE); count
+heads by OOF Poisson/Tweedie DEVIANCE (the full distribution, which is what
+P(X>=line) rides on), guarded on MAE. MAE alone fits the mean and misses the
+dispersion that prices over/unders.
 
 Output: Model/artifacts/prop_params_sweep.json — the full CV table for every
 head x profile plus a gated `recommended` profile. Nothing is applied to
@@ -42,7 +45,7 @@ redundant once the families also cut variance). The families' predictions do
 NOT depend on the LGBM profile, so they are fit ONCE per fold and cached, then
 reused across every profile — that keeps it to ~one families pass + the LGBM
 sweep (~2-4 hr) instead of re-fitting all members per profile (~a day). LGBM is
-weighted by its real bag size (PROP_BAGS/COUNT_BAGS) in the MeanBag. Needs
+weighted by its real bag size (train.LGBM_BAGS) in the MeanBag. Needs
 train.XGB_BAGS/CB_BAGS > 0 and the GPU; writes prop_params_sweep_ensemble.json.
 
 RE-SWEEP CADENCE: hyperparameter optima are broad basins and drift slowly, so
@@ -129,11 +132,15 @@ WIN_PROFILES = {
 
 # gates for the "recommended" flag (evidence only — nothing auto-applies).
 # A profile must beat default by at least the margin on the PRIMARY metric and
-# not regress the SECONDARY metric past its band.
-EPS_LL = 0.0004     # binary: min logloss improvement
-AUC_BAND = 0.0010   # binary: max tolerated AUC regression
-EPS_MAE = 0.0030    # count: min MAE improvement
-DEV_BAND = 0.0030   # count: max tolerated deviance regression (relative-ish)
+# not regress the SECONDARY metric(s) past their band. For a betting engine the
+# PRIMARY is the proper score that prices lines: logloss (binary) / Poisson-
+# Tweedie deviance (count = the full distribution, what P(X>=line) rides on).
+EPS_LL = 0.0004     # binary: min logloss improvement (primary)
+AUC_BAND = 0.0010   # binary: max tolerated AUC (discrimination) regression
+ECE_BAND = 0.0030   # binary: max tolerated calibration (ECE) regression
+EPS_DEV = 0.0015    # count: min deviance improvement (primary) — tunable; sanity-
+                    #   check vs the re-sweep's per-head deviance deltas
+MAE_BAND = 0.0050   # count: max tolerated MAE (point-estimate) regression
 
 
 # --------------------------------------------------------------------------
@@ -274,6 +281,22 @@ def _fold_fit_count(X, y, fit_idx, watch_idx, va_idx, params, tweedie, seed,
     return raw_v
 
 
+def _ece(y, p, n_bins=10):
+    """Expected calibration error: count-weighted |mean_pred - mean_actual| over
+    equal-width probability bins. The betting-critical miss — a sharp but
+    miscalibrated head prices bets wrong — that logloss can trade away and AUC
+    can't see at all."""
+    y = np.asarray(y, float); p = np.asarray(p, float)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    idx = np.clip(np.digitize(p, edges[1:-1]), 0, n_bins - 1)
+    ece = 0.0
+    for b in range(n_bins):
+        mask = idx == b
+        if mask.any():
+            ece += mask.mean() * abs(p[mask].mean() - y[mask].mean())
+    return ece
+
+
 def cv_head(kind, X, y, groups, base, profiles, folds, seed,
             mono_cols=None, tweedie=None, ensemble=False, cat_cols=None,
             xgb_params=None, cb_params=None, n_xgb=0, n_cb=0, w_lgbm=1):
@@ -317,6 +340,7 @@ def cv_head(kind, X, y, groups, base, profiles, folds, seed,
             p = np.clip(oof, 1e-6, 1 - 1e-6)
             m["logloss"] = float(log_loss(y, p))
             m["auc"] = float(roc_auc_score(y, p))
+            m["ece"] = float(_ece(y, p))
         else:
             m["mae"] = float(mean_absolute_error(y, oof))
             try:
@@ -333,8 +357,11 @@ def cv_head(kind, X, y, groups, base, profiles, folds, seed,
 
 
 def _recommend(kind, table):
-    """Gated winner: best primary metric that also clears the margin over default
-    without regressing the secondary past its band. Ties -> keep 'default'."""
+    """Gated winner: best PRIMARY proper score that clears the margin over default
+    without regressing the secondary guard(s) past their band. Ties -> keep
+    'default'. Binary primary = logloss, guarded on AUC (discrimination) AND ECE
+    (calibration). Count primary = deviance (the full distribution that prices
+    over/unders), guarded on MAE (point estimate)."""
     d = table["default"]
     if kind == "binary":
         best, best_ll = "default", d["logloss"]
@@ -342,17 +369,20 @@ def _recommend(kind, table):
             if name == "default":
                 continue
             if (m["logloss"] <= best_ll - EPS_LL
-                    and m["auc"] >= d["auc"] - AUC_BAND):
+                    and m["auc"] >= d["auc"] - AUC_BAND
+                    and m["ece"] <= d["ece"] + ECE_BAND):
                 best, best_ll = name, m["logloss"]
         return best
-    best, best_mae = "default", d["mae"]
+    if np.isnan(d.get("deviance", np.nan)):
+        return "default"          # can't score the distribution -> don't override
+    best, best_dev = "default", d["deviance"]
     for name, m in table.items():
         if name == "default":
             continue
-        dev_ok = (np.isnan(m.get("deviance", np.nan))
-                  or m["deviance"] <= d["deviance"] + DEV_BAND)
-        if m["mae"] <= best_mae - EPS_MAE and dev_ok:
-            best, best_mae = name, m["mae"]
+        if (not np.isnan(m.get("deviance", np.nan))
+                and m["deviance"] <= best_dev - EPS_DEV
+                and m["mae"] <= d["mae"] + MAE_BAND):
+            best, best_dev = name, m["deviance"]
     return best
 
 
@@ -377,7 +407,7 @@ def build_jobs(bf, sf, tg, wf):
                          mono=mono, tweedie=None,
                          xgb_params=T.XGB_CLS, cb_params=T.CB_CLS,
                          n_xgb=T.XGB_BAGS, n_cb=T.CB_BAGS,
-                         w_lgbm=T.PROP_BAGS.get(name, 1)))
+                         w_lgbm=T.LGBM_BAGS))
 
     # count heads ---------------------------------------------------------
     for cname, ch in T.COUNT_HEADS.items():
@@ -395,7 +425,20 @@ def build_jobs(bf, sf, tg, wf):
                          tweedie=ch.get("tweedie"),
                          xgb_params=T.XGB_POIS, cb_params=T.CB_POIS,
                          n_xgb=T.XGB_BAGS, n_cb=T.CB_BAGS,
-                         w_lgbm=T.COUNT_BAGS.get(cname, 1)))
+                         w_lgbm=T.LGBM_BAGS))
+
+    # starter strikeouts (flagship) --------------------------------------
+    # k trains on its OWN path in train.py (k_cols doubles as the st_cols
+    # serving contract) so it is absent from COUNT_HEADS and had never
+    # reached this sweep. Add it explicitly, mirroring train.fit_poisson's
+    # k call: starts frame, y_so target, LGB_POIS base, full starts superset
+    # via _apply_keep("k") -- no st_exclude / tweedie / monotone.
+    jobs.append(dict(name="k", kind="count", frame=sf,
+                     cols=T._apply_keep("k", list(st_cols)),
+                     target="y_so", base=T.LGB_POIS, profiles=CNT_PROFILES,
+                     mono=None, tweedie=None,
+                     xgb_params=T.XGB_POIS, cb_params=T.CB_POIS,
+                     n_xgb=T.XGB_BAGS, n_cb=T.CB_BAGS, w_lgbm=T.LGBM_BAGS))
 
     # team runs (count) + winner (binary) ---------------------------------
     tg_cols = T._apply_keep("total", F.team_game_feature_cols())
@@ -413,11 +456,17 @@ def build_jobs(bf, sf, tg, wf):
     return jobs
 
 
-# priority order (user's dynamic priority: run-production + hit first)
+# priority order (user's dynamic priority: run-production + hit first).
+# 2026-07-14 finish batch: the 11 new heads + k appended (the existing 23
+# kept in their curated order, NOT re-prioritized). This list gates BOTH the
+# run order AND the --heads filter (see main: order intersects HEAD_ORDER),
+# so a head absent here is silently skipped even when named explicitly.
 HEAD_ORDER = ["run", "rbi", "hit", "hits2", "tb2", "hr", "single", "double",
               "bb", "sb", "bk", "bk2", "hrr2", "hrr3",
               "xhrr", "xtb", "xbk", "outs", "pbb", "pha", "per",
-              "total", "winner"]
+              "total", "winner",
+              "bk3", "tb3", "tb4", "hrr4", "triple", "rbi2", "run2",
+              "xh", "xrun", "xrbi", "xbb", "k"]
 
 
 def main():
@@ -507,8 +556,8 @@ def main():
     for name in order:
         r = results[name]
         d = r["delta_vs_default"]
-        prim = f"{d.get('logloss', d.get('mae')):+.5f}"
-        metric = "ll" if r["kind"] == "binary" else "mae"
+        prim = f"{d.get('logloss', d.get('deviance')):+.5f}"
+        metric = "ll" if r["kind"] == "binary" else "dev"
         flag = " *" if r["recommended"] != "default" else ""
         print(f"  {name:8s} -> {r['recommended']:10s}  d{metric} {prim}{flag}")
     print(f"\n{len(changes)}/{len(order)} heads recommend a change: "

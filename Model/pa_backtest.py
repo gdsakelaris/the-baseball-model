@@ -29,7 +29,8 @@ import pandas as pd
 from pa_model import CLASSES, EB_K, FRAME_CACHE, _asof_counts, _cq_shrink, \
     _cq_tables, _eb, _league_trailing
 from milb_priors import build_all as milb_build, prior_blend
-from pa_sim import STEAL_K_ATT, STEAL_K_SUCC, TIER_EDGES
+from pa_sim import (STEAL_K_ATT, STEAL_K_SUCC, TIER_EDGES,  # noqa: F401
+                    hazard_slice_v2, starter_exp_bf)
 from pa_engine import PackedTransitions, GameSim, CI, TB_OF  # noqa: F401
 
 HERE = Path(__file__).resolve().parent
@@ -338,13 +339,15 @@ def run_backtest(year, n_sims, part_i=0, part_k=1):
               "home": starter_bf_draws(tables["starter_bf"],
                                        meta["away"]["starter"].iat[0],
                                        date, season)}
-        hzt = tables["starter_hazard"]["hazard"]
-        hazard = {"away": hzt[starter_tier(tables["starter_bf"],
-                                           meta["home"]["starter"].iat[0],
-                                           date)],
-                  "home": hzt[starter_tier(tables["starter_bf"],
-                                           meta["away"]["starter"].iat[0],
-                                           date)]}
+        # hazard v2 (2026-07-14): the relative-BF table sliced back to an
+        # absolute-BF table per starter (his own leash); v1 tier slice
+        # stays available under tables["starter_hazard"] for rollback
+        hz2 = tables["starter_hazard_v2"]["hazard"]
+        bf_t = tables["starter_bf"]
+        hazard = {"away": hazard_slice_v2(hz2, starter_exp_bf(
+                      bf_t, meta["home"]["starter"].iat[0], date)),
+                  "home": hazard_slice_v2(hz2, starter_exp_bf(
+                      bf_t, meta["away"]["starter"].iat[0], date))}
         sim = GameSim(packed, sides, bf, steal=steal, hazard=hazard,
                       n_sims=n_sims, seed=int(gpk) & 0x7fffffff)
         out = sim.run()

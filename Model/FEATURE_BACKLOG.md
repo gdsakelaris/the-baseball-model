@@ -137,8 +137,12 @@ before building; `SCRAPE` = needs data we don't have.
     (default off x-heads). Was "mostly re-derives hand+arsenal" — the residual-off-own-baseline
     encoding is designed to strip exactly that redundancy, leaving the pitcher-specific effect.
 
-13. **Catcher framing** — **SHELVED** — needs catcher-level serving input the user can't
-    scrape at predict time. Not actionable; kept here only so it isn't re-proposed.
+13. **Catcher framing** — **PARTIALLY UNSHELVED 2026-07-15 → see #35.** The original
+    shelf reason (catcher-level serving input the user can't provide) still holds for
+    the PLAYER grain, but the team playing-time-weighted aggregate has no serving
+    problem — the same dodge team OAA uses — and shipped as `opp/own_cat_frame` in
+    the #35 battery wave. Player-grain framing stays shelved (mlb_catchers.csv keeps
+    the per-catcher rows if starting-catcher input ever becomes available).
 
 14. **MiLB level-translated priors** — **DATA + TRANSLATION DONE 2026-07-13; main-model
     cols STAGED for the Phase-3 batch** (features.py untouched until then — code-fingerprint
@@ -213,6 +217,10 @@ before building; `SCRAPE` = needs data we don't have.
     opponent's top save/hold arms pitched BOTH of the last two days (unavailable tonight, by
     bullpen convention), quality-weighted. Pairs with #15: exposure says how many late PAs,
     this says against whom. Targets: total, winner, run/rbi/hrr2/3.
+    **AUDIT FINDING 2026-07-14: never actually built** — the finish batch skipped it (zero
+    availability columns in features.py; FINISH_PLAN's Phase-1 build list omits it) despite
+    the "all #15–32 built" record. USER 2026-07-14: rebuild in the audit wave alongside the
+    own-pen leash item (spec in Model/AUDIT_BUILD_SPECS_0714.md).
 
 23. **Starter venue split** — `BUILD` — batters got `vloc_`; starters never did. As-of
     home/road ERA / K / HR splits for the opposing starter (`pvloc_`), same shrunk idiom.
@@ -246,6 +254,29 @@ before building; `SCRAPE` = needs data we don't have.
     everywhere; movement has never been. (Same check found pitch-level `bat_speed`/
     `swing_length` in the archive from the bat-tracking era, and `n_thruorder_pitcher` —
     noted for the ~2027 bat-tracking unshelf, not for now.)
+
+33. **Damage-on-contact splits by velo band / pitch class (v8 wave)** — **BUILT
+    2026-07-15** (user ask, from the "batter velocity-band splits" review item; wired
+    same-day, awaiting the next superset retrain). CORRECTION recorded: the *whiff*
+    half of the velo-band axis already shipped in v4 (`bd_fb95wh` + `bat_velo_matchup`
+    kept on 14 heads; `velo_band_whiff` on 4) — what was actually missing was the
+    *contact* half: the band/class cells carried only n/sw/wh, no damage. v8 re-agg
+    (`--from-raw`, verified byte-identical on every pre-v8 column) added xwOBA-per-BBE
+    sums (`con_/fblo_/fbmid_/fb95_/brk_/off_` bip+xw; fbk = remainder) + the 2K×95+
+    cell (`ts_fb95_*`). New features: batter `bd_{band,class}xw_c/_d` (7 PD names,
+    K=60 BBE, priors measured 07-15: .389/.385/.372 bands, .381/.355/.343 classes,
+    .187 tsfb95wh), starter `pd_*xw_d` allowed-side mains, opponent `p_*xw_d` on the
+    batter frame, collisions `bat_velo_damage`/`velo_band_damage`/`arsenal_damage`/
+    `mix_fb95xw`/`ts_fb95_matchup` (damage collisions ride the CAREER reads — a
+    median batter season has ~18 BBE vs 95+, decayed reads are shrink-dominated),
+    and the lineup grain: `lu_{fblo,fbmid,fb95}wh` + `lu_*xw` means with
+    `lu_velo_k`/`lu_velo_dmg`/`lu_ars_dmg` (the lu_ars_whiff velocity/damage
+    siblings — the banded lineup collision the K/pha/per heads never had).
+    Deliberately NOT built (recorded so they aren't re-proposed blind): hard-hit-per-
+    band (xwOBA subsumes EV+LA), zone×band whiff cells (sparsity), per-band foul-share
+    (now derivable free from sw−wh−bip if ever wanted), band-damage slope main
+    (collisions carry it), game-grain lu damage collision (needs #32's batter→game
+    plumbing first — natural rider WHEN #32 builds).
 
 ### Composite cluster (2026-07-14, user-confirmed)
 
@@ -285,9 +316,42 @@ allowed to benefit.
     signal design is proven (`lu_mix_k` is the k head's #1 feature). Targets: total,
     winner (small-n caveat applies).
 
-**Spirit check on #15–32:** odds stay grading-only (phase rule), and catcher framing /
-pop-time stays SHELVED — #13's serving-input problem is unchanged, so it is deliberately
-NOT re-proposed here.
+**Spirit check on #15–32:** odds stay grading-only (phase rule). (Historical note: this
+line originally kept catcher framing/pop-time SHELVED per #13's serving-input problem;
+2026-07-15 the TEAM-grain version shipped as #35 — the player-grain shelf stands.)
+
+### Battery + IL wave — 2026-07-15 (user ask; new scrapes; BUILT same-day)
+
+34. **IL transaction stints** — **BUILT 2026-07-15** — `Scrapers/scrape_transactions.py`
+    (statsapi transactions, sportId=1, "injured list" + pre-2019 "disabled list") →
+    `mlb_il_events.csv` (raw, incremental) + `mlb_il.csv` (paired stints: PlaceDate,
+    ActDate, StintDays, IL60, Rehab; 7,642 stints 2015–2026, ~500–980/yr). Features
+    (shared `_il_asof` / `il_feats_from_stint`, allow_exact_matches — roster moves are
+    announced pregame): `il_ret_days`/`il_last_len`/`il_ret21`/`il_szn_days`/`il_rehab`
+    on the batter frame (own) + `p_il_*` for the opposing starter, and `p_il_*` on the
+    starts frame (own) — the layoff CAUSE the #17 gap flags can't see (IL stint vs
+    skipped start vs All-Star break), NaN-gated at IL_RET_MAX=365d. Targets: everything
+    (ramp/regression is head-agnostic); selection votes per head.
+
+35. **Running-game defense + team-grain battery (catchers)** — **BUILT 2026-07-15** —
+    `Scrapers/scrape_catchers.py` (Savant catcher-framing 2015+, catcher-throwing
+    2016+, poptime 2015+; Savant labels historic teams with CURRENT franchise abbrevs —
+    mapped current-abbrev → franchise id → season abbrev) → `mlb_catchers.csv`
+    (player grain, shelved-for-now consumer) + `mlb_catchers_team.csv` (playing-time-
+    weighted battery per Year+Team: FrameRV_pt = framing runs/2000 called pitches,
+    CSAA_att, PopTime; CSAA NaN 2015 by design). Prior-season serving like team OAA.
+    Features: batter frame `opp_cat_frame/csaa/pop` + `frame_x_take` (framing × 2K
+    taker, ump_k_x_take's battery sibling) + `sb_cat_env` (sb_chain × pop centered on
+    the PER-YEAR league mean (PopC, computed in load_raw) — pop drifted ~0.05s
+    2015→2025, comparable to the team spread, so a global center would let era drift
+    flip the sign; same regime-aware centering as sb_chain_env's lg_sb27_prior —
+    the catcher half sb_chain_env never had); starts frame
+    `own_cat_frame/csaa/pop` + `frame_x_edge` (framing × edge share) + `run_cat_x`
+    (lu_sb × catcher stop — run_game_x's catcher half). PA-sim steal-layer battery
+    modulation: **USER-ADJUDICATED 2026-07-15 → Phase-3 rider** (build with the steal
+    blend re-sweep, NOT before — sb blend w=0 today and an engine change mid-forward-
+    record would shift served game heads through stale SIM_BLEND weights; full spec
+    lives at FINISH_PLAN Phase-3 step 2).
 
 ---
 
@@ -430,6 +494,49 @@ the mean; a count head would re-learn it with extra variance.
 ---
 
 ## Log
+- 2026-07-15 (adjudications, latest): user picked (1) steal-layer battery modulation →
+  Phase-3 rider (spec at FINISH_PLAN Phase-3 step 2; do NOT build before the blend
+  re-sweep) and (2) franchise-rename alias fix NOW → `TEAM_RENAMES`/`_alias_renamed_teams`
+  in features.load_raw duplicates pre-rename rows (OAK→ATH) for the two team-keyed
+  prior-season files (mlb_oaa + mlb_catchers_team, PopC computed pre-alias so league
+  means don't double-count) — heals the ~3.3% A's-2025 NaN for `opp_cat_*` AND the
+  pre-existing `opp_oaa` gap; training-frames-only change (2026 serving already found
+  ATH-2025 rows), full franchise-id refactor declined as disproportionate.
+- 2026-07-15 (battery + IL wave, later): #34 + #35 BUILT same-day (user ask; #13
+  partially unshelved at team grain). Two NEW scrapers + four NEW Data files wired
+  into update_all JOB_FILES + validate_data SPECS (events fresh_days=10 — IL moves
+  aren't game-guaranteed). Scrape bugs caught in verification: pre-2019 stints say
+  "disabled list" not "injured list" (2015–18 were empty until the regex fix), and
+  the team rollup's plain sum turned 2015's all-NaN CSAA into fake 0.0 (min_count=1).
+  Frames rebuilt; selection NOT regenerated (columns train at the next superset
+  retrain, same as #33).
+- 2026-07-15 (v8 damage-on-contact wave): #33 BUILT same-day (user ask). Scraper v8
+  sums + `--from-raw` re-agg (~2 min; every pre-v8 column verified numerically
+  identical vs backup, so the 07-14 superset's serving inputs are untouched; archive
+  and CSVs both ended 07-11 — All-Star break — so nothing was in flight). features.py
+  + predict.py wired both paths (PD lists drive train/serve shared code; `_LU_COLS`
+  mirror extended). frames.joblib REBUILT with the new columns (pre-v8 cache kept as
+  `artifacts/frames.pre_v8_0715.joblib`); selection NOT regenerated — the new columns
+  enter the superset at the user's next retrain (user directive: features now,
+  retrain later). NOTE: tree now differs from baseline_code_fp → expect the 06:00
+  daily to go scrape-only until the next baseline set.
+- 2026-07-14 (feature-gap audit, late eve): full coverage audit — 11 finder lenses
+  (6 data-source × 5 head-family) + 49 adversarial verifications over every Data file
+  × all 36 heads. Verdict: no first-order axis missing; **33 build items approved by
+  the user (ALL 33 + #22 rebuild + park_vmr column with 2025-only gated pricing fit +
+  opp_penhl_share share-only rider)** — full line-anchored specs in
+  Model/AUDIT_BUILD_SPECS_0714.md (prune post-batch). Notable findings: the xpa_x_*
+  family had NO bb/sb members (new xbb head shipped with zero exposure coverage);
+  rbi2/run2/hrr4 shipped without the threshold histories their hrr2/3 siblings have;
+  the triple head lacked realized-3B rates; the STARTS frame was systematically
+  shortchanged (no lineup damage/OBP view, no own-pen state, no hit-luck mirror, no
+  wind carry, no bio, no unearned-run axis, no pitch-economy ratio); spray encoding
+  one-sided (no oppo-air); team frame missing the entire walk channel; #22 found
+  never-built (corrected above). NEGATIVE result worth keeping: mlb_linescores is
+  EMPTY as a GBM feature source — all six inning-grain traits fail persistence
+  (e.g. starter 1st-inning bleed y2y r=−0.001) — it stays a grading/sim-validation
+  asset. ~20 further dead-ends killed with measured numbers (see the specs doc) so
+  they are not re-proposed. 2 rejects → Decline ledger #5–6; 1 partial → #7.
 - 2026-07-14 (evening, later): Part 3 #H6 added (user picked all four: xh/xrun/xrbi/xbb —
   completes the expected-stat-line; xrbi Tweedie per measured var/mean 1.61; means only,
   banked-not-shipped line cals; xhr/xsb/hit-type counts declined with the rare-event
@@ -564,3 +671,69 @@ the mean; a count head would re-learn it with extra variance.
   Batter frame 265→268 cols. Rides into the next full `--rebuild --select` retrain alongside
   the param-sweep winners (one retrain, not two — a 3-col sparse addition doesn't move the
   coarse per-head regularization the sweep tunes). See MEMORY [[feature-backlog]].
+
+## Decline ledger (pending user re-evaluation)
+
+POLICY (user directive 2026-07-14): nothing gets declined unilaterally. Every
+would-be decline is surfaced to the user with a recommendation + reasoning
+before it is treated as settled, and every past decline lives here until the
+user re-adjudicates it. Items below were auto-declined by Claude during the
+finish batch and are OWED a proper decision.
+
+1. **Selection: correlation pre-cut** (declined 2026-07-14, 1F design).
+   Auto-drop one column of each |rho|>threshold pair before training/voting.
+   Reasoning at decline: irreversible pre-filtering can remove columns the
+   three families use differently; the co-failure REPORT covers the same
+   redundancy concern reversibly. Claude rec: keep declined — report + user
+   adjudication dominates it.
+2. **Selection: time-block subsampling stability votes** (declined 2026-07-14,
+   1F design). Re-run selection on temporal subsamples; keep only columns
+   stable across blocks. Reasoning: multiplies selection cost several-fold;
+   shadow-calibrated eps already gives a measured noise floor. Claude rec:
+   revisit as a one-off batter-frame experiment IF keep-lists churn heavily
+   across future chains; otherwise keep declined. 07-14 update: the revisit
+   trigger is now OPERATIONALIZED — feature_select prints and persists a
+   per-head keep-diff vs the newest feature_keep*.bak
+   (artifacts/selection_report.json § keep_diff), so the churn evidence
+   exists after every regen; Phase-5 step 4 reads it.
+3. **Selection: LGBM-only voting** (declined 2026-07-14, 1F design). Use only
+   LightGBM SHAP for votes. Reasoning: the shipped ensemble is 3-family;
+   XGB/CatBoost keep genuinely different columns and deserve votes. Claude
+   rec: keep declined.
+4. **Shrinkage-prior leakage fixes** (declined 2026-07-14; caveat comment at
+   features.SHRINK instead). Three rigorous options: (a) training-era-only
+   priors, (b) sequential as-of priors, (c) external pre-period priors.
+   Reasoning: priors are second-order centering constants; recomputing them
+   mid-batch changes every historical feature and breaks comparability with
+   the Phase-0 baseline. Claude rec: post-batch dedicated experiment, option
+   (b) sequential as-of is the principled one — expected effect small, but it
+   would close the README's known-limitation note.
+5. **rbi_traffic_vsp** (audit reject 2026-07-14, surfaced to user in the audit
+   report). Teammate-supply × tonight's-starter-leak products: the residualized
+   interaction term measured flat zero (±0.001, within noise, U-shaped
+   quintiles) on every claimed head — ~99% linearly reconstructable from mains
+   the trees already see. The SAME probe validated three shipped composites
+   (rbi_conv +0.0070, run_opp +0.0257, xpa_x_rbi +0.0093 partial corr), so the
+   method is trusted. Claude rec: keep declined.
+6. **xpa_team_turnover** (audit reject 2026-07-14, surfaced to user in the
+   audit report). Team PA/G exposure adjustment: premise overstated the spread
+   ~2.5× (measured ±1.6% SD); 72–81% already carried by toff_r_pg (residual
+   below selection's noise floor, xpa_bat already embeds realized turnover);
+   the home/away slot pooling bias is a uniform ~0.17-PA additive offset —
+   additively separable, the easiest GBM carve. Salvage crumb if re-opened:
+   expose plain team_pa_pg as a single main. Claude rec: keep declined.
+7. **opp_pen_br_era** (USER-adjudicated 2026-07-14, audit gray item). Bridge-pen
+   ERA measured R²=0.95 linearly recoverable from the two exposed mains
+   (pen_era + pen_hl_era) with the HL-outs share nearly constant (sd 0.042).
+   User decision: build ONLY the opp_penhl_share mixture weight (rider on the
+   starter-length/pen-split item); the bridge-ERA column stays dropped.
+8. **SIM_BLEND total weight = 0.20 is a grandfathered 2026-informed tune**
+   (LEDGERED 2026-07-15, audit fix #7; user decision: keep + refit at chain).
+   The 07-13 half-weight call was made after seeing 2026 flat — it predates
+   the "2026 may veto, never TUNE" rule but violates it in substance. The
+   raw 2025-only fit was w=0.50 (`artifacts/sim_blend_2025to2026.csv`);
+   score/winner shipped weights were also user-moderated below their raw
+   fits (0.60→0.35, 0.45→0.30). OWED: when the finish chain reruns
+   pa_blend, re-decide ALL THREE weights from 2025-only evidence (2026 may
+   veto the package, never set a weight). predict.SIM_BLEND carries the
+   matching comment.
