@@ -407,11 +407,12 @@ FEATURE_KEEP = _feature_keep()
 _KEEP_TRAIN = bool(FEATURE_KEEP)
 if not _KEEP_TRAIN:
     LGBM_BAGS = 3
-    # cheap electorate (user re-affirmed 07-15): the superset carries ONE
-    # CatBoost member so the family still votes in feature_select, at half
-    # the CB cost; the known regime mismatch (audit #3) widens accordingly
-    # and selection_report.json records both regimes as before.
-    CB_BAGS = min(CB_BAGS, 1)
+    # Superset electorate keeps the FULL 2 CatBoost members (2026-07-15 PM,
+    # user-directed selection regen): a lone member votes a coarse 0/1
+    # use-fraction — the exact granularity problem that made the LGBM bags
+    # uniform on 07-14 — and this regen exists precisely so the cb family's
+    # vote is real. The cheap-electorate regime (3 LGBM bags + the 120k row
+    # sample) still applies; the audit-#3 mismatch note stands.
 _SUPERSET_SAMPLE = 0 if _KEEP_TRAIN else 120_000   # train-row cap; 0 = all rows
 
 # Early-stopping holdout (2026-07-15, audit fix #2): boosters used to
@@ -724,22 +725,48 @@ def set_categories(df, cat_levels):
     return df
 
 
-def _fit_logistic(tr, cols, target, w=None):
+# LR blend-member ridge grid (2026-07-15 PM batch, user add): C is picked
+# PER HEAD on cal-year logloss instead of the hand-set 0.3. The per-family
+# stack downstream prices the LR member with a free coefficient, so member
+# quality matters more than it did under the fixed-weight blend. 0.3 = the
+# incumbent, listed first so exact ties keep it.
+LR_C_GRID = (0.3, 0.1, 1.0)
+
+
+def _fit_logistic(tr, cols, target, w=None, ca=None):
     """Regularized logistic on numeric features (categoricals dropped) — a
     learner diverse from the trees, so blending the two helps. w = per-row
-    sample weights (recency decay), routed to the LR step only."""
+    sample weights (recency decay), routed to the LR step only. ca = the
+    calibration-year frame: when given, the ridge strength is picked from
+    LR_C_GRID by cal-year logloss; None (or a degenerate cal year) keeps
+    the fixed incumbent C=0.3. Returns (pipeline, num_cols, C)."""
     num_cols = [c for c in cols if c not in F.CAT_COLS]
-    pipe = Pipeline([
-        # F.inf_to_nan lives in the features module so the pickled pipeline
-        # resolves it from predict.py/evaluate_deep.py too (not just __main__).
-        ("clean", FunctionTransformer(F.inf_to_nan)),
-        ("impute", SimpleImputer(strategy="median")),
-        ("scale", StandardScaler()),
-        ("lr", LogisticRegression(max_iter=2000, C=0.3, solver="lbfgs")),
-    ])
-    pipe.fit(tr[num_cols], tr[target],
-             **({"lr__sample_weight": w} if w is not None else {}))
-    return pipe, num_cols
+
+    def _pipe(C):
+        return Pipeline([
+            # F.inf_to_nan lives in the features module so the pickled
+            # pipeline resolves it from predict.py/evaluate_deep.py too
+            # (not just __main__).
+            ("clean", FunctionTransformer(F.inf_to_nan)),
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+            ("lr", LogisticRegression(max_iter=2000, C=C, solver="lbfgs")),
+        ])
+
+    fitkw = {"lr__sample_weight": w} if w is not None else {}
+    grid = LR_C_GRID
+    if ca is None or len(ca) < 100 or ca[target].nunique() < 2:
+        grid = (0.3,)
+    best_ll, best_pipe, best_C = np.inf, None, None
+    for C in grid:
+        pipe = _pipe(C).fit(tr[num_cols], tr[target], **fitkw)
+        if len(grid) == 1:
+            return pipe, num_cols, C
+        p = np.clip(pipe.predict_proba(ca[num_cols])[:, 1], 1e-6, 1 - 1e-6)
+        ll = log_loss(ca[target].to_numpy(), p)
+        if ll < best_ll - 1e-9:
+            best_ll, best_pipe, best_C = ll, pipe, C
+    return best_pipe, num_cols, best_C
 
 
 def _refit_lgbm(ctor, p, best_iter, X, y, w):
@@ -823,8 +850,8 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
     model = F.MeanBag(models) if len(models) > 1 else models[0]
 
     # diverse second learner (the LR has no early stopping, so it may use
-    # the full training slice)
-    lr, num_cols = _fit_logistic(tr, cols, target, w=w_tr)
+    # the full training slice); ridge strength picked per head on cal year
+    lr, num_cols, lr_C = _fit_logistic(tr, cols, target, w=w_tr, ca=ca)
 
     # per-family cal design matrix [fam logits..., LR logit] — the fit-side
     # twin of predict.predict_prop's serving arithmetic (features.family_logits)
@@ -891,6 +918,7 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
         "families": {f: int(slices[f][1] - slices[f][0]) for f in fam_order},
         "es_refit": bool(do_refit),
         "recency_decay": decay,
+        "lr_C": lr_C,
         "cal_pool_years": cal_years,
         "blend_space": BLEND_SPACE,
         "calibrator": cal_kind,
@@ -1040,7 +1068,7 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
     if CB_BAGS:
         slices["cb"] = (pos, len(members))
     model = F.MeanBag(members) if len(members) > 1 else members[0]
-    lr, num_cols = _fit_logistic(tr, cols, target, w=w_tr)
+    lr, num_cols, lr_C = _fit_logistic(tr, cols, target, w=w_tr, ca=ca)
     fam_order = list(slices)
     n_fam = np.array([slices[f][1] - slices[f][0] for f in fam_order], float)
 
@@ -1129,6 +1157,7 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
         "es_refit": bool(do_refit),
         "winner_mirror": bool(WINNER_MIRROR),
         "recency_decay": decay,
+        "lr_C": lr_C,
         "cal_pool_years": cal_years,
         "blend_space": BLEND_SPACE,
         "calibrator": cal_kind,

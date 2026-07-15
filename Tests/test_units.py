@@ -549,6 +549,7 @@ class TestDiversityBatchEndToEnd(unittest.TestCase):
             self.assertEqual(m["cal_pool_years"], [2024, 2025])
         self.assertIn("fstack", prop)
         self.assertEqual(m["families"], {"lgbm": 2, "cb": 1})
+        self.assertIn(m["lr_C"], T.LR_C_GRID)   # per-head ridge pick landed
         if T.CAL_BAG_B:
             self.assertIn("+bag", m["calibrator"])
         # serve parity: predict_prop must run the fstack path end-to-end
