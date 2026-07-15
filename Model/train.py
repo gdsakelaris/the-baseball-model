@@ -79,10 +79,12 @@ LGB_POIS = dict(n_estimators=2000, learning_rate=0.03, num_leaves=63,
 # prior reg_up base). CAVEAT: a single-bag pick for a 5-bag ship on a
 # ~10k-row head — the one most prone to over-regularization — so confirm on
 # the keep-train via evaluate_deep --paired before trusting the deeper cut.
-LGB_WIN = dict(n_estimators=3000, learning_rate=0.02, num_leaves=7,
+LGB_WIN = dict(n_estimators=3000, learning_rate=0.03, num_leaves=7,
                min_child_samples=200, subsample=0.9, subsample_freq=1,
                colsample_bytree=0.7, reg_lambda=6.0, objective="binary",
                verbose=-1)
+# lr .02->.03 = the 2026-07-15 chain sweep's 'lr_up' (winner's biggest
+# guarded win: CV logloss -0.0030, AUC +0.0007 on the new 18-col keep-list)
 
 # Recency sample-weighting (2026-07-15, tier-1 mechanics batch): every
 # booster and LR fit weights row i by RECENCY_DECAY ** (cal_yr - Season_i),
@@ -230,40 +232,59 @@ CB_WIN = dict(iterations=3000, learning_rate=0.02, depth=4,
               verbose=0, allow_writing_files=False,
               task_type="GPU", devices="0")
 
-# Per-prop LightGBM overrides — RE-SWEPT 2026-07-15 with param_sweep
-# (LGBM-only, single-bag CV, Season<=2024 with 2025 untouched) on the
-# fresh pi=0.6 keep-lists. The leaner keep-lists shifted every binary
-# head's optimum toward more regularization: 17/21 binary props took a
-# reg_med / reg_med2 / reg_heavy / lr_slow profile (all -0.0005..-0.0016
-# CV logloss vs their raw base); every count head + hr/tb4/triple/run2
-# kept default (default won their CV). winner's move (leaves7) lives in
-# LGB_WIN above. Heads not listed = LGB_CLS/LGB_POIS.
-# CAVEAT: single-bag CV over-prefers regularization vs the 5-bag ship —
-# these are recommendations, confirmed as a package by evaluate_deep
-# --paired on the actual keep-train before they are trusted.
+# Per-prop LightGBM overrides — RE-SWEPT 2026-07-15 (chain sweep) with
+# param_sweep (LGBM-only isolation, K=4 day-grouped CV, Season<=2024) on
+# the chain's 0.85-shadow keep-lists under the deviance/ECE-guarded
+# objective. Every entry cleared EPS_LL 0.0004 inside the AUC/ECE bands
+# (prop_params_sweep.json holds the evidence). Notables vs the morning
+# sweep: hits2/double DROPPED their overrides (raw LGB_CLS won), several
+# established heads re-priced lighter (run med2->light, sb med2->med),
+# and the 7 new heads took their first tuned profiles. winner's lr_up
+# (.02->.03) lives in LGB_WIN above; count winners in COUNT_PARAMS below.
+# CAVEAT unchanged: single-bag CV vs the 6-bag ship — the package is
+# confirmed by evaluate_deep --paired on the actual keep-train.
+_REG_LIGHT = dict(min_child_samples=160)
 _REG_MED  = dict(num_leaves=63, min_child_samples=160)
 _REG_MED2 = dict(num_leaves=63, min_child_samples=300,
                  colsample_bytree=0.7, reg_lambda=6.0)
 _REG_HEAVY = dict(num_leaves=31, min_child_samples=300,
                   colsample_bytree=0.7, reg_lambda=6.0)
 PROP_PARAMS = {
-    "run":    dict(LGB_CLS, **_REG_MED2),
+    "run":    dict(LGB_CLS, **_REG_LIGHT),
     "rbi":    dict(LGB_CLS, **_REG_MED),
-    "hit":    dict(LGB_CLS, **_REG_MED),
-    "hits2":  dict(LGB_CLS, **_REG_HEAVY),
-    "tb2":    dict(LGB_CLS, **_REG_HEAVY),
-    "single": dict(LGB_CLS, learning_rate=0.02),
-    "double": dict(LGB_CLS, **_REG_MED2),
+    "hit":    dict(LGB_CLS, **_REG_MED2),
+    "tb2":    dict(LGB_CLS, **_REG_MED),
+    "single": dict(LGB_CLS, **_REG_MED2),
     "bb":     dict(LGB_CLS, **_REG_MED),
-    "sb":     dict(LGB_CLS, **_REG_MED2),
+    "sb":     dict(LGB_CLS, **_REG_MED),
     "bk":     dict(LGB_CLS, **_REG_MED),
     "bk2":    dict(LGB_CLS, **_REG_MED),
-    "hrr2":   dict(LGB_CLS, **_REG_MED2),
-    "hrr3":   dict(LGB_CLS, **_REG_HEAVY),
-    "bk3":    dict(LGB_CLS, **_REG_MED2),
-    "tb3":    dict(LGB_CLS, **_REG_MED),
-    "hrr4":   dict(LGB_CLS, **_REG_MED2),
+    "hrr2":   dict(LGB_CLS, **_REG_MED),
+    "hrr3":   dict(LGB_CLS, **_REG_MED2),
+    "bk3":    dict(LGB_CLS, **_REG_MED),
+    "tb3":    dict(LGB_CLS, **_REG_MED2),
+    "tb4":    dict(LGB_CLS, **_REG_MED),
+    "hrr4":   dict(LGB_CLS, **_REG_LIGHT),
+    "triple": dict(LGB_CLS, **_REG_MED2),
     "rbi2":   dict(LGB_CLS, **_REG_HEAVY),
+    "run2":   dict(LGB_CLS, **_REG_LIGHT),
+}
+
+# Count-head LightGBM overrides (2026-07-15 chain sweep — the first count
+# winners ever; fragments mirror param_sweep.CNT_PROFILES). Applied by
+# fit_poisson via its params argument; tweedie heads keep their objective
+# overlay (it applies AFTER these). All cleared EPS_DEV 0.0015 inside the
+# MAE band (xrbi's MAE +0.0009 is within the 0.0050 band by design —
+# deviance prices the lines, MAE only guards the point estimate).
+_CNT_MED = dict(num_leaves=31, min_child_samples=120)
+_CNT_HEAVY = dict(num_leaves=31, min_child_samples=300,
+                  colsample_bytree=0.7, reg_lambda=6.0)
+COUNT_PARAMS = {
+    "k":     dict(LGB_POIS, learning_rate=0.02),    # lr_slow
+    "total": dict(LGB_POIS, **_CNT_MED),
+    "xhrr":  dict(LGB_POIS, **_CNT_HEAVY),
+    "xtb":   dict(LGB_POIS, **_CNT_MED),
+    "xrbi":  dict(LGB_POIS, **_CNT_HEAVY),
 }
 
 # Per-prop feature routing was REMOVED 2026-07-15 (audit fix #11). The
@@ -764,7 +785,7 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
 
 
 def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
-                n_bags=1, tweedie_power=None, n_xgb=0, n_cb=0):
+                n_bags=1, tweedie_power=None, n_xgb=0, n_cb=0, params=None):
     """Poisson (default) count regression, or Tweedie when tweedie_power is set
     (a compound Poisson-Gamma objective, variance power in (1,2)). Tweedie lets
     the MEAN model an over-dispersed right tail directly — total bases / H+R+RBI
@@ -780,7 +801,7 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
     tweedie = tweedie_power is not None
     models = []
     for b in range(n_bags):
-        p = dict(LGB_POIS)
+        p = dict(params or LGB_POIS)    # COUNT_PARAMS override or the base
         if tweedie:
             p = dict(p, objective="tweedie",
                      tweedie_variance_power=tweedie_power)
@@ -932,7 +953,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     k_cols = _apply_keep("k", list(st_cols))
     k_model, m = fit_poisson(sf, k_cols, "y_so", train_yrs, cal_yr, test_yr,
                              "K", k_baseline, n_bags=LGBM_BAGS,
-                             n_xgb=XGB_BAGS, n_cb=CB_BAGS)
+                             n_xgb=XGB_BAGS, n_cb=CB_BAGS,
+                             params=COUNT_PARAMS.get("k"))
     metrics[f"k_{test_yr}"] = m
 
     # Starter-K dispersion on the CALIBRATION year (never the holdout): real K
@@ -984,6 +1006,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         model, m = fit_poisson(frame, cols, ch["target"], train_yrs, cal_yr,
                                test_yr, cname.upper(), cbase,
                                n_bags=LGBM_BAGS,
+                               params=COUNT_PARAMS.get(cname),
                                tweedie_power=ch.get("tweedie"),
                                n_xgb=XGB_BAGS, n_cb=CB_BAGS)
         ca = frame[frame["Season"] == cal_yr]
@@ -1011,7 +1034,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     team_runs_model, m = fit_poisson(tg, tg_cols, "y_runs", train_yrs, cal_yr,
                                      test_yr, "TEAM RUNS", team_baseline,
                                      n_bags=LGBM_BAGS,
-                                     n_xgb=XGB_BAGS, n_cb=CB_BAGS)
+                                     n_xgb=XGB_BAGS, n_cb=CB_BAGS,
+                                     params=COUNT_PARAMS.get("total"))
     metrics[f"team_runs_{test_yr}"] = m
 
     # Game-total dispersion, also on the calibration year: real totals ran
