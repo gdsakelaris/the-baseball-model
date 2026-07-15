@@ -886,12 +886,19 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     starter K, team runs, winner) on one train/cal/test split. Returns (artifacts, metrics) with the same
     artifact keys regardless of split, so evaluate_deep can score either the
     shipping suite or the selection suite identically."""
-    # shadow columns (1F) join every superset; _apply_keep drops them on a
-    # keep train because keep-lists are written shadow-free
-    bat_cols = F.batter_feature_cols() + shadow_cols_of(bf)
-    st_cols = F.starts_feature_cols() + shadow_cols_of(sf)
+    # shadow columns (1F) join every SUPERSET train's contracts; a keep
+    # train ships shadow-free END-TO-END — the per-head lists via the
+    # shadow-free keep-lists, and the frame-prep contracts here too.
+    # 2026-07-15: the audit-#8 serving guard rightly refused the first
+    # post-audit keep-train because bat_cols still carried the planted
+    # shadow names (the old F3 exemption predates the loader guard);
+    # serving never reads shadow values, so a keep artifact must not
+    # list them anywhere.
+    _shadow = (lambda f: []) if _KEEP_TRAIN else shadow_cols_of
+    bat_cols = F.batter_feature_cols() + _shadow(bf)
+    st_cols = F.starts_feature_cols() + _shadow(sf)
     tg_cols = _apply_keep("total",
-                          F.team_game_feature_cols() + shadow_cols_of(tg))
+                          F.team_game_feature_cols() + _shadow(tg))
     metrics, props = {}, {}
 
     for name, (target, _desc) in PROPS.items():
