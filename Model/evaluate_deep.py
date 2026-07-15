@@ -1374,7 +1374,7 @@ def _frames_fingerprint():
 
 
 def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
-               fdr=DEFAULT_FDR):
+               fdr=DEFAULT_FDR, stale_ok=False):
     """Print the paired keep/bench verdict against the --set-baseline snapshot,
     plus the ② feature-usage gate for columns added since that snapshot.
     `era` names a frozen archive dir under artifacts/ (e.g.
@@ -1429,6 +1429,15 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
                       "snapshot, but frames.joblib is unchanged —\n  baseline "
                       "and candidate score the same cached frames, so the "
                       "read is clean.")
+            elif stale_ok:
+                # user-accepted stale read (2026-07-15): deltas below mix
+                # data drift with the change under test — treat them as a
+                # SCREEN, not a clean attribution; the forward record is
+                # the true test either way.
+                print(f"  !! STALE BASELINE ACCEPTED (--stale-ok): "
+                      f"{len(changed)} Data/*.csv changed since the")
+                print("  !! snapshot — deltas MIX data drift with the change "
+                      "under test.")
             else:
                 pre = "" if tag == "select_" else "--confirm "
                 print("  !! STALE BASELINE — Data/*.csv changed since the snapshot was")
@@ -1440,6 +1449,7 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
                 print("  !!   4. restore the candidate, retrain, re-run --paired")
                 print(f"  !! changed: {', '.join(changed[:8])}"
                       + (f" (+{len(changed) - 8} more)" if len(changed) > 8 else ""))
+                print("  !! (or accept the confound explicitly: --paired --stale-ok)")
                 return
     rows = []
     for name, r in results.items():
@@ -1594,6 +1604,11 @@ def main():
                          "100+ simultaneous tests, so raw 95%% CIs alone "
                          "expect ~5 false CI-clears; 0 disables the gate "
                          "(legacy raw-CI verdicts).")
+    ap.add_argument("--stale-ok", action="store_true",
+                    help="with --paired: run against a snapshot whose data "
+                         "fingerprint is stale (a scrape ran since) instead "
+                         "of refusing — the deltas then MIX data drift with "
+                         "the change under test; treat as a screen only")
     ap.add_argument("--superset", action="store_true",
                     help="score the SUPERSET electorate artifacts "
                          "(models_superset*.joblib) instead of the serving "
@@ -1694,7 +1709,7 @@ def main():
     if args.paired:
         count_preds = build_count_preds(art, bf_y, sf_y, gf_y)
         run_paired(art, results, count_preds, tag, args.year, args.boot,
-                   era=args.era, fdr=args.fdr)
+                   era=args.era, fdr=args.fdr, stale_ok=args.stale_ok)
         return
 
     section_confidence(results, args.boot)
