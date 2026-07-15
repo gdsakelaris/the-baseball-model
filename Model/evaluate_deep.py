@@ -1070,6 +1070,38 @@ def handle_baseline(summary, year, set_baseline, select=False):
 # same rows, and CIs the per-resample delta. Keep by default; a north-star
 # metric whose delta CI lies entirely on the harmful side is the only bench
 # signal (and only when it corroborates on the other year).
+#
+# ADVISORY Score rows (step 1 of the Score-north-star plan, user 2026-07-15):
+# each head also gets a paired delta of the 5_prop_rankings v4 rank-weighted
+# composite (the user's betting priorities: Lift-led, per-class weights) —
+# the SAME day-block draws price baseline and candidate, so the CI is on the
+# change in the composite itself. These rows are ADVISORY: raw-CI verdicts
+# tagged "(adv)", EXCLUDED from the BH-FDR family and the net keep/bench
+# vote. The starred multi-metric bar stays the arbiter; the Score read rides
+# along for a few builds first because (a) its qualities CLIP at fixed
+# anchors, so ELITE heads can sit in saturated zones where a real move shows
+# zero delta, and (b) its heaviest term (Lift) is its noisiest. Coverage:
+# binary heads (self-contained, p/y only) + the O/U families the board
+# prices (count families price BOTH mu sets through the CANDIDATE's serving
+# calibrators — the delta isolates the mu change, holding pricing constant).
+# Mean heads are skipped (their board Score is MAE-led; the starred *MAE row
+# already reads it); winner has no candidate predictions in this read.
+SCORE_BOOT_DEFAULT = 400   # matches 5_prop_rankings.BOOT_B
+
+
+def _score_delta_row(prop, n, s_b, s_c):
+    """One advisory row from paired per-draw composite scores (same weight
+    matrix both sides). None when every draw is degenerate."""
+    d = np.asarray(s_c, float) - np.asarray(s_b, float)
+    d = d[np.isfinite(d)]
+    if d.size == 0:
+        return None
+    mean = float(d.mean())
+    lo, hi = float(np.percentile(d, 2.5)), float(np.percentile(d, 97.5))
+    return {"prop": prop, "metric": "Score", "delta": f"{mean:+.2f}",
+            "95% CI": f"[{lo:+.2f}, {hi:+.2f}]", "n": n,
+            "verdict": paired_verdict(lo, hi) + " (adv)",
+            "q": "(adv)", "_star": False, "_p": None, "_mean": mean}
 
 
 def build_binary_results(art, bf_y):
@@ -1129,7 +1161,7 @@ def build_count_preds(art, bf_y, sf_y, gf_y):
                    + pd.to_numeric(gf_y["HomeScore"], errors="coerce").to_numpy())
         out["total"] = {"df": df.reset_index(drop=True), "keycols": gk}
         # H5 team_total (2026-07-14): the per-TEAM line family, two rows per
-        # game — the paired MAE read + prop_rankings' 'Team Runs > x' family
+        # game — the paired MAE read + 5_prop_rankings' 'Team Runs > x' family
         if art.get("team_line_cals") or art.get("team_total_disp"):
             tk = ["Date", "GamePk", "Home"]
             tdf = pd.DataFrame({
@@ -1157,7 +1189,7 @@ def build_binary_snapshot(results):
 def score_snapshot(gf_y, art):
     """Per-TEAM expected runs + actual score for the paired snapshot — the
     workbook's Away Score / Home Score columns are these means, so
-    prop_rankings grades them like every other displayed column. Two rows
+    5_prop_rankings grades them like every other displayed column. Two rows
     per game (Home flag distinguishes them)."""
     if art.get("team_runs_model") is None:
         return None
@@ -1178,7 +1210,7 @@ def score_snapshot(gf_y, art):
 
 def winner_snapshot(gf_y, art):
     """Per-game served home-win probability + outcome for the paired
-    snapshot — lets prop_rankings grade the Win Prob column on the same
+    snapshot — lets 5_prop_rankings grade the Win Prob column on the same
     internal diagnostics as every other probability (it previously had
     nothing to grade from). None when the artifact predates the dedicated
     win model. Same computation as section_games."""
@@ -1374,7 +1406,8 @@ def _frames_fingerprint():
 
 
 def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
-               fdr=DEFAULT_FDR, stale_ok=False):
+               fdr=DEFAULT_FDR, stale_ok=False,
+               score_boot=SCORE_BOOT_DEFAULT):
     """Print the paired keep/bench verdict against the --set-baseline snapshot,
     plus the ② feature-usage gate for columns added since that snapshot.
     `era` names a frozen archive dir under artifacts/ (e.g.
@@ -1388,7 +1421,20 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
     path = base_dir / f"eval_paired_{tag}{year}.joblib"
     label = f"era '{era}'" if era else "baseline"
     print(f"\n=== 11p. Paired change vs {label} (day-block paired bootstrap, "
-          f"{n_boot} draws; + = candidate better; * = north-star) ===")
+          f"{n_boot} draws; + = candidate better; * = north-star; "
+          f"Score = advisory composite) ===")
+    PRK, score_rng = None, None
+    if score_boot:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Tools"))
+        try:
+            # lazy, fail-soft; the digit-leading tool name (renamed from
+            # prop_rankings.py 2026-07-15) needs importlib
+            import importlib
+            PRK = importlib.import_module("5_prop_rankings")
+            score_rng = np.random.default_rng(20260715)
+        except Exception as e:            # advisory rows must never kill a read
+            print(f"  (advisory Score rows unavailable: {e})")
+            PRK = None
     if not path.exists():
         pre = "" if tag == "select_" else "--confirm "
         print(f"  No paired snapshot at {path}. "
@@ -1480,6 +1526,21 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
                                  else "HARM" if dcs <= -CALSLOPE_BAND
                                  else "no effect"),
                      "_star": True})
+        # advisory paired delta of the v4 composite (same draws both sides)
+        if PRK is not None:
+            did = pd.factorize(m["Date"], sort=False)[0]
+            D = int(did.max()) + 1 if len(did) else 0
+            if D >= 2:
+                Wm = score_rng.multinomial(
+                    D, np.full(D, 1.0 / D), size=score_boot).astype(float)
+                yf = y.astype(float)
+                s_b = PRK._binlike_boot(PRK._prep_binlike(did, D, pb, yf),
+                                        Wm)[0]
+                s_c = PRK._binlike_boot(PRK._prep_binlike(did, D, pc, yf),
+                                        Wm)[0]
+                r_ = _score_delta_row(name, len(m), s_b, s_c)
+                if r_:
+                    rows.append(r_)
     for name, cp in count_preds.items():
         if name not in comp.get("count", {}):
             continue
@@ -1492,6 +1553,34 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
                      "95% CI": f"[{lo:+.4f}, {hi:+.4f}]", "n": len(m),
                      "verdict": paired_verdict(lo, hi), "_star": True,
                      "_p": pv, "_mean": mean})
+        # advisory composite for the O/U families the board prices — both mu
+        # sets priced through the CANDIDATE's serving calibrators, so the
+        # delta isolates the mu change (mean heads read through *MAE above)
+        if PRK is not None and name in PRK.CNT_MARKETS:
+            try:
+                head = art.get("count_models", {}).get(name)
+                kd = float(art.get("k_disp", 1.0))
+                td = float(art.get("total_disp", 1.0))
+                yf = y.astype(float)
+                p_b = PRK._prep_count_family(
+                    name, {"count": {name: {"df": pd.DataFrame(
+                        {"Date": m["Date"], "mu": m["mu_b"].to_numpy(float),
+                         "y": yf})}}}, head, kd, td, art)
+                p_c = PRK._prep_count_family(
+                    name, {"count": {name: {"df": pd.DataFrame(
+                        {"Date": m["Date"], "mu": m["mu_c"].to_numpy(float),
+                         "y": yf})}}}, head, kd, td, art)
+                if p_b["D"] >= 2 and p_b["lines"] and p_c["lines"]:
+                    Wm = score_rng.multinomial(
+                        p_b["D"], np.full(p_b["D"], 1.0 / p_b["D"]),
+                        size=score_boot).astype(float)
+                    r_ = _score_delta_row(name, len(m),
+                                          PRK._countfam_boot(p_b, Wm),
+                                          PRK._countfam_boot(p_c, Wm))
+                    if r_:
+                        rows.append(r_)
+            except Exception as e:        # advisory: never kills the read
+                print(f"  (Score row skipped for {name}: {e})")
     if not rows:
         print("  (no props overlap between this model and the snapshot)")
         return
@@ -1515,7 +1604,7 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
                                   else "no effect")
         for r in rows:
             if r.get("_p") is None:
-                r["q"] = "(band)"
+                r.setdefault("q", "(band)")   # Score rows keep their "(adv)"
         print(f"  multiplicity gate ON: {len(pidx)} simultaneous tests; "
               f"~{0.05 * len(pidx):.1f} raw CI-clears expected under the "
               f"null; verdicts require Benjamini-Hochberg q <= {fdr:g} "
@@ -1525,6 +1614,8 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
               "tests this gate does NOT correct — the forward record is the "
               "only uncorrectable-free test.")
     df = pd.DataFrame(rows)
+    if "q" in df.columns:
+        df["q"] = df["q"].fillna("-")
     drop = [c for c in ("_star", "_p", "_mean") if c in df.columns]
     print(df.drop(columns=drop).to_string(index=False))
     star = df[df["_star"]]
@@ -1544,6 +1635,24 @@ def run_paired(art, results, count_preds, tag, year, n_boot, era=None,
           "quality; net = #improved - #regressed, ties = flat):")
     print(f"    net wins:        {imp or '[]'}")
     print(f"    net regressions: {harm or '[]'}")
+    sc = df[df["metric"] == "Score"]
+    if not sc.empty:
+        s_win = sc[sc["verdict"].str.startswith("IMPROVED")]["prop"].tolist()
+        s_harm = sc[sc["verdict"].str.startswith("HARM")]["prop"].tolist()
+        print("\n  ADVISORY Score read (step 1 of the Score-north-star plan, "
+              "2026-07-15): paired delta of the")
+        print(f"  5_prop_rankings v4 rank-weighted composite ({score_boot} "
+              f"draws, raw-CI verdicts). NOT in the FDR")
+        print("  family or the net vote — the starred bar stays the arbiter "
+              "while this read rides along.")
+        print(f"    Score CI-clear wins:  {s_win or '[]'}")
+        print(f"    Score CI-clear harms: {s_harm or '[]'}")
+        print("  caveats: qualities clip at fixed anchors (an ELITE head in "
+              "a saturated zone shows zero Score")
+        print("  delta on a real move); count families price both mu sets "
+              "through the CANDIDATE's calibrators;")
+        print("  mean heads read through *MAE; winner has no candidate "
+              "predictions in this read.")
     print("  NOTE: dev phase (superset, no selection) — this read is "
           "directional; the binding verdict is post-selection + families at "
           "ship, so don't over-weight dev-phase moves.")
@@ -1609,6 +1718,13 @@ def main():
                          "fingerprint is stale (a scrape ran since) instead "
                          "of refusing — the deltas then MIX data drift with "
                          "the change under test; treat as a screen only")
+    ap.add_argument("--score-boot", type=int, default=SCORE_BOOT_DEFAULT,
+                    metavar="N",
+                    help="with --paired: draws for the ADVISORY paired Score "
+                         "rows (5_prop_rankings v4 rank-weighted composite; "
+                         "step 1 of the Score-north-star plan, excluded from "
+                         "the FDR family and the net vote). 0 disables. "
+                         f"Default {SCORE_BOOT_DEFAULT}.")
     ap.add_argument("--superset", action="store_true",
                     help="score the SUPERSET electorate artifacts "
                          "(models_superset*.joblib) instead of the serving "
@@ -1709,7 +1825,8 @@ def main():
     if args.paired:
         count_preds = build_count_preds(art, bf_y, sf_y, gf_y)
         run_paired(art, results, count_preds, tag, args.year, args.boot,
-                   era=args.era, fdr=args.fdr, stale_ok=args.stale_ok)
+                   era=args.era, fdr=args.fdr, stale_ok=args.stale_ok,
+                   score_boot=args.score_boot)
         return
 
     section_confidence(results, args.boot)
@@ -1756,6 +1873,14 @@ def main():
               f"{len(comp['features'])} feature cols)")
         (ART / "baseline_code_fp.json").write_text(
             json.dumps(_code_fingerprint(), indent=1))
+        if not select:
+            # Record the code this confirm stamp was made under. The daily
+            # job (update_all.confirm_is_stale) compares it to the shipped
+            # sources and re-stamps the 2026 confirm exactly once per ship
+            # — audit #6 as amended 2026-07-15 (auto-on-ship, user
+            # directive). Between ships the daily job never touches 2026.
+            (ART / "confirm_code_fp.json").write_text(
+                json.dumps(_code_fingerprint(), indent=1))
 
     print("""
 How to read this:

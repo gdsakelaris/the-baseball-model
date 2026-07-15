@@ -55,11 +55,17 @@ quality flag's daily hit rate is visible, not just its per-cell recolor.
 Usage:
     python Tools/4_grade_results.py                  # newest in Predictions/
     python Tools/4_grade_results.py path\\to\\file.xlsx
-    python Tools/4_grade_results.py --all            # cumulative report only
+    python Tools/4_grade_results.py --all            # grade EVERY workbook
 
---all pools EVERY dated workbook in Predictions/ into one cumulative
-backtest-style report (same per-head table + pick ledger, all days
-combined). Read-only: nothing is painted or saved in that mode.
+--all (2026-07-15 PM: now grades, no longer read-only) paints EVERY dated
+workbook in Predictions/ in place — the same recolor as the single-file
+mode, idempotent on already-graded books — then pools every day's cell
+surface into one cumulative backtest-style report (same per-head table +
+pick ledger), PLUS the pooled blue-pick and Bets tallies the old
+read-only accumulation could never see (a values-only load reads no
+fills; the painting pass reads every fill anyway). A workbook that can't
+be graded yet (today's slate before finals) is skipped with a note; one
+that is open in Excel still counts in the report but keeps its old paint.
 """
 import argparse
 import re
@@ -443,15 +449,23 @@ def _grade_bets(wb, batters, starters, games, stats, bg=None, sg=None):
                 c.font = Font(bold=True, color="FFFFFF")
 
 
+class GradeError(RuntimeError):
+    """A workbook that can't be graded (yet): no date in the filename, or
+    no box scores for its date. Single-file mode exits on it; --all skips
+    the workbook with a note and keeps going."""
+
+
 def grade(path):
     m = re.match(r"(\d{4}-\d{2}-\d{2})", Path(path).stem)
     if not m:
-        sys.exit(f"can't read the game date from the filename: {path}")
+        raise GradeError(f"can't read the game date from the filename: "
+                         f"{path}")
     date = m.group(1)
     batters, starters, games, bg, sg = load_actuals(date)
     if not batters:
-        sys.exit(f"no box scores for {date} in Data/mlb_game_batting.csv — "
-                 f"run  python Scrapers/scrape_gamelogs_3F.py  first")
+        raise GradeError(f"no box scores for {date} in "
+                         f"Data/mlb_game_batting.csv — run  "
+                         f"python Scrapers/scrape_gamelogs_3F.py  first")
 
     wb = openpyxl.load_workbook(path)
     for ws in wb.worksheets:
@@ -576,126 +590,15 @@ def grade(path):
 
     _grade_bets(wb, batters, starters, games, stats, bg=bg, sg=sg)
 
+    # everything above is computed either way; a failed save only means the
+    # paint didn't land (file open in Excel) — the stats/rows stay usable,
+    # so --all can still pool the day into its cumulative report.
     try:
         wb.save(path)
+        painted = True
     except PermissionError:
-        sys.exit(f"{path} is open in Excel (it holds the file lock) — "
-                 f"close it there, then run this again.")
-    return date, stats, rows
-
-
-def collect_rows(path):
-    """grade()'s cell surface, read-only: [(sheet, head, stated_p,
-    occurred), ...] plus a skipped-row count — no painting, no save.
-    Used by --all to pool days; prints a note and returns ([], 0) for
-    workbooks that can't be graded yet (no date / no box scores)."""
-    m = re.match(r"(\d{4}-\d{2}-\d{2})", Path(path).stem)
-    if not m:
-        print(f"  ! {Path(path).name}: no date in filename, skipped")
-        return [], 0
-    date = m.group(1)
-    try:
-        batters, starters, games, bg, sg = load_actuals(date)
-    except Exception as e:
-        print(f"  ! {Path(path).name}: {e}")
-        return [], 0
-    if not batters:
-        print(f"  ! {Path(path).name}: no box scores for {date} yet")
-        return [], 0
-
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    rows, skipped = [], 0
-
-    def prob(v):
-        return (float(v) if isinstance(v, (int, float)) and 0 <= v <= 1
-                else None)
-
-    def sheet_head(name):
-        ws = wb[name]
-        head = [str(c.value) for c in next(ws.iter_rows(min_row=1, max_row=1))]
-        return ws, {h: j for j, h in enumerate(head)}
-
-    def tag_gnum(r, hidx):
-        g_j, gn_j = hidx.get("Game"), hidx.get("G#")
-        if g_j is None or gn_j is None:
-            return None, None
-        try:
-            return str(r[g_j]), int(r[gn_j])
-        except (TypeError, ValueError):
-            return None, None
-
-    if "Batter Props" in wb.sheetnames:
-        ws, hidx = sheet_head("Batter Props")
-        cols = ({h: j for h, j in hidx.items() if h in BAT_EVENTS}
-                if "ID" in hidx else {})
-        for r in (ws.iter_rows(min_row=2, values_only=True) if cols else ()):
-            pid = r[hidx["ID"]]
-            tag, gnum = tag_gnum(r, hidx)
-            s = _row_stats(bg, batters, games, pid, tag, gnum)
-            if s is None:
-                skipped += 1
-                continue
-            for h, j in cols.items():
-                p = prob(r[j])
-                if p is not None:
-                    rows.append(("Batter Props", h, p,
-                                 bool(BAT_EVENTS[h](s))))
-
-    if "Pitching Props" in wb.sheetnames:
-        ws, hidx = sheet_head("Pitching Props")
-        line_cols = ([(h, j, LINE_RE.match(h)) for h, j in hidx.items()
-                      if LINE_RE.match(h)] if "ID" in hidx else [])
-        for r in (ws.iter_rows(min_row=2, values_only=True)
-                  if line_cols else ()):
-            pid = r[hidx["ID"]]
-            tag, gnum = tag_gnum(r, hidx)
-            a = _row_stats(sg, starters, games, pid, tag, gnum)
-            if a is None:
-                skipped += 1
-                continue
-            for h, j, mm in line_cols:
-                p = prob(r[j])
-                if p is not None:
-                    occ = bool(a[LINE_STAT[mm.group(1)]] > float(mm.group(2)))
-                    rows.append(("Pitching Props", h, p, occ))
-
-    if "Games" in wb.sheetnames:
-        ws, hidx = sheet_head("Games")
-        run_cols = [(h, j, float(RUNS_RE.match(h).group(1)))
-                    for h, j in hidx.items() if RUNS_RE.match(h)]
-        team_cols = [(h, j, TEAM_RUNS_RE.match(h).group(1).lower(),
-                      float(TEAM_RUNS_RE.match(h).group(2)))
-                     for h, j in hidx.items() if TEAM_RUNS_RE.match(h)]
-        # same doubleheader rule as grade(): the tag's i-th row grades the
-        # day's i-th final; incomplete tags are skipped, never misgraded
-        game_rows = (list(ws.iter_rows(min_row=2, values_only=True))
-                     if "Game" in hidx else [])
-        need = Counter(str(r[hidx["Game"]]) for r in game_rows)
-        seen = Counter()
-        for r in game_rows:
-            tag = str(r[hidx["Game"]])
-            finals = games.get(tag, [])
-            k = seen[tag]
-            seen[tag] += 1
-            if len(finals) != need[tag]:
-                skipped += 1
-                continue
-            g = finals[k]
-            if "Winner" in hidx and "Win Prob" in hidx:
-                p = prob(r[hidx["Win Prob"]])
-                if p is not None:
-                    rows.append(("Games", "Winner", p,
-                                 str(r[hidx["Winner"]]) == g["winner"]))
-            for h, j, line in run_cols:
-                p = prob(r[j])
-                if p is not None:
-                    rows.append(("Games", h, p, bool(g["total"] > line)))
-            for h, j, side, line in team_cols:
-                p = prob(r[j])
-                if p is not None:
-                    rows.append(("Games", h, p, bool(g[side] > line)))
-    wb.close()
-    return rows, skipped
+        painted = False
+    return date, stats, rows, painted
 
 
 def _rank_auc(p, y):
@@ -777,33 +680,65 @@ def main():
     ap.add_argument("workbook", nargs="?", default=None,
                     help="predictions .xlsx (default: newest in Predictions/)")
     ap.add_argument("--all", action="store_true",
-                    help="read-only: pool every dated workbook in "
-                         "Predictions/ into one cumulative backtest-style "
-                         "report (no painting, no saves)")
+                    help="grade (paint) EVERY dated workbook in "
+                         "Predictions/ in place, then pool all days into "
+                         "one cumulative backtest-style report — incl. the "
+                         "pooled blue-pick and Bets tallies")
     args = ap.parse_args()
 
     if args.all:
         books = sorted(PRED_DIR.glob("[0-9]*.xlsx"))
         if not books:
             sys.exit(f"no workbooks in {PRED_DIR}")
-        all_rows, all_skipped, days = [], 0, 0
-        print("workbooks:")
+        all_rows, days, tot, unpainted = [], 0, {}, []
+        print("grading workbooks:")
         for p in books:
-            rows, skipped = collect_rows(p)
-            if rows:
-                days += 1
-                hits = sum(o for _, _, _, o in rows)
-                print(f"  {p.name}: {len(rows):,} cells ({hits:,} occurred)"
-                      + (f", {skipped} row(s) without box scores"
-                         if skipped else ""))
+            try:
+                _, s, rows, painted = grade(p)
+            except GradeError as e:
+                print(f"  ! {p.name}: {e}")
+                continue
+            days += 1
             all_rows += rows
-            all_skipped += skipped
+            for k, v in s.items():
+                tot[k] = tot.get(k, 0) + v
+            line = f"  {p.name}: {s['cells']:,} cells, {s['hit']:,} occurred"
+            if s.get("blue_picks"):
+                line += f"; blue {s['blue_hit']}/{s['blue_picks']}"
+            if s.get("bets"):
+                line += f"; bets won {s.get('bets_won', 0)}/{s['bets']}"
+            if s.get("missing_rows"):
+                line += f"; {s['missing_rows']} row(s) no box score"
+            if not painted:
+                unpainted.append(p.name)
+                line += "  [NOT painted — open in Excel]"
+            print(line)
+        if not days:
+            sys.exit("nothing gradeable yet — no dated workbook has box "
+                     "scores.")
+        print(f"\ngraded {days} workbook(s): {tot.get('cells', 0):,} cells "
+              f"checked, {tot.get('hit', 0):,} stats occurred")
+        if tot.get("blue_picks"):
+            bp, bh = tot["blue_picks"], tot["blue_hit"]
+            pp, ph = tot.get("purple_picks", 0), tot.get("purple_hit", 0)
+            msg = (f"Blue quality picks (all days): {bh} of {bp} hit "
+                   f"({bh / bp:.1%})")
+            if pp:                     # split out the also-+EV (purple) subset
+                msg += (f"  [blue-only {bh - ph} of {bp - pp}, "
+                        f"+EV purple {ph} of {pp}]")
+            print(msg)
+        if tot.get("bets"):
+            print(f"Bets (all days): {tot.get('bets_won', 0)} of "
+                  f"{tot['bets']} bet(s) won")
+        if tot.get("missing_rows"):
+            print(f"{tot['missing_rows']} row(s) had no final box score — "
+                  f"run  python Scrapers/scrape_gamelogs_3F.py  and re-run")
+        if unpainted:
+            print(f"not repainted (open in Excel): {', '.join(unpainted)} — "
+                  f"still counted in the report")
         day_report(all_rows, title=f"Cumulative report: {days} day(s), "
                                    f"{len(all_rows):,} graded cells, "
                                    f"backtest-style")
-        if all_skipped:
-            print(f"\n{all_skipped} row(s) had no box score (scratched "
-                  f"player or finals not scraped yet) — not counted.")
         return
 
     path = args.workbook
@@ -812,7 +747,13 @@ def main():
         if not books:
             sys.exit(f"no workbooks in {PRED_DIR}")
         path = books[-1]
-    date, s, rows = grade(path)
+    try:
+        date, s, rows, painted = grade(path)
+    except GradeError as e:
+        sys.exit(str(e))
+    if not painted:
+        sys.exit(f"{path} is open in Excel (it holds the file lock) — "
+                 f"close it there, then run this again.")
     print(f"graded {path}")
     print(f"  {date}: {s['cells']:,} cells checked, {s['hit']:,} stats "
           f"occurred (now yellow / dark blue / dark green / dark purple)")

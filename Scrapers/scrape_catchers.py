@@ -118,7 +118,8 @@ def fetch_year(year):
     pre-2016; poptime fills pop/arm there)."""
     fr = _fetch_csv(FRAMING_URL,
                     {"type": "catcher", "seasonStart": year,
-                     "seasonEnd": year, "team": "", "min": 1, "csv": "true"},
+                     "seasonEnd": year, "team": "", "minPitches": 1,
+                     "csv": "true"},
                     "pitches")
     time.sleep(1.0)
     th = _fetch_csv(THROWING_URL,

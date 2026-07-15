@@ -1,9 +1,9 @@
 # MLB Prediction Model
 
-Seed-bagged LightGBM ensembles (6 bags per head, averaged in log-odds
-space, plus a per-head logistic-regression blend member — the standing
-shipped configuration since 2026-07-15; the XGBoost/CatBoost family
-members are benched behind `train.py LGBM_ONLY_TEMP`) trained on the CSVs
+Seed-bagged LightGBM ensembles (6 LGBM bags + 2 CatBoost family members
+per head — CatBoost restored and XGBoost permanently retired 2026-07-15 PM
+— combined with a per-head logistic-regression member by a **per-family
+logistic stack** fit on the calibration support) trained on the CSVs
 in `Data/`, predicting per game (or per slate of games — the GUI's "Add
 game to slate" runs many at once with one combined, cross-game-ranked
 board). **36 heads** ship (21 batter binaries + 7 batter counts + 5
@@ -44,7 +44,7 @@ starter counts + 3 game-level), every one calibrated:
 | File | Role |
 |---|---|
 | `features.py` | Feature engineering. Everything is **as-of date**: a game on date D only uses data from before D (no leakage). Same definitions serve training (vectorized) and prediction (per-entity); `predict.py --selftest` proves the two paths agree. |
-| `train.py` | Builds frames, trains everything. TWO ROLES (2026-07-15): with `feature_keep.json` present it is the KEEP-train and writes the serving artifacts (`models_bt.joblib` selection suite, `models.joblib` shipping suite); without it it is the SUPERSET train and writes `models_superset*.joblib` (feature_select's electorate — cheaper regime: fewer bags + a row sample, documented mismatch). Train/cal/holdout years are DERIVED from the data (`suite_years`) — currently ≤2023/2024/2025 and ≤2024/2025/2026; boosters early-stop on a held-out ~10% GamePk slice of the TRAINING rows (`_es_split`), never the calibration year. Heads are seed-bagged LightGBM (`LGBM_BAGS = 6`) averaged in log-odds space, with **recency-decayed sample weights** (`RECENCY_DECAY = 0.95` per season, swept 07-15), a per-head **auto-selected calibrator** (`AUTO_CAL`: Platt / beta / isotonic, chosen on the calibration year), a logit-space GBM+LR blend, and **ladder coherence** (PAV projection so e.g. P(2+ hits) ≤ P(1+ hit) always). Per-head hyperparameter overrides live in `PROP_PARAMS` (binaries) and `COUNT_PARAMS` (counts), tuned by `param_sweep.py`. Artifacts carry a `meta_stamp` (role/regime/created) that predict.py's serving guard enforces. `--rebuild` refreshes cached frames; `--select` stops after the selection suite. |
+| `train.py` | Builds frames, trains everything. TWO ROLES (2026-07-15): with `feature_keep.json` present it is the KEEP-train and writes the serving artifacts (`models_bt.joblib` selection suite, `models.joblib` shipping suite); without it it is the SUPERSET train and writes `models_superset*.joblib` (feature_select's electorate — cheaper regime: fewer bags + a row sample, documented mismatch). Train/cal/holdout years are DERIVED from the data (`suite_years`) — currently ≤2023/2024/2025 and ≤2024/2025/2026; boosters early-stop on a held-out ~10% GamePk slice of the TRAINING rows (`_es_split`), never the calibration year. Heads are seed-bagged LightGBM (`LGBM_BAGS = 6`) + CatBoost members (`CB_BAGS = 2`; XGBoost retired), with **recency-decayed sample weights** (`RECENCY_DECAY = 0.95` global, per-head overrides in `RECENCY_HEAD_DECAY`), **ES-refit** (each member refit on 100% of train at its early-stop iteration, keep-trains only), a **per-family logistic stack** over [LGBM logit, CB logit, LR logit(, Poisson logit for the winner)] replacing the single blend weight (`FAMILY_STACK`; counts use a deviance-chosen family weight), a per-head **auto-selected calibrator** (`AUTO_CAL`: Platt / beta / isotonic) that is **day-block bootstrap-bagged** (`CAL_BAG_B = 25`) and fit on **multi-year pooled support** when available (`MULTI_YEAR_CAL`: the selection suite's honest cal-year scores feed the shipping suite at zero extra train cost, prior year discounted `CAL_POOL_DECAY = 0.75`), a **mirrored winner augmentation** (`WINNER_MIRROR`: home/away-swapped train copies + `persp_home` flag, doubling the 10k-row winner's data), and **ladder coherence** (PAV projection so e.g. P(2+ hits) ≤ P(1+ hit) always). Per-head hyperparameter overrides live in `PROP_PARAMS` (binaries) and `COUNT_PARAMS` (counts), tuned by `param_sweep.py`. Artifacts carry a `meta_stamp` (role/regime/created) that predict.py's serving guard enforces. `--rebuild` refreshes cached frames; `--select` stops after the selection suite. |
 | `feature_select.py` | Shadow-calibrated stability selection (Boruta-style): the superset train plants shuffled `shdw_` decoys, per-head SHAP shares are measured against the shadow quantile (`SHADOW_Q = 0.85`), and the surviving columns are written to `feature_keep.json` — the **sole decider** of what each head trains on. The old hand-curated per-prop routing tables were retired 2026-07-10 and deleted 2026-07-15 (git history keeps them). |
 | `param_sweep.py` | Per-head LightGBM hyperparameter sweep: day-grouped GroupKFold OOF on the training years, single-member isolation, deviance/ECE-guarded acceptance gates. Winners are wired into `PROP_PARAMS`/`COUNT_PARAMS` by hand. |
 | `predict.py` | `Predictor.predict_game(spec)`; CLI: `--game <GamePk>` replays a historical game, `--selftest` checks train/serve parity. Applies the `SIM_BLEND` layer to game-level outputs. Refuses superset-role or shadow-contract artifacts (serving guard). Every run saves a workbook to `Predictions/`. |
@@ -52,15 +52,17 @@ starter counts + 3 game-level), every one calibrated:
 | `pa_serve.py` | Serves the simulator at predict time (`SlateSim`); `pa_backtest.py` replays full seasons through it; `pa_grade.py` + `pa_blend.py` grade the sim vs the GBM incumbent and fit the per-head blend weights (2025 only). |
 | `odds.py` | Sportsbook-odds utilities: American↔probability, de-vig, EV/ROI, and the canonical odds-store schema. Bridges the model's fair probabilities to the prices books actually post; shared by `Tools/2_scrape_odds.py` and evaluate_deep Section 9. |
 | `recalibrate.py` | In-season drift correction: a per-prop log-odds shift fit only on recent in-season games (leakage-free). Stored by `train.py`, backtested in evaluate_deep Section 10, applied at serving with `predict.py --recal` (currently off by default — the backtest says the base calibration is already honest). |
-| `evaluate_deep.py` | Full accuracy + betting workup on a held-out season: bootstrap CIs on AUC and the logloss edge, calibration, daily top-N hit rates, pick-threshold economics, monthly drift, segment reliability, K/totals/winner deep dives, **model-vs-market ROI (Section 9)**, **in-season recalibration backtest (Section 10)**, and `--set-baseline` regression diffing with per-metric noise bands (Section 11) plus `--paired` day-block bootstrap CIs with a Benjamini–Hochberg FDR gate. The DEFAULT run scores the selection suite on 2025 (iterate freely); `--confirm` scores the shipping suite on 2026 — run DELIBERATELY, never by the daily job. |
-| `decay_sweep.py` | One-off sweep that chose `RECENCY_DECAY` (banked runs under `artifacts/decay_sweep/`). |
+| `evaluate_deep.py` | Full accuracy + betting workup on a held-out season: bootstrap CIs on AUC and the logloss edge, calibration, daily top-N hit rates, pick-threshold economics, monthly drift, segment reliability, K/totals/winner deep dives, **model-vs-market ROI (Section 9)**, **in-season recalibration backtest (Section 10)**, and `--set-baseline` regression diffing with per-metric noise bands (Section 11) plus `--paired` day-block bootstrap CIs with a Benjamini–Hochberg FDR gate. The DEFAULT run scores the selection suite on 2025 (iterate freely); `--confirm` scores the shipping suite on 2026 — deliberate looks only, except the one auto ship-confirm the daily job takes per ship (audit #6 as amended 07-15). |
+| `decay_sweep.py` | Sweep that chose `RECENCY_DECAY` (banked runs under `artifacts/decay_sweep/`); now also prints a paste-ready per-head `RECENCY_HEAD_DECAY` dict (07-15 PM). |
+| `hpo_sweep.py` | Optuna TPE search over the continuous LightGBM space for the weak heads, reusing `param_sweep.py`'s folds/scoring/gates verbatim (07-15 PM). Winners are wired into `PROP_PARAMS`/`COUNT_PARAMS` by hand. |
 | `artifacts/` | Trained models (`models*.joblib`), metrics (`metrics.json`), cached feature frames, selection reports, sim tables/backtests, and the odds store / eval baselines. |
 
 The game-day tools that USE these models live in `Tools/`, numbered in
 run order: `1_get_todays_games.py`, `2_scrape_odds.py`, `3_gui.py` (the
-Tkinter app), `4_grade_results.py` (`--all` = the accumulated forward
-record), `5_performance.py` (per-head metrics snapshot for both suites →
-`performance.txt`), and `prop_rankings.py`.
+Tkinter app), `4_grade_results.py` (`--all` grades every workbook + the
+accumulated forward record), and `5_prop_rankings.py` (the per-market
+quality board → `PROP_RANKINGS.xlsx`; renamed from `prop_rankings.py`
+2026-07-15, replacing the retired `5_performance.py`/`PERFORMANCE.xlsx`).
 
 ## What the model knows (superset: 522 batter / 207 starter / 74 team-game / 55 winner columns; stability selection picks each head's ~20–90)
 
@@ -165,8 +167,9 @@ is *how much*:
 | Partial season, lightly touched | 2026 through 07-14 (~59% of games) | Never used for fitting, but it has been LOOKED AT — each decision-influencing look is enumerated below. |
 | **Forward record** | **2026-07-15 onward** | **Timestamped predictions graded after the fact — the ONLY fully untouched test.** |
 
-The enumerated 2026 looks (audit #6 doctrine — every look is deliberate
-and on this ledger, and the daily job can no longer add one):
+The enumerated 2026 looks (audit #6 doctrine, amended 07-15 to
+auto-on-ship — every look is deliberate-by-policy and on this ledger;
+the daily job adds at most ONE look per ship, never one per day):
 
 1. Daily automated `--confirm --set-baseline` refreshes ran until
    2026-07-14 (closed by audit #6; 2026 snapshots now refresh only on
@@ -181,11 +184,24 @@ and on this ledger, and the daily job can no longer add one):
 6. 07-15: the finish-chain **veto-only** confirm (2026 may veto a shipped
    change, never tune one) — no veto; plus pa_blend's passive 2026
    column (no weight was set from it).
+7. 07-15 (standing policy, user-adopted): **auto ship-confirm** — the
+   first daily train after each ship re-stamps the confirm snapshot
+   (`update_all.confirm_is_stale` vs `confirm_code_fp.json`), one look
+   per ship. Bootstrap stamp taken 07-15 PM against the post-recovery
+   retrain.
 
 `--paired` verdicts gate on a Benjamini–Hochberg false-discovery
 correction (`--fdr`, default 0.10) because one read makes 100+
 simultaneous CI tests; repeated reads against the same season remain
 sequential testing that no correction repairs — hence the forward record.
+Each head also prints an **advisory paired `Score` row** (07-15, step 1 of
+the Score-north-star plan): the same day-block draws CI the delta of the
+`5_prop_rankings` v4 rank-weighted composite (the betting-priority Score the
+board tiers on). Advisory means raw-CI verdicts tagged `(adv)`, excluded
+from the FDR family and the net vote — the starred multi-metric bar stays
+the arbiter while the Score read rides along (its qualities clip at fixed
+anchors, so saturated ELITE heads can hide real moves; its top-weighted
+Lift term is its noisiest). `--score-boot 0` disables.
 
 **Known limitation (Decline ledger #4):** the empirical-Bayes shrinkage
 priors in `features.py` (`SHRINK`) are pooled-era constants computed over
@@ -295,8 +311,13 @@ A scheduled task named **"MLB Daily Update"** runs
 the 2025 selection baseline, warm the prop-rankings cache) and logs each
 run to `Logs/update_<date>.log`. `-StartWhenAvailable` means a missed run
 (laptop asleep at 6 AM) fires as soon as the machine is next on. Per
-audit #6, the daily job **never** touches 2026 — the confirm snapshot
-refreshes only on a deliberate `evaluate_deep.py --confirm --set-baseline`.
+audit #6 as amended 07-15 (auto-on-ship), the daily job touches 2026
+**only on the first train after a ship**: when the shipped Model sources
+differ from the ones recorded at the last confirm stamp
+(`confirm_code_fp.json`), it runs `--confirm --set-baseline` once, then
+stands down until the next ship. A deliberate manual
+`evaluate_deep.py --confirm --set-baseline` also refreshes the stamp and
+resets the trigger.
 
 Failure guards, in the order they act:
 

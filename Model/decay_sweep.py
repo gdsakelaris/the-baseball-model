@@ -14,7 +14,7 @@ CAVEATS
     the ship chain regenerates both, but do not read them mid-sweep expecting
     the incumbent. The last run leaves the LAST grid value in place, not
     necessarily the winner.
-  * Runs under whatever keep-list / LGBM_ONLY_TEMP regime train.py currently
+  * Runs under whatever keep-list / family-bag regime train.py currently
     has — the read is RELATIVE across decays, which is what the choice needs.
   * The table is a screen (point estimates on the selection test year); the
     baked winner is still verdicted by the chain's evaluate_deep --paired
@@ -115,8 +115,40 @@ def report(grid):
                 print(f"decay {d:.2f}: mean per-head delta vs 1.00 = "
                       f"{mean:+.5f} ({sum(x < 0 for x in deltas)}/"
                       f"{len(deltas)} heads improved)")
-    print("\nnext: bake the winner into train.RECENCY_DECAY (train.py, "
-          "tier-1 batch block) — the ship chain's paired read verdicts it.")
+    # per-head winners (2026-07-15 PM batch): a paste-ready
+    # train.RECENCY_HEAD_DECAY dict. Only heads whose winner differs from
+    # the global train.RECENCY_DECAY are listed; the CV-jitter caveat in the
+    # module docstring applies PER HEAD here, so treat small margins as
+    # noise and prefer the global value unless the win is clear across
+    # adjacent grid values too.
+    try:
+        import train as T
+        global_d = T.RECENCY_DECAY
+    except Exception:
+        global_d = 0.95
+    head_key = {}
+    for (head, key), vals in heads.items():
+        # metrics keys look like "hr_2025" / "team_runs_2025" — strip the
+        # trailing year to recover the train-side head key
+        base_name = head.rsplit("_", 1)[0]
+        base_name = {"team_runs": "total"}.get(base_name, base_name)
+        best = min(vals, key=vals.get)
+        if abs(best - global_d) > 1e-9:
+            head_key[base_name] = best
+    if head_key:
+        print(f"\nper-head winners differing from the global "
+              f"{global_d:.2f} — paste into train.RECENCY_HEAD_DECAY "
+              f"(the chain's paired read verdicts the dict as a package):")
+        print("RECENCY_HEAD_DECAY = {")
+        for k in sorted(head_key):
+            print(f'    "{k}": {head_key[k]:.2f},')
+        print("}")
+    else:
+        print(f"\nno per-head winner differs from the global {global_d:.2f} "
+              f"— keep RECENCY_HEAD_DECAY empty")
+    print("\nnext: bake the global winner into train.RECENCY_DECAY and any "
+          "clear per-head winners into train.RECENCY_HEAD_DECAY — the ship "
+          "chain's paired read verdicts them.")
 
 
 def main():

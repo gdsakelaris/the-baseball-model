@@ -233,7 +233,20 @@ def predict_prop(prop, X):
     feature selection) carry their own column list. Backwards-compatible
     with older {model, iso} artifacts. blend_space (2026-07-15) says which
     space the blend weight was fit in — log-odds for new artifacts; absent
-    key = old artifact = probability space."""
+    key = old artifact = probability space.
+
+    fstack artifacts (2026-07-15 PM diversity batch): the per-family
+    logistic stack replaces the single blend weight — rebuild the design
+    matrix [per-family mean logits..., LR logit] via features.family_logits
+    (the exact arithmetic train.py fit the stack on) and apply the stored
+    stack, then the calibrator."""
+    if "fstack" in prop:
+        Xp = X[prop["cols"]] if "cols" in prop else X
+        members = getattr(prop["gbm"], "models", [prop["gbm"]])
+        zf = F.family_logits(members, prop["fam_slices"], Xp)
+        zl = F.logit(prop["lr"].predict_proba(Xp[prop["lr_cols"]])[:, 1])
+        Z = np.column_stack([zf[f] for f in prop["fstack_fams"]] + [zl])
+        return prop["iso"].predict(prop["fstack"].predict_proba(Z)[:, 1])
     if "gbm" in prop:
         Xp = X[prop["cols"]] if "cols" in prop else X
         g = prop["gbm"].predict_proba(Xp)[:, 1]
@@ -258,7 +271,39 @@ def predict_win(win_art, X, mu_home, mu_away):
     then (when trained with one) a second blend with the runs-model Poisson
     win probability, then isotonic calibration. Backwards-compatible with
     artifacts that have no Poisson blend (w_ml defaults to 1) and with
-    pre-blend_space artifacts (absent key = probability space)."""
+    pre-blend_space artifacts (absent key = probability space).
+
+    fstack artifacts (2026-07-15 PM): one logistic stack over [per-family
+    mean logits..., LR logit(, Poisson logit)] replaces both grid weights —
+    the same design matrix train.fit_winner.zparts builds. WINNER_MIRROR
+    artifacts carry persp_home in their column list; serving always scores
+    the real home orientation, so it is pinned to 1.0 here (train-time
+    mirrored copies are the only persp_home=0 rows that ever exist)."""
+    if "persp_home" in win_art.get("cols", []):
+        X = X.copy()
+        X["persp_home"] = 1.0
+    if "fstack" in win_art:
+        members = getattr(win_art["gbm"], "models", [win_art["gbm"]])
+        slices = win_art["fam_slices"]
+        fams = win_art["fstack_fams"]
+        zf = F.family_logits(members, slices, X[win_art["cols"]])
+        zcols = [zf[f] for f in fams]
+        zcols.append(F.logit(
+            win_art["lr"].predict_proba(X[win_art["lr_cols"]])[:, 1]))
+        if win_art.get("fstack_pois"):
+            pois = np.array([poisson_win(h, a) for h, a in
+                             zip(np.atleast_1d(mu_home),
+                                 np.atleast_1d(mu_away))])
+            n_fam = np.array([slices[f][1] - slices[f][0] for f in fams],
+                             float)
+            zg = np.column_stack(zcols[:len(fams)]) @ (n_fam / n_fam.sum())
+            with np.errstate(invalid="ignore"):
+                zp = np.where(np.isfinite(pois),
+                              F.logit(np.nan_to_num(pois, nan=0.5)), zg)
+            zcols.append(zp)
+        Z = np.column_stack(zcols)
+        return win_art["iso"].predict(
+            win_art["fstack"].predict_proba(Z)[:, 1])
     space = win_art.get("blend_space", "prob")
     g = win_art["gbm"].predict_proba(X[win_art["cols"]])[:, 1]
     l = win_art["lr"].predict_proba(X[win_art["lr_cols"]])[:, 1]
@@ -1296,12 +1341,17 @@ GLOSSARY = [
      "point estimate: the column earns depth only if the LOWER BOUND of its "
      "odds-ratio top-pick lift clears the bar (base-rate-fair, so a "
      "high-base column like Hit competes on equal footing) and its "
-     "calibration slope is sane; the depth is then capped by the tier of its "
-     "Score_lo — the day-block-bootstrap LOWER bound of the rankings Score "
+     "calibration slope is sane; the base depth ramps with the strength of "
+     "that lower bound (5 cells at the 1.55 gate rising linearly to 10 at "
+     "2.5 — no cliff, and full depth only for exceptional selection "
+     "power), then is capped by the tier of its Score_lo — the "
+     "day-block-bootstrap LOWER bound of the rankings Score "
      "(for O/U columns, a 50/50 blend of the market row and that line's own "
      "row, so both PROP_RANKINGS tables vote): up to 10 cells for STRONG or "
-     "better, 7 for SOLID, 5 for DECENT, 4 for LOW CEILING, 2 below that, "
-     "across the whole slate. So a THIN market (a rare prop, a deep line) "
+     "better, 7 for SOLID, 5 for DECENT, 4 for LOW CEILING, and ZERO below "
+     "that — a column whose PROVEN tier is AVOID paints nothing, however "
+     "its point estimate looks. The PROP_RANKINGS 'Blue' column shows each "
+     "market's depth. So a THIN market (a rare prop, a deep line) "
      "carries a wide "
      "interval, a lower Score_lo, and shallower blue — it can no longer buy "
      "depth on one good season. Marks are OVER-side only, ranked by "
@@ -1723,12 +1773,16 @@ def _bets_sheet(bets_df, note):
 # held-out diagnostics say are its best use — the prop-rankings playbook
 # applied to today's slate. Data-driven, no odds for SELECTION.
 #
-# HOW DEEP a column is painted is decided in prop_rankings.quality_playbook()
+# HOW DEEP a column is painted is decided in
+# 5_prop_rankings.quality_playbook()
 # (single source of truth with the rankings workbook, so the two can never
 # disagree) and is CI-AWARE end to end: a column earns depth only when the
 # LOWER BOUND of its odds-ratio top-pick lift clears the floor and its
-# calibration slope is sane, and that depth is then capped by the tier of its
-# Score LOWER BOUND — the day-block-bootstrap Score_lo, not a point estimate.
+# calibration slope is sane; the base depth ramps 5->10 with that lower
+# bound (linear from LB 1.55 to 2.5 — no cliff, 10-deep reserved for
+# exceptional columns), and is then capped by the tier of its Score
+# LOWER BOUND — the day-block-bootstrap Score_lo, not a point estimate —
+# with an AVOID lower bound painting NOTHING (2026-07-15).
 # So a thin market (SB, a deep K line) can no longer buy deep blue on a lucky
 # season: its CI is wide, its Score_lo falls, its depth shrinks. Odds-ratio
 # lift (top-pick odds / base odds) rather than raw lift, because raw lift caps
@@ -1748,8 +1802,9 @@ def _bets_sheet(bets_df, note):
 #     number is dropped). Odds never SELECT a blue mark — that stays green.
 #
 # Diagnostics come LIVE from the paired snapshots + artifacts via
-# prop_rankings (the same numbers PROP_RANKINGS prints, but never read from
-# that xlsx — it goes stale; the snapshots refresh with every baseline). The
+# 5_prop_rankings (the same numbers PROP_RANKINGS prints, but never read
+# from that xlsx — it goes stale; the snapshots refresh with every
+# baseline). The
 # bootstrap behind Score_lo is disk-cached by snapshot fingerprint, so the
 # first call after a baseline pays ~1 min and every later serve is instant.
 QUALITY_BASE_MULT, QUALITY_BASE_PAD = 2.0, 0.10
@@ -1762,21 +1817,24 @@ QUALITY_FAIR_VETO = 0.5
 def quality_marks(out, specs=None):
     """{sheet: [(row_match, display_column), ...]} of rank-quality picks to
     paint light blue. Depth per column comes from
-    prop_rankings.quality_playbook() — CI-aware (odds-ratio lift LOWER bound
-    + Score_lo tier cap), shared with the rankings workbook. This function
+    5_prop_rankings.quality_playbook() — CI-aware (odds-ratio lift LOWER
+    bound + Score_lo tier cap), shared with the rankings workbook. This function
     only applies it to TODAY's slate: OVER side, top-`depth` by P(over), each
     clearing the informedness floor over that column's own base rate and — if
     the odds store prices the exact market/line — the sharp-consensus veto.
     Fails soft: any problem returns no marks (or just no veto), never blocks
     the workbook."""
     try:
-        # prop_rankings lives in Tools/ (the manually-run toolkit); when
+        # 5_prop_rankings lives in Tools/ (the manually-run toolkit); when
         # this runs under the GUI the Tools dir is already importable, but
-        # a direct `python Model/predict.py` run needs it on the path.
+        # a direct `python Model/predict.py` run needs it on the path. The
+        # digit-leading name can't be a plain `import` statement, so it
+        # loads via importlib.
+        import importlib
         tools_dir = str(Path(__file__).resolve().parents[1] / "Tools")
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
-        import prop_rankings as R
+        R = importlib.import_module("5_prop_rankings")
         book = R.quality_playbook()
     except Exception:
         return {}

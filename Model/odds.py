@@ -128,7 +128,7 @@ def sharp_fair(g, book_col="Book"):
     """Consensus fair P(over) for ONE group of same-market/line rows that were
     already de-vigged into a 'fair' column: the sharp book's quote when it
     posts the line, else the median across books. Shared by every consensus
-    builder (prop_rankings MktEdge%, evaluate_deep Section 9, predict Bets
+    builder (5_prop_rankings MktEdge%, evaluate_deep Section 9, predict Bets
     sheet) so they all grade against the same reference."""
     s = g.loc[g[book_col].astype(str).str.lower() == SHARP_BOOK, "fair"].dropna()
     return float(s.median()) if len(s) else float(g["fair"].median())

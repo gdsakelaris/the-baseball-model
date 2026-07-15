@@ -13,6 +13,7 @@ import datetime as dt
 import re
 import threading
 import tkinter as tk
+import warnings
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -21,6 +22,12 @@ import pandas as pd
 import sys
 # the prediction engine (predict.py and friends) lives in Model/
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Model"))
+
+# Silence known-benign pandas noise from the prediction engine (mixed-type
+# CSV column inference and fragmented-frame inserts in features.py). The
+# engine sources are fingerprint-guarded, so the suppression lives here.
+warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "Data"
 LOGO_PATH = Path(__file__).resolve().parents[1] / "MLB-Logo.png"

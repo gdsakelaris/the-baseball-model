@@ -106,6 +106,42 @@ class MeanBag:
         return g / g.sum(axis=1, keepdims=True)
 
 
+class FamilyBlendBag(MeanBag):
+    """Count-head bag whose FAMILIES get unequal weight (2026-07-15 PM batch):
+    predict() is the fam_w-weighted average of per-family member-mean
+    predictions, weights chosen on the calibration year by Poisson/Tweedie
+    deviance (train.fit_poisson). Subclasses MeanBag so every members-aware
+    consumer (feature_select's family votes, evaluate_deep's importances,
+    predict._force_xgb_cpu) sees the same .models contract unchanged."""
+
+    def __init__(self, models, slices, fam_w):
+        super().__init__(models)
+        self.slices = dict(slices)      # family -> (start, end) into models
+        self.fam_w = dict(fam_w)        # family -> weight (sums to 1)
+
+    def predict(self, X):
+        preds = [m.predict(X) for m in self.models]
+        out = None
+        for fam, (a, b) in self.slices.items():
+            mu = np.mean(preds[a:b], axis=0) * self.fam_w[fam]
+            out = mu if out is None else out + mu
+        return out
+
+
+def logit(p, lo=1e-6):
+    p = np.clip(np.asarray(p, dtype=float), lo, 1 - lo)
+    return np.log(p / (1 - p))
+
+
+def family_logits(models, slices, X):
+    """{family: mean member logit} over a binary bag's members — the shared
+    fit/serve arithmetic of the per-family stack (train.py fits the stack on
+    these columns; predict.predict_prop/predict_win rebuild them), living here
+    so the two sides can never drift. slices maps family -> (start, end)."""
+    zs = [logit(m.predict_proba(X)[:, 1], lo=1e-7) for m in models]
+    return {fam: np.mean(zs[a:b], axis=0) for fam, (a, b) in slices.items()}
+
+
 class InfSafe:
     """Wrap a model whose library rejects ±inf (XGBoost) for use in a MeanBag
     next to LightGBM members that tolerate them: numeric ±inf -> NaN at
@@ -202,18 +238,22 @@ class PlattCal:
         p = np.clip(np.asarray(p, dtype=float), 1e-6, 1 - 1e-6)
         return np.log(p / (1 - p))
 
-    def fit(self, p, y, iters=25, ridge=1e-4):
+    def fit(self, p, y, iters=25, ridge=1e-4, w=None):
+        """w = optional per-row sample weights (multi-year pooled calibration
+        support discounts the older year); w=None is bit-identical to the
+        unweighted incumbent."""
         z = self._logit(p)
         y = np.asarray(y, dtype=float)
+        wt = np.ones_like(y) if w is None else np.asarray(w, dtype=float)
         a, b = 1.0, 0.0
         for _ in range(iters):
             q = 1.0 / (1.0 + np.exp(-(a * z + b)))
-            w = np.clip(q * (1 - q), 1e-6, None)
-            g0 = float(((q - y) * z).sum())        # d(nll)/da
-            g1 = float((q - y).sum())              # d(nll)/db
-            h00 = float((w * z * z).sum()) + ridge
-            h01 = float((w * z).sum())
-            h11 = float(w.sum()) + ridge
+            wq = np.clip(q * (1 - q), 1e-6, None) * wt
+            g0 = float((wt * (q - y) * z).sum())   # d(nll)/da
+            g1 = float((wt * (q - y)).sum())       # d(nll)/db
+            h00 = float((wq * z * z).sum()) + ridge
+            h01 = float((wq * z).sum())
+            h11 = float(wq.sum()) + ridge
             det = h00 * h11 - h01 * h01
             if not np.isfinite(det) or det <= 0:
                 break
@@ -252,13 +292,14 @@ class BetaCal:
         return np.log(p), -np.log(1 - p)
 
     @staticmethod
-    def _irls(Z, y, iters=50, ridge=1e-4):
+    def _irls(Z, y, iters=50, ridge=1e-4, w=None):
+        wt = np.ones_like(y) if w is None else np.asarray(w, dtype=float)
         beta = np.zeros(Z.shape[1])
         for _ in range(iters):
             q = 1.0 / (1.0 + np.exp(-(Z @ beta)))
-            w = np.clip(q * (1 - q), 1e-6, None)
-            g = Z.T @ (q - y) + ridge * beta
-            H = (Z * w[:, None]).T @ Z + ridge * np.eye(Z.shape[1])
+            wq = np.clip(q * (1 - q), 1e-6, None) * wt
+            g = Z.T @ ((q - y) * wt) + ridge * beta
+            H = (Z * wq[:, None]).T @ Z + ridge * np.eye(Z.shape[1])
             try:
                 step = np.linalg.solve(H, g)
             except np.linalg.LinAlgError:
@@ -268,20 +309,22 @@ class BetaCal:
                 break
         return beta
 
-    def fit(self, p, y):
+    def fit(self, p, y, w=None):
+        """w = optional per-row sample weights (multi-year pooled calibration
+        support); w=None is bit-identical to the unweighted incumbent."""
         u, v = self._uv(p)
         y = np.asarray(y, dtype=float)
         ones = np.ones_like(u)
-        beta = self._irls(np.column_stack([u, v, ones]), y)
+        beta = self._irls(np.column_stack([u, v, ones]), y, w=w)
         a, b, c = beta
         if a < 0:                      # drop ln(p), refit on -ln(1-p) alone
-            b, c = self._irls(np.column_stack([v, ones]), y)
+            b, c = self._irls(np.column_stack([v, ones]), y, w=w)
             a = 0.0
         if b < 0:                      # drop -ln(1-p), refit on ln(p) alone
-            a, c = self._irls(np.column_stack([u, ones]), y)
+            a, c = self._irls(np.column_stack([u, ones]), y, w=w)
             b = 0.0
         if a < 0:                      # both dropped: intercept-only fallback
-            a, (c,) = 0.0, self._irls(ones[:, None], y)
+            a, (c,) = 0.0, self._irls(ones[:, None], y, w=w)
         self.a = float(np.clip(a, 0.0, 20.0))
         self.b = float(np.clip(b, 0.0, 20.0))
         self.c = float(np.clip(c, -20.0, 20.0))
@@ -291,6 +334,25 @@ class BetaCal:
         u, v = self._uv(p)
         q = 1.0 / (1.0 + np.exp(-(self.a * u + self.b * v + self.c)))
         return np.clip(q, self.lo, 1 - self.lo)
+
+
+class BaggedCal:
+    """Day-block bootstrap bag of calibrators (2026-07-15 PM batch): B
+    calibrators of the SAME kind, each fit on a with-replacement resample of
+    the calibration DAYS (the paired read's unit of independence), served as
+    the mean curve. Smooths isotonic's thin-support steps and stabilizes
+    Platt/beta slope+intercept against single-year sampling noise — the
+    lever aimed at the observed 2025->2026 ECE decay. Same predict()
+    contract as IsotonicRegression/PlattCal/BetaCal, so it drops in under
+    the artifact's "iso" key. Lives here so pickles resolve from any entry
+    point (MeanBag precedent)."""
+
+    def __init__(self, cals, kind=""):
+        self.cals = list(cals)
+        self.kind = kind                # e.g. "beta+bag25" (metrics label)
+
+    def predict(self, p):
+        return np.mean([c.predict(p) for c in self.cals], axis=0)
 
 
 def blend(a, b, w, space="logit"):

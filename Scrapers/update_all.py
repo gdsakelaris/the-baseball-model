@@ -39,7 +39,7 @@ import validate_data as V
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 MODEL_TRAIN = SCRIPTS_DIR.parent / "Model" / "train.py"
-PROP_RANKINGS = SCRIPTS_DIR.parent / "Tools" / "prop_rankings.py"
+PROP_RANKINGS = SCRIPTS_DIR.parent / "Tools" / "5_prop_rankings.py"
 DATA_DIR = V.DATA_DIR
 BACKUP_DIR = V.BACKUP_DIR
 # machine-readable outcome of the last run; the GUI reads this at startup
@@ -170,6 +170,31 @@ def experiment_in_flight():
     return False
 
 
+def confirm_is_stale():
+    """True when the shipped Model sources differ from the ones the last
+    2026 confirm stamp was made under (confirm_code_fp.json, written by
+    evaluate_deep --confirm --set-baseline) — i.e. a ship landed since that
+    stamp. The daily job then re-stamps the confirm ONCE (audit #6 as
+    amended 2026-07-15: auto-on-ship, user directive), so the README's
+    enumerated-looks ledger grows at most one entry per ship. Unlike
+    experiment_in_flight() — which fails OPEN on a missing fingerprint so
+    pre-feature snapshots don't strand the daily train — a missing or
+    unreadable file here means a pre-feature confirm: stamp once to
+    bootstrap. The experiment_in_flight() gate has already guaranteed the
+    tree is shipped code by the time this runs."""
+    import hashlib
+    fp_file = MODEL_TRAIN.parent / "artifacts" / "confirm_code_fp.json"
+    try:
+        base = json.loads(fp_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return True
+    for name, digest in base.items():
+        p = MODEL_TRAIN.parent / name
+        if not p.exists() or hashlib.md5(p.read_bytes()).hexdigest() != digest:
+            return True
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--retrain", action="store_true",
@@ -213,19 +238,25 @@ def main():
             # the state right here. The experiment_in_flight() gate above
             # guarantees this only ever snapshots SHIPPED code.
             if ok:
-                # 2026-07-15 (audit #6, user decision): the daily job no
-                # longer runs `--confirm --set-baseline`. 2026 is
-                # confirm-only doctrine — its snapshot/workup refreshes ONLY
-                # when the user deliberately runs
-                #   python Model/evaluate_deep.py --confirm --set-baseline
-                # after a finished change. Blue-mark/rankings inputs read
-                # that last deliberate snapshot (it ages between confirms).
-                # Only the selection-year baseline refreshes daily.
+                # 2026 confirm doctrine (audit #6, amended 2026-07-15 —
+                # auto-on-ship, user directive): the selection-year baseline
+                # refreshes daily, but the 2026 confirm snapshot re-stamps
+                # ONLY on the first daily train after a ship (shipped
+                # sources differ from confirm_code_fp.json — see
+                # confirm_is_stale). Between ships the daily job never adds
+                # a 2026 look; each auto stamp is one ledgered look per
+                # ship. Blue-mark/rankings inputs read the last confirm
+                # snapshot, so it ages between ships by design.
                 ev = str(MODEL_TRAIN.parent / "evaluate_deep.py")
+                steps = [("evaluate_deep.py --set-baseline",
+                          [ev, "--set-baseline"])]
+                if confirm_is_stale():
+                    steps.append((
+                        "evaluate_deep.py --confirm --set-baseline "
+                        "(auto ship-confirm)",
+                        [ev, "--confirm", "--set-baseline"]))
                 base_ok = True
-                for label, cmd in (
-                        ("evaluate_deep.py --set-baseline",
-                         [ev, "--set-baseline"]),):
+                for label, cmd in steps:
                     ok, took = run(label, cmd)
                     results.append((label, ok, took))
                     all_ok = all_ok and ok
@@ -241,7 +272,7 @@ def main():
                 # cache costs one slow serve, never correctness, and a perf
                 # nicety must not be able to turn the nightly run FAILED.
                 if base_ok:
-                    w_ok, took = run("prop_rankings.py --warm-cache",
+                    w_ok, took = run("5_prop_rankings.py --warm-cache",
                                      [str(PROP_RANKINGS), "--warm-cache"])
                     results.append(("warm quality-bootstrap cache "
                                     "(non-fatal)", w_ok, took))

@@ -1,7 +1,7 @@
 """Train the MLB prediction models.
 
-Models (LightGBM seed bags; XGBoost + CatBoost family members join when
-LGBM_ONLY_TEMP is False — the shipped 3-family ensemble):
+Models (LightGBM seed bags + CatBoost family members — the 2-family
+ensemble, 2026-07-15 PM: XGBoost retired permanently, wiring kept):
   batter props (binary, Platt-calibrated): the 24 heads in PROPS below
     (hit/run/RBI/TB/K/H+R+RBI thresholds, single/double/triple, sb, bb)
   k     starter strikeouts in the game              Poisson regression
@@ -53,6 +53,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (brier_score_loss, log_loss, mean_absolute_error,
+                             mean_poisson_deviance, mean_tweedie_deviance,
                              roc_auc_score)
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
@@ -102,13 +103,23 @@ RECENCY_DECAY = 0.95   # swept 2026-07-15 {1.0,.95,.9,.8} on the selection
                        # ship chain's paired read verdicts it in-batch.
 
 
-def _recency_w(frame, cal_yr):
-    """Per-row training weights RECENCY_DECAY**(cal_yr - Season); None when
-    the decay is off so every fit call stays bit-identical to the incumbent."""
-    if RECENCY_DECAY >= 1.0:
+def _decay_for(head_key):
+    """Effective recency decay for one head: the per-head override when
+    baked (RECENCY_HEAD_DECAY, from decay_sweep --per-head), else the
+    global RECENCY_DECAY. head_key = lowercase prop/count name, or
+    "k"/"total"/"winner"."""
+    return RECENCY_HEAD_DECAY.get(head_key, RECENCY_DECAY)
+
+
+def _recency_w(frame, cal_yr, decay=None):
+    """Per-row training weights decay**(cal_yr - Season); None when the
+    decay is off so every fit call stays bit-identical to the incumbent."""
+    if decay is None:
+        decay = RECENCY_DECAY
+    if decay >= 1.0:
         return None
     yrs = np.clip(cal_yr - frame["Season"].to_numpy(dtype=float), 0, None)
-    return RECENCY_DECAY ** yrs
+    return decay ** yrs
 
 
 # GBM-vs-LR blend space (2026-07-15, tier-1 mechanics batch): the 21-point
@@ -119,6 +130,57 @@ def _recency_w(frame, cal_yr):
 # Artifacts carry blend_space so predict.py serves the same arithmetic;
 # absent key = old artifact = probability space. "prob" restores incumbent.
 BLEND_SPACE = "logit"
+
+# ---------------------------------------------------------------------------
+# 2026-07-15 PM diversity/calibration batch (user-directed, one ship chain):
+# every mechanism below lands together and the chain's evaluate_deep --paired
+# read adjudicates the package. Each flag reverts its piece independently.
+# ---------------------------------------------------------------------------
+# Per-family logistic stacking: instead of the 21-point grid over ONE weight
+# between the pooled GBM bag mean and the LR, a small logistic regression on
+# [per-family mean logits..., LR logit] fit on the calibration year gives
+# free PER-FAMILY weights (the N-member generalization of the BLEND_SPACE
+# note above — the grid was exactly the 2-member stack). Members' logits are
+# highly correlated, so a mild ridge (FSTACK_C) keeps coefficients stable
+# across retrains; the downstream calibrator absorbs any global shrink.
+# False restores the incumbent grid path exactly.
+FAMILY_STACK = True
+FSTACK_C = 50.0
+# Bagged calibrators: B bootstrap resamples of the calibration DAYS, one
+# calibrator (of the AUTO_CAL-chosen kind) per resample, served as the mean
+# curve (features.BaggedCal). Targets the observed 2025->2026 ECE decay:
+# part of it is single-year calibrator variance, which bagging shrinks.
+# 0 = off (single full-year fit, the incumbent).
+CAL_BAG_B = 25
+# Multi-year calibration support: pool the PRIOR year's honest out-of-sample
+# scores (from the suite trained one season back — the selection suite's
+# boosters, captured in _CAL_STASH at zero extra train cost) into the
+# stack/calibrator/line-cal/dispersion fits, older year discounted by
+# CAL_POOL_DECAY. Doubles the pricing support without touching what the
+# boosters learn. The SELECTION suite has no earlier sibling in a standard
+# run, so it pools only under --prestash (an extra throwaway suite train) —
+# without it the 2025 paired read sees every OTHER change but not this one,
+# and the 2026 confirm is the multi-year read. False = off.
+MULTI_YEAR_CAL = True
+CAL_POOL_DECAY = 0.75
+# Early-stop refit: after each booster member early-stops on its ~10%
+# GamePk holdout (audit fix #2), refit that member at its chosen iteration
+# count on 100% of the training rows — recovering the 10% data sacrifice.
+# Keep-trains only (the superset electorate stays cheap); roughly doubles
+# booster fit time. False = serve the ES-fit members (the incumbent).
+ES_REFIT = True
+# Winner mirror augmentation: the winner trains on ~10k games — every other
+# head's smallest data by 20x. Each TRAIN row is duplicated with home/away
+# swapped (paired cols exchanged, d_* diffs negated, elo_prob_home flipped,
+# y inverted) and persp_home 1->0 marking the flipped perspective, doubling
+# effective rows; cal/test rows are NEVER mirrored and serving always sends
+# persp_home=1. False = off.
+WINNER_MIRROR = True
+# Per-head recency decay: overrides RECENCY_DECAY for listed heads (keys =
+# prop names / count names / "k" / "total" / "winner"). Populate from
+# decay_sweep.py --per-head output; --decay CLI overrides EVERYTHING (sweep
+# isolation).
+RECENCY_HEAD_DECAY = {}
 
 # Monotonic constraints (HR only): physics/domain says HR probability can
 # only rise with these — exit velo, barrel rate, own HR rate, HR-friendly
@@ -175,17 +237,19 @@ LGBM_BAGS = 6   # shipped keep-train (6 bags, user 07-15); superset overridden t
 # tolerates them), hence features.InfSafe. Set XGB_BAGS = 0 to revert to
 # pure-LightGBM everywhere.
 #
-# 2026-07-14 (user): LGBM_ONLY_TEMP drops the XGB+CB families so the
-# FINISH_PLAN build batch can iterate on retrains cheaply (6 LGBM bags per
-# head only). Downstream adapts on its own: feature_select votes only the
-# families present, predict's _force_xgb_cpu no-ops, param_sweep reads
-# these constants.
-# 2026-07-15 (user): NO LONGER TEMP — the shipped ensemble stays LGBM-only
-# (6-bag + LR blend) for the foreseeable future; the FINAL chain ships with
-# this flag True. The XGB/CB wiring stays intact (weights included) so
-# flipping False deliberately brings the 3-family ensemble back whole.
-LGBM_ONLY_TEMP = True
-XGB_BAGS = 0 if LGBM_ONLY_TEMP else 2  # 2 = SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
+# 2026-07-14 (user): LGBM_ONLY_TEMP dropped the XGB+CB families so the
+# FINISH_PLAN build batch could iterate on retrains cheaply.
+# 2026-07-15 PM (user, diversity batch): the flag is RETIRED and the family
+# roster is now explicit — CatBoost returns at 2 bags (the exact quantity
+# shipped+validated 07-13; a third split policy the LGBM reseeds cannot
+# express), XGBoost is retired PERMANENTLY at 0 (user call; the InfSafe
+# wiring below stays intact as rollback insurance, and feature_select /
+# predict._force_xgb_cpu / param_sweep all adapt to whatever families are
+# present). NOTE: the current keep-lists + PROP_PARAMS were swept under the
+# LGBM-only regime, so CB rejoins on a keep-list it didn't vote on — the
+# chain's evaluate_deep --paired read is the arbiter, and the next
+# feature_select regen (fresh superset train) lets CB vote.
+XGB_BAGS = 0    # RETIRED permanently (user 2026-07-15 PM); wiring kept
 XGB_CLS = dict(n_estimators=3000, learning_rate=0.03, tree_method="hist",
                grow_policy="lossguide", max_leaves=127, max_depth=0,
                min_child_weight=16, subsample=0.8, colsample_bytree=0.8,
@@ -211,11 +275,10 @@ XGB_WIN = dict(n_estimators=3000, learning_rate=0.02, tree_method="hist",
 # depth-wise trees + ordered target statistics for categoricals — a third
 # split policy in the bag. Depth ~8 approximates the LGBM/XGB capacity;
 # features.CatSafe handles its quirks (no NaN cats, no inf, Poisson/Tweedie
-# predict needs Exponent). Set CB_BAGS = 0 to drop the family. Wired and
-# smoke-tested 2026-07-10 but held at 0 for the XGB confirm (CatBoost fits
-# cost 2-4x XGB — a three-family full train couldn't land before the 06:00
-# job); flip to 2 as the next selection-year iteration.
-CB_BAGS = 0 if LGBM_ONLY_TEMP else 2  # 2 = SHIPPED 07-13: 3-family ensemble on the 07-12 features + 3-family keep-list
+# predict needs Exponent). Set CB_BAGS = 0 to drop the family. CatBoost
+# fits cost 2-4x an XGB fit (GPU) — time the first keep-train against the
+# 06:00 window (see the 07-15 PM batch runbook) before trusting the cadence.
+CB_BAGS = 2     # RESTORED 2026-07-15 PM (user): the 07-13 shipped quantity
 CB_CLS = dict(iterations=3000, learning_rate=0.03, depth=8,
               l2_leaf_reg=3.0, loss_function="Logloss",
               eval_metric="Logloss", early_stopping_rounds=150,
@@ -344,6 +407,11 @@ FEATURE_KEEP = _feature_keep()
 _KEEP_TRAIN = bool(FEATURE_KEEP)
 if not _KEEP_TRAIN:
     LGBM_BAGS = 3
+    # cheap electorate (user re-affirmed 07-15): the superset carries ONE
+    # CatBoost member so the family still votes in feature_select, at half
+    # the CB cost; the known regime mismatch (audit #3) widens accordingly
+    # and selection_report.json records both regimes as before.
+    CB_BAGS = min(CB_BAGS, 1)
 _SUPERSET_SAMPLE = 0 if _KEEP_TRAIN else 120_000   # train-row cap; 0 = all rows
 
 # Early-stopping holdout (2026-07-15, audit fix #2): boosters used to
@@ -413,7 +481,25 @@ PROPS = {
 # what the donors know — they see the same features. Machinery stays
 # (predict.apply_stack + the two-pass loops are pass-through no-ops);
 # repopulate this dict to retry with different donors.
-STACK_DONORS = {}
+# RE-TEST (2026-07-15 PM batch, doctrine: benched verdicts are time-stamped,
+# not law): the 07-07 bench tried CROSS-stat donors on medium-thin heads and
+# predates the 36-head board entirely. This retry is a different hypothesis —
+# SAME-LADDER donors for the genuinely thin deep-threshold heads (triple
+# 1.2% base rate, the H4 4+/3+ family, the H1 deep binaries): the lower rung
+# sees the same features but at 5-20x the positive-label support, so its
+# logit is a shrinkage target the thin head's own model cannot manufacture.
+# Ladder PAV runs downstream of the stack (predict/evaluate order:
+# predict_prop -> apply_stack -> enforce_ladders), so coherence is preserved.
+# Each head's verdict is per-head local in the paired read — keep winners,
+# re-bench losers.
+STACK_DONORS = {
+    "triple": ("double", "hit"),
+    "bk3":    ("bk2",),
+    "tb4":    ("tb3",),
+    "hrr4":   ("hrr3",),
+    "rbi2":   ("rbi",),
+    "run2":   ("run",),
+}
 
 # Calibrator choice per head. Default = cal-year isotonic. PLATT_CAL heads
 # use features.PlattCal (2-parameter logistic on the blended logit) instead:
@@ -449,27 +535,99 @@ def _make_cal(kind):
     return IsotonicRegression(out_of_bounds="clip", y_min=1e-4, y_max=1 - 1e-4)
 
 
-def _pick_calibrator(s_cal, y, gamepk, name):
-    """(fitted calibrator, kind) for one head's cal-year blended scores."""
+def _fit_cal(kind, s, y, w=None):
+    """Fit one calibrator of `kind`, routing optional sample weights to the
+    right argument per implementation (isotonic takes sample_weight; the
+    custom Platt/beta fits take w)."""
+    c = _make_cal(kind)
+    if w is None:
+        return c.fit(s, y)
+    if kind in ("platt", "beta"):
+        return c.fit(s, y, w=w)
+    return c.fit(s, y, sample_weight=w)
+
+
+def _bag_cal(kind, s, y, dates, w=None):
+    """Day-block bootstrap bag of CAL_BAG_B calibrators (features.BaggedCal),
+    the mean curve served. Resamples DAYS with replacement — the paired
+    read's unit of independence — so the bag reflects between-day variance,
+    not just row noise. Degenerate resamples (single class) are skipped; if
+    everything degenerates, falls back to the single full fit."""
+    if not CAL_BAG_B:
+        return _fit_cal(kind, s, y, w), kind
+    dates = np.asarray(dates)
+    days = np.unique(dates)
+    idx_of_day = {d: np.flatnonzero(dates == d) for d in days}
+    rng = np.random.default_rng(0)
+    members = []
+    for _ in range(CAL_BAG_B):
+        take = np.concatenate([idx_of_day[d] for d in
+                               rng.choice(days, size=len(days), replace=True)])
+        yb = y[take]
+        if yb.std() == 0:
+            continue
+        members.append(_fit_cal(kind, s[take], yb,
+                                None if w is None else w[take]))
+    if not members:
+        return _fit_cal(kind, s, y, w), kind
+    kind_b = f"{kind}+bag{len(members)}"
+    return F.BaggedCal(members, kind=kind_b), kind_b
+
+
+def _pick_calibrator(s_cal, y, gamepk, name, dates=None, w=None):
+    """(fitted calibrator, kind) for one head's cal blended scores. The CV
+    pick runs on the (possibly multi-year pooled, weighted) support; the
+    winner is then day-block bagged when CAL_BAG_B > 0 and `dates` are
+    given, else fit once on the full support (the incumbent path)."""
+    y = np.asarray(y, dtype=float)
     if not AUTO_CAL:
         kind = "platt" if name.lower() in PLATT_CAL else "iso"
-        return _make_cal(kind).fit(s_cal, y), kind
-    folds = np.asarray(gamepk).astype(np.int64) % 5
-    y = np.asarray(y, dtype=float)
-    best_kind, best_ll = "platt", np.inf
-    for kind in CAL_CANDIDATES:
-        lls = []
-        for f in range(5):
-            tr_m, va_m = folds != f, folds == f
-            # degenerate fold (single class either side, or too thin) -> skip
-            if va_m.sum() < 50 or y[tr_m].std() == 0 or y[va_m].std() == 0:
-                continue
-            c = _make_cal(kind).fit(s_cal[tr_m], y[tr_m])
-            p = np.clip(c.predict(s_cal[va_m]), 1e-6, 1 - 1e-6)
-            lls.append(log_loss(y[va_m], p))
-        if lls and np.mean(lls) < best_ll - 1e-9:
-            best_ll, best_kind = float(np.mean(lls)), kind
-    return _make_cal(best_kind).fit(s_cal, y), best_kind
+    else:
+        folds = np.asarray(gamepk).astype(np.int64) % 5
+        best_kind, best_ll = "platt", np.inf
+        for kind in CAL_CANDIDATES:
+            lls = []
+            for f in range(5):
+                tr_m, va_m = folds != f, folds == f
+                # degenerate fold (single class either side, too thin) -> skip
+                if va_m.sum() < 50 or y[tr_m].std() == 0 or y[va_m].std() == 0:
+                    continue
+                c = _fit_cal(kind, s_cal[tr_m], y[tr_m],
+                             None if w is None else w[tr_m])
+                p = np.clip(c.predict(s_cal[va_m]), 1e-6, 1 - 1e-6)
+                lls.append(log_loss(y[va_m], p,
+                                    sample_weight=None if w is None
+                                    else w[va_m]))
+            if lls and np.mean(lls) < best_ll - 1e-9:
+                best_ll, best_kind = float(np.mean(lls)), kind
+        kind = best_kind
+    if dates is not None:
+        return _bag_cal(kind, s_cal, y, dates, w)
+    return _fit_cal(kind, s_cal, y, w), kind
+
+
+# Multi-year calibration stash (2026-07-15 PM batch): the SELECTION suite
+# trains first and its calibration-year scores are honest out-of-sample for
+# the SHIPPING suite's train_yrs[-1] — so the shipping suite's stack /
+# calibrator / line-cal / dispersion fits can pool two years of support at
+# ZERO extra booster cost. Keyed ("prop"|"winner"|"count"|"lines", head,
+# cal_yr); populated by every fit, consumed when MULTI_YEAR_CAL and the
+# matching prior-year entry exists (i.e. the suites ran in this process,
+# same family/bag regime by construction).
+_CAL_STASH = {}
+
+
+def _pool_cal(cur, prior):
+    """Concatenate current-year and (discounted) prior-year cal support.
+    cur/prior = dicts of aligned 1-D arrays + a 'w' weight vector added
+    here: current year weight 1, prior year CAL_POOL_DECAY."""
+    out = {}
+    for k in cur:
+        out[k] = np.concatenate([np.asarray(prior[k]), np.asarray(cur[k])])
+    out["w"] = np.concatenate([
+        np.full(len(next(iter(prior.values()))), CAL_POOL_DECAY),
+        np.ones(len(next(iter(cur.values()))))])
+    return out
 
 # Count-style props: Poisson LGBM (starter-K pattern) + per-line logistic
 # calibrators fit on the calibration year (predict.count_over). Batter heads
@@ -584,16 +742,40 @@ def _fit_logistic(tr, cols, target, w=None):
     return pipe, num_cols
 
 
+def _refit_lgbm(ctor, p, best_iter, X, y, w):
+    """ES-refit: same params/seed at the ES-chosen iteration count, fit on
+    100% of the training rows (recovers the ~10% ES holdout sacrifice)."""
+    m = ctor(**{**p, "n_estimators": max(int(best_iter), 1)})
+    m.fit(X, y, sample_weight=w)
+    return m
+
+
+def _refit_cb(ctor, p, best_iter, X, y, w, cat_here, exponent=False):
+    p = {k: v for k, v in p.items() if k != "early_stopping_rounds"}
+    p["iterations"] = max(int(best_iter), 1)
+    seed = p.pop("_seed")
+    m = F.CatSafe(ctor(**p, random_seed=seed, cat_features=cat_here),
+                  cat_here, exponent=exponent)
+    m.fit(X, y, sample_weight=w)
+    return m
+
+
 def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
-                   params=None, n_bags=1, n_xgb=0, n_cb=0):
+                   params=None, n_bags=1, n_xgb=0, n_cb=0, head_key=None):
+    head_key = head_key or name.lower()
+    decay = _decay_for(head_key)
     tr = df[df["Season"].isin(train_yrs)]
     if _SUPERSET_SAMPLE and len(tr) > _SUPERSET_SAMPLE:   # superset train only
         tr = tr.sample(n=_SUPERSET_SAMPLE, random_state=0)
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr]
     fit, es = _es_split(tr)         # cal year never picks iteration counts
-    w_fit, w_es = _recency_w(fit, cal_yr), _recency_w(es, cal_yr)
-    models = []
+    w_fit, w_es = (_recency_w(fit, cal_yr, decay),
+                   _recency_w(es, cal_yr, decay))
+    w_tr = _recency_w(tr, cal_yr, decay)
+    do_refit = ES_REFIT and _KEEP_TRAIN
+    models, best_iters = [], []
+    slices, pos = {}, 0             # family -> (start, end) into models
     for b in range(n_bags):
         p = dict(params or LGB_CLS)
         if b:                       # bag 0 = the incumbent default seed
@@ -604,13 +786,24 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
               eval_sample_weight=None if w_es is None else [w_es],
               eval_metric="binary_logloss",
               callbacks=[lgb.early_stopping(150, verbose=False)])
+        bi = int(m.best_iteration_ or 0)
+        if do_refit and bi:
+            m = _refit_lgbm(lgb.LGBMClassifier, p, bi,
+                            tr[cols], tr[target], w_tr)
         models.append(m)
+        best_iters.append(bi)
+    slices["lgbm"] = (pos, len(models))
+    pos = len(models)
     for b in range(n_xgb):          # family members join AFTER the LGBM bag
         m = F.InfSafe(xgb_lib.XGBClassifier(**XGB_CLS, random_state=b))
         m.fit(fit[cols], fit[target], sample_weight=w_fit,
               sample_weight_eval_set=None if w_es is None else [w_es],
               eval_set=[(es[cols], es[target])], verbose=False)
         models.append(m)
+        best_iters.append(int(m.best_iteration_ or 0))
+    if n_xgb:
+        slices["xgb"] = (pos, len(models))
+        pos = len(models)
     cat_here = [c for c in cols if c in F.CAT_COLS]
     for b in range(n_cb):
         # CatBoost: train rows weighted; the ES eval stays unweighted (a
@@ -619,34 +812,86 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
                                          cat_features=cat_here), cat_here)
         m.fit(fit[cols], fit[target], sample_weight=w_fit,
               eval_set=[(es[cols], es[target])])
+        bi = int(m.best_iteration_ or 0)
+        if do_refit and bi:
+            m = _refit_cb(CatBoostClassifier, dict(CB_CLS, _seed=b), bi,
+                          tr[cols], tr[target], w_tr, cat_here)
         models.append(m)
+        best_iters.append(bi)
+    if n_cb:
+        slices["cb"] = (pos, len(models))
     model = F.MeanBag(models) if len(models) > 1 else models[0]
 
-    # diverse second learner + blend weight chosen on the calibration year
-    # (the LR has no early stopping, so it may use the full training slice)
-    lr, num_cols = _fit_logistic(tr, cols, target, w=_recency_w(tr, cal_yr))
-    g_cal = model.predict_proba(ca[cols])[:, 1]
-    l_cal = lr.predict_proba(ca[num_cols])[:, 1]
+    # diverse second learner (the LR has no early stopping, so it may use
+    # the full training slice)
+    lr, num_cols = _fit_logistic(tr, cols, target, w=w_tr)
+
+    # per-family cal design matrix [fam logits..., LR logit] — the fit-side
+    # twin of predict.predict_prop's serving arithmetic (features.family_logits)
+    fam_order = list(slices)
     yca = ca[target].to_numpy()
-    best_w, best_ll = 1.0, np.inf
-    for w in np.linspace(0.0, 1.0, 21):
-        ll = log_loss(yca, np.clip(F.blend(g_cal, l_cal, w, BLEND_SPACE),
-                                   1e-6, 1 - 1e-6))
-        if ll < best_ll:
-            best_ll, best_w = ll, w
+    zf_cal = F.family_logits(models, slices, ca[cols])
+    zl_cal = F.logit(lr.predict_proba(ca[num_cols])[:, 1])
+    Z_cal = np.column_stack([zf_cal[f] for f in fam_order] + [zl_cal])
 
-    s_cal = F.blend(g_cal, l_cal, best_w, BLEND_SPACE)
-    iso, cal_kind = _pick_calibrator(s_cal, yca, ca["GamePk"].to_numpy(), name)
+    # multi-year calibration support: stash this suite's cal-year design for
+    # the next suite; pool the prior year's when available (selection suite
+    # feeds shipping at zero extra train cost)
+    cur = {"Z": Z_cal, "y": yca, "gamepk": ca["GamePk"].to_numpy(),
+           "dates": ca["Date"].to_numpy()}
+    _CAL_STASH[("prop", head_key, cal_yr)] = cur
+    prior = (_CAL_STASH.get(("prop", head_key, train_yrs[-1]))
+             if MULTI_YEAR_CAL else None)
+    if prior is not None and prior["Z"].shape[1] == Z_cal.shape[1]:
+        pool = _pool_cal(cur, prior)
+        cal_years = [int(train_yrs[-1]), int(cal_yr)]
+    else:
+        pool = dict(cur, w=None)
+        cal_years = [int(cal_yr)]
 
-    g_te = model.predict_proba(te[cols])[:, 1]
-    l_te = lr.predict_proba(te[num_cols])[:, 1]
-    p_te = iso.predict(F.blend(g_te, l_te, best_w, BLEND_SPACE))
+    n_fam = np.array([slices[f][1] - slices[f][0] for f in fam_order], float)
+    best_w, fstack = None, None
+    if FAMILY_STACK:
+        fstack = LogisticRegression(C=FSTACK_C, max_iter=1000)
+        fstack.fit(pool["Z"], pool["y"], sample_weight=pool["w"])
+        s_pool = fstack.predict_proba(pool["Z"])[:, 1]
+    else:
+        # incumbent 21-point grid (rollback path); the member-count-weighted
+        # mean of family logits == MeanBag's pooled logit mean
+        zg = pool["Z"][:, :-1] @ (n_fam / n_fam.sum())
+        g_pool = 1.0 / (1.0 + np.exp(-zg))
+        l_pool = 1.0 / (1.0 + np.exp(-pool["Z"][:, -1]))
+        best_w, best_ll = 1.0, np.inf
+        for w in np.linspace(0.0, 1.0, 21):
+            ll = log_loss(pool["y"],
+                          np.clip(F.blend(g_pool, l_pool, w, BLEND_SPACE),
+                                  1e-6, 1 - 1e-6), sample_weight=pool["w"])
+            if ll < best_ll:
+                best_ll, best_w = ll, w
+        s_pool = F.blend(g_pool, l_pool, best_w, BLEND_SPACE)
+
+    iso, cal_kind = _pick_calibrator(s_pool, pool["y"], pool["gamepk"], name,
+                                     dates=pool["dates"], w=pool["w"])
+
+    zf_te = F.family_logits(models, slices, te[cols])
+    zl_te = F.logit(lr.predict_proba(te[num_cols])[:, 1])
+    Z_te = np.column_stack([zf_te[f] for f in fam_order] + [zl_te])
+    if FAMILY_STACK:
+        s_te = fstack.predict_proba(Z_te)[:, 1]
+    else:
+        zg_te = Z_te[:, :-1] @ (n_fam / n_fam.sum())
+        s_te = F.blend(1.0 / (1.0 + np.exp(-zg_te)),
+                       1.0 / (1.0 + np.exp(-Z_te[:, -1])), best_w, BLEND_SPACE)
+    p_te = iso.predict(s_te)
     y = te[target].to_numpy()
     base = np.full_like(p_te, tr[target].mean())
     metrics = {
         "n_train": len(tr), "n_test": len(te), "base_rate": float(y.mean()),
-        "best_iter": int(model.best_iteration_ or 0),
-        "blend_gbm_weight": round(float(best_w), 2),
+        "best_iter": best_iters[0],
+        "families": {f: int(slices[f][1] - slices[f][0]) for f in fam_order},
+        "es_refit": bool(do_refit),
+        "recency_decay": decay,
+        "cal_pool_years": cal_years,
         "blend_space": BLEND_SPACE,
         "calibrator": cal_kind,
         "auc": float(roc_auc_score(y, p_te)),
@@ -656,6 +901,16 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
         "brier": float(brier_score_loss(y, p_te)),
         "brier_baserate": float(brier_score_loss(y, base)),
     }
+    if FAMILY_STACK:
+        coefs = dict(zip(fam_order + ["lr"],
+                         [round(float(c), 3) for c in fstack.coef_[0]]))
+        coefs["intercept"] = round(float(fstack.intercept_[0]), 3)
+        metrics["fstack_coefs"] = coefs
+        wt_str = " ".join(f"{k}:{v:+.2f}" for k, v in coefs.items()
+                          if k != "intercept")
+    else:
+        metrics["blend_gbm_weight"] = round(float(best_w), 2)
+        wt_str = f"gbm wt {best_w:.2f}"
     # calibration by decile
     q = pd.qcut(p_te, 10, duplicates="drop")
     cal_tab = pd.DataFrame({"pred": p_te, "y": y}).groupby(q, observed=True).agg(
@@ -671,31 +926,75 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
         f"logloss {metrics['logloss']:.4f} (base {metrics['logloss_baserate']:.4f}) | "
         f"brier {metrics['brier']:.4f} (base {metrics['brier_baserate']:.4f}) | "
         f"top10/day {metrics['top10_daily_hit_rate']:.3f} vs base "
-        f"{metrics['base_rate']:.3f} | gbm wt {best_w:.2f} | cal {cal_kind}")
-    prop = {"gbm": model, "lr": lr, "lr_cols": num_cols, "w": best_w,
+        f"{metrics['base_rate']:.3f} | {wt_str} | cal {cal_kind} | "
+        f"cal-yrs {cal_years}")
+    prop = {"gbm": model, "lr": lr, "lr_cols": num_cols,
             "iso": iso, "blend_space": BLEND_SPACE}
+    if FAMILY_STACK:
+        prop.update({"fstack": fstack, "fstack_fams": fam_order,
+                     "fam_slices": slices})
+    else:
+        prop["w"] = best_w
     return prop, metrics
 
 
+def _mirror_win(df):
+    """Home/away-mirrored copy of winner-frame rows (WINNER_MIRROR): paired
+    away_*/home_* columns exchanged, d_* (home-minus-away) diffs negated,
+    elo_prob_home complemented, y_home_win inverted, persp_home -> 0 so the
+    model can keep home-field advantage on the flag. TRAIN rows only —
+    cal/test rows are never mirrored and serving always sends persp_home=1
+    (predict.predict_win)."""
+    out = df.copy()
+    for c in df.columns:
+        if c.startswith("home_"):
+            twin = "away_" + c[5:]
+            if twin in df.columns:
+                out[c] = df[twin].to_numpy()
+                out[twin] = df[c].to_numpy()
+        elif c.startswith("d_"):
+            out[c] = -df[c]
+    if "elo_prob_home" in df.columns:
+        out["elo_prob_home"] = 1.0 - df["elo_prob_home"]
+    out["y_home_win"] = 1 - df["y_home_win"]
+    out["persp_home"] = 0.0
+    return out
+
+
 def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
-    """Home-win model: small-capacity GBM + logistic, then a second blend
-    with the runs-model Poisson win probability (a diverse signal — park,
-    weather, starter run prevention), then isotonic calibration. Both blend
-    weights are chosen on the calibration year.
+    """Home-win model: small-capacity GBM bag + logistic + (when trained
+    with one) the runs-model Poisson win probability, combined by the
+    per-family logistic stack (FAMILY_STACK; the legacy path is the old
+    two-stage 21-point grid), then calibration. Everything downstream of
+    the boosters is chosen on the calibration support (multi-year pooled
+    when the stash has the prior year).
 
     mu_map: per-GamePk expected runs (mu_away, mu_home) from the runs
     model, or None to skip the Poisson component. The runs model trains on
     2020-2024, so pass None whenever the calibration year falls inside that
     range: its in-sample predictions look falsely sharp there, the blend
-    collapses onto them, and the isotonic miscalibrates (this corrupted the
-    first 2025 backtest — cal 2024 is training data for the runs model)."""
+    collapses onto them, and the calibrator miscalibrates (this corrupted
+    the first 2025 backtest — cal 2024 is training data for the runs model).
+
+    WINNER_MIRROR doubles the ~10k TRAIN rows with home/away-swapped copies
+    (_mirror_win) — the winner is the board's most data-starved head by 20x
+    and the one the sweeps flag as most over-regularization-prone."""
     from predict import poisson_win
+    decay = _decay_for("winner")
     tr = wf[wf["Season"].isin(train_yrs)]
     ca = wf[wf["Season"] == cal_yr]
     te = wf[wf["Season"] == test_yr]
     fit, es = _es_split(tr)         # cal year never picks iteration counts
-    w_fit, w_es = _recency_w(fit, cal_yr), _recency_w(es, cal_yr)
-    members = []
+    if WINNER_MIRROR:
+        fit = pd.concat([fit, _mirror_win(fit)], ignore_index=True)
+        es = pd.concat([es, _mirror_win(es)], ignore_index=True)
+        tr = pd.concat([tr, _mirror_win(tr)], ignore_index=True)
+    w_fit, w_es = (_recency_w(fit, cal_yr, decay),
+                   _recency_w(es, cal_yr, decay))
+    w_tr = _recency_w(tr, cal_yr, decay)
+    do_refit = ES_REFIT and _KEEP_TRAIN
+    members, best_iters = [], []
+    slices, pos = {}, 0
     for b in range(LGBM_BAGS):      # bag 0 = the pre-bagging incumbent seed
         p = dict(LGB_WIN)
         if b:
@@ -706,13 +1005,24 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
               eval_sample_weight=None if w_es is None else [w_es],
               eval_metric="binary_logloss",
               callbacks=[lgb.early_stopping(150, verbose=False)])
+        bi = int(m.best_iteration_ or 0)
+        if do_refit and bi:
+            m = _refit_lgbm(lgb.LGBMClassifier, p, bi,
+                            tr[cols], tr[target], w_tr)
         members.append(m)
+        best_iters.append(bi)
+    slices["lgbm"] = (pos, len(members))
+    pos = len(members)
     for b in range(XGB_BAGS):       # family members join AFTER the incumbent
         m = F.InfSafe(xgb_lib.XGBClassifier(**XGB_WIN, random_state=b))
         m.fit(fit[cols], fit[target], sample_weight=w_fit,
               sample_weight_eval_set=None if w_es is None else [w_es],
               eval_set=[(es[cols], es[target])], verbose=False)
         members.append(m)
+        best_iters.append(int(m.best_iteration_ or 0))
+    if XGB_BAGS:
+        slices["xgb"] = (pos, len(members))
+        pos = len(members)
     cat_here = [c for c in cols if c in F.CAT_COLS]
     for b in range(CB_BAGS):
         # CatBoost: train rows weighted; ES eval unweighted (Pool would
@@ -721,51 +1031,105 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
                                          cat_features=cat_here), cat_here)
         m.fit(fit[cols], fit[target], sample_weight=w_fit,
               eval_set=[(es[cols], es[target])])
+        bi = int(m.best_iteration_ or 0)
+        if do_refit and bi:
+            m = _refit_cb(CatBoostClassifier, dict(CB_WIN, _seed=b), bi,
+                          tr[cols], tr[target], w_tr, cat_here)
         members.append(m)
+        best_iters.append(bi)
+    if CB_BAGS:
+        slices["cb"] = (pos, len(members))
     model = F.MeanBag(members) if len(members) > 1 else members[0]
-    lr, num_cols = _fit_logistic(tr, cols, target, w=_recency_w(tr, cal_yr))
+    lr, num_cols = _fit_logistic(tr, cols, target, w=w_tr)
+    fam_order = list(slices)
+    n_fam = np.array([slices[f][1] - slices[f][0] for f in fam_order], float)
 
-    def parts(d):
-        g = model.predict_proba(d[cols])[:, 1]
-        l = lr.predict_proba(d[num_cols])[:, 1]
-        if mu_map is None:
-            return g, l, np.full(len(d), np.nan)
-        mus = mu_map.reindex(d["GamePk"])
-        pois = np.array([poisson_win(h, a) for h, a in
-                         zip(mus["mu_home"], mus["mu_away"])])
-        return g, l, pois
+    def zparts(d):
+        """[fam logits..., LR logit(, Poisson logit)] design matrix — the
+        fit-side twin of predict.predict_win's serving arithmetic. Rows with
+        no finite Poisson prob fall back to the member-count-weighted mean
+        of the family logits (the pure-GBM view)."""
+        zf = F.family_logits(members, slices, d[cols])
+        zcols = [zf[f] for f in fam_order]
+        zcols.append(F.logit(lr.predict_proba(d[num_cols])[:, 1]))
+        if mu_map is not None:
+            mus = mu_map.reindex(d["GamePk"])
+            pois = np.array([poisson_win(h, a) for h, a in
+                             zip(mus["mu_home"], mus["mu_away"])])
+            zg = np.column_stack(zcols[:len(fam_order)]) @ (n_fam / n_fam.sum())
+            with np.errstate(invalid="ignore"):
+                zp = np.where(np.isfinite(pois),
+                              F.logit(np.nan_to_num(pois, nan=0.5)), zg)
+            zcols.append(zp)
+        return np.column_stack(zcols)
 
     yca = ca[target].to_numpy()
+    Z_cal = zparts(ca)
+    cur = {"Z": Z_cal, "y": yca, "gamepk": ca["GamePk"].to_numpy(),
+           "dates": ca["Date"].to_numpy()}
+    _CAL_STASH[("winner", "winner", cal_yr)] = cur
+    prior = (_CAL_STASH.get(("winner", "winner", train_yrs[-1]))
+             if MULTI_YEAR_CAL else None)
+    if prior is not None and prior["Z"].shape[1] == Z_cal.shape[1]:
+        pool = _pool_cal(cur, prior)
+        cal_years = [int(train_yrs[-1]), int(cal_yr)]
+    else:
+        pool = dict(cur, w=None)
+        cal_years = [int(cal_yr)]
 
-    def pick_w(a, b):
-        best_w, best_ll = 1.0, np.inf
-        for w in np.linspace(0.0, 1.0, 21):
-            ll = log_loss(yca, np.clip(F.blend(a, b, w, BLEND_SPACE),
-                                       1e-6, 1 - 1e-6))
-            if ll < best_ll:
-                best_ll, best_w = ll, w
-        return best_w
+    w1, w_ml, fstack = 1.0, 1.0, None
+    n_z = len(fam_order)            # fam cols; then lr; then optional pois
+    if FAMILY_STACK:
+        fstack = LogisticRegression(C=FSTACK_C, max_iter=1000)
+        fstack.fit(pool["Z"], pool["y"], sample_weight=pool["w"])
+        s_pool = fstack.predict_proba(pool["Z"])[:, 1]
+    else:
+        def pick_w(a, b):
+            best_w, best_ll = 1.0, np.inf
+            for w in np.linspace(0.0, 1.0, 21):
+                ll = log_loss(pool["y"],
+                              np.clip(F.blend(a, b, w, BLEND_SPACE),
+                                      1e-6, 1 - 1e-6),
+                              sample_weight=pool["w"])
+                if ll < best_ll:
+                    best_ll, best_w = ll, w
+            return best_w
 
-    g_cal, l_cal, pois_cal = parts(ca)
-    w1 = pick_w(g_cal, l_cal)
-    s_cal = F.blend(g_cal, l_cal, w1, BLEND_SPACE)
-    pois_cal = np.where(np.isfinite(pois_cal), pois_cal, s_cal)
-    w_ml = 1.0 if mu_map is None else pick_w(s_cal, pois_cal)
-    s2_cal = F.blend(s_cal, pois_cal, w_ml, BLEND_SPACE)
-    iso, cal_kind = _pick_calibrator(s2_cal, yca, ca["GamePk"].to_numpy(),
-                                     "winner")
+        zg = pool["Z"][:, :n_z] @ (n_fam / n_fam.sum())
+        g_pool = 1.0 / (1.0 + np.exp(-zg))
+        l_pool = 1.0 / (1.0 + np.exp(-pool["Z"][:, n_z]))
+        w1 = pick_w(g_pool, l_pool)
+        s_pool = F.blend(g_pool, l_pool, w1, BLEND_SPACE)
+        if mu_map is not None:
+            pois_pool = 1.0 / (1.0 + np.exp(-pool["Z"][:, n_z + 1]))
+            w_ml = pick_w(s_pool, pois_pool)
+            s_pool = F.blend(s_pool, pois_pool, w_ml, BLEND_SPACE)
 
-    g_te, l_te, pois_te = parts(te)
-    s_te = F.blend(g_te, l_te, w1, BLEND_SPACE)
-    pois_te = np.where(np.isfinite(pois_te), pois_te, s_te)
-    p_te = iso.predict(F.blend(s_te, pois_te, w_ml, BLEND_SPACE))
+    iso, cal_kind = _pick_calibrator(s_pool, pool["y"], pool["gamepk"],
+                                     "winner", dates=pool["dates"],
+                                     w=pool["w"])
+
+    Z_te = zparts(te)
+    if FAMILY_STACK:
+        s_te = fstack.predict_proba(Z_te)[:, 1]
+    else:
+        zg_te = Z_te[:, :n_z] @ (n_fam / n_fam.sum())
+        s_te = F.blend(1.0 / (1.0 + np.exp(-zg_te)),
+                       1.0 / (1.0 + np.exp(-Z_te[:, n_z])), w1, BLEND_SPACE)
+        if mu_map is not None:
+            s_te = F.blend(s_te, 1.0 / (1.0 + np.exp(-Z_te[:, n_z + 1])),
+                           w_ml, BLEND_SPACE)
+    p_te = iso.predict(s_te)
     y = te[target].to_numpy()
     base = np.full_like(p_te, tr[target].mean())
     metrics = {
         "n_train": len(tr), "n_test": len(te), "base_rate": float(y.mean()),
-        "best_iter": int(model.best_iteration_ or 0),
-        "blend_gbm_weight": round(float(w1), 2),
-        "blend_ml_weight": round(float(w_ml), 2),
+        "best_iter": best_iters[0],
+        "families": {f: int(slices[f][1] - slices[f][0]) for f in fam_order},
+        "es_refit": bool(do_refit),
+        "winner_mirror": bool(WINNER_MIRROR),
+        "recency_decay": decay,
+        "cal_pool_years": cal_years,
         "blend_space": BLEND_SPACE,
         "calibrator": cal_kind,
         "auc": float(roc_auc_score(y, p_te)),
@@ -775,31 +1139,60 @@ def fit_winner(wf, cols, target, mu_map, train_yrs, cal_yr, test_yr, name):
         "brier": float(brier_score_loss(y, p_te)),
         "brier_baserate": float(brier_score_loss(y, base)),
     }
+    if FAMILY_STACK:
+        zn = fam_order + ["lr"] + (["pois"] if mu_map is not None else [])
+        coefs = dict(zip(zn, [round(float(c), 3) for c in fstack.coef_[0]]))
+        coefs["intercept"] = round(float(fstack.intercept_[0]), 3)
+        metrics["fstack_coefs"] = coefs
+        wt_str = " ".join(f"{k}:{v:+.2f}" for k, v in coefs.items()
+                          if k != "intercept")
+    else:
+        metrics["blend_gbm_weight"] = round(float(w1), 2)
+        metrics["blend_ml_weight"] = round(float(w_ml), 2)
+        wt_str = f"gbm wt {w1:.2f} | ML-vs-poisson wt {w_ml:.2f}"
     log(f"{name} [{test_yr}]: AUC {metrics['auc']:.4f} | acc "
         f"{metrics['acc']:.3f} | logloss {metrics['logloss']:.4f} "
-        f"(base {metrics['logloss_baserate']:.4f}) | gbm wt {w1:.2f} | "
-        f"ML-vs-poisson wt {w_ml:.2f}")
-    prop = {"gbm": model, "lr": lr, "lr_cols": num_cols, "w": w1,
-            "w_ml": w_ml, "iso": iso, "blend_space": BLEND_SPACE}
+        f"(base {metrics['logloss_baserate']:.4f}) | {wt_str}")
+    prop = {"gbm": model, "lr": lr, "lr_cols": num_cols,
+            "iso": iso, "blend_space": BLEND_SPACE}
+    if FAMILY_STACK:
+        prop.update({"fstack": fstack, "fstack_fams": fam_order,
+                     "fam_slices": slices,
+                     "fstack_pois": mu_map is not None})
+    else:
+        prop.update({"w": w1, "w_ml": w_ml})
     return prop, metrics
 
 
 def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
-                n_bags=1, tweedie_power=None, n_xgb=0, n_cb=0, params=None):
+                n_bags=1, tweedie_power=None, n_xgb=0, n_cb=0, params=None,
+                head_key=None):
     """Poisson (default) count regression, or Tweedie when tweedie_power is set
     (a compound Poisson-Gamma objective, variance power in (1,2)). Tweedie lets
     the MEAN model an over-dispersed right tail directly — total bases / H+R+RBI
     run ~2x Poisson variance — instead of leaning entirely on the post-hoc
-    cal-year dispersion. Serving is unchanged: .predict() still returns E[y]."""
+    cal-year dispersion. Serving is unchanged: .predict() still returns E[y].
+
+    With 2 families present and FAMILY_STACK on, the families' cal-year means
+    are combined by a deviance-chosen weight (features.FamilyBlendBag — the
+    count analog of the binary per-family stack; deviance is the proper score
+    the per-line calibrators ride on). Weight support pools the prior year
+    when the _CAL_STASH has it."""
+    head_key = head_key or name.lower()
+    decay = _decay_for(head_key)
     tr = df[df["Season"].isin(train_yrs)]
     if _SUPERSET_SAMPLE and len(tr) > _SUPERSET_SAMPLE:   # superset train only
         tr = tr.sample(n=_SUPERSET_SAMPLE, random_state=0)
     ca = df[df["Season"] == cal_yr]
     te = df[df["Season"] == test_yr].copy()
     fit, es = _es_split(tr)         # cal year never picks iteration counts
-    w_fit, w_es = _recency_w(fit, cal_yr), _recency_w(es, cal_yr)
+    w_fit, w_es = (_recency_w(fit, cal_yr, decay),
+                   _recency_w(es, cal_yr, decay))
+    w_tr = _recency_w(tr, cal_yr, decay)
+    do_refit = ES_REFIT and _KEEP_TRAIN
     tweedie = tweedie_power is not None
-    models = []
+    models, best_iters = [], []
+    slices, pos = {}, 0
     for b in range(n_bags):
         p = dict(params or LGB_POIS)    # COUNT_PARAMS override or the base
         if tweedie:
@@ -813,7 +1206,14 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
               eval_sample_weight=None if w_es is None else [w_es],
               eval_metric=("tweedie" if tweedie else "poisson"),
               callbacks=[lgb.early_stopping(150, verbose=False)])
+        bi = int(m.best_iteration_ or 0)
+        if do_refit and bi:
+            m = _refit_lgbm(lgb.LGBMRegressor, p, bi,
+                            tr[cols], tr[target], w_tr)
         models.append(m)
+        best_iters.append(bi)
+    slices["lgbm"] = (pos, len(models))
+    pos = len(models)
     for b in range(n_xgb):          # family members join AFTER the LGBM bag
         p = dict(XGB_POIS)
         if tweedie:
@@ -825,6 +1225,10 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
               sample_weight_eval_set=None if w_es is None else [w_es],
               eval_set=[(es[cols], es[target])], verbose=False)
         models.append(m)
+        best_iters.append(int(m.best_iteration_ or 0))
+    if n_xgb:
+        slices["xgb"] = (pos, len(models))
+        pos = len(models)
     cat_here = [c for c in cols if c in F.CAT_COLS]
     for b in range(n_cb):
         p = dict(CB_POIS)
@@ -838,21 +1242,70 @@ def fit_poisson(df, cols, target, train_yrs, cal_yr, test_yr, name, baseline,
                       cat_here, exponent=True)
         m.fit(fit[cols], fit[target], sample_weight=w_fit,
               eval_set=[(es[cols], es[target])])
+        bi = int(m.best_iteration_ or 0)
+        if do_refit and bi:
+            m = _refit_cb(CatBoostRegressor, dict(p, _seed=b), bi,
+                          tr[cols], tr[target], w_tr, cat_here,
+                          exponent=True)
         models.append(m)
+        best_iters.append(bi)
+    if n_cb:
+        slices["cb"] = (pos, len(models))
+    fam_order = list(slices)
     model = F.MeanBag(models) if len(models) > 1 else models[0]
+    fam_w = None
+    if FAMILY_STACK and len(fam_order) == 2:
+        # per-family cal-year means -> deviance-chosen weight, prior year
+        # pooled when stashed. >2 families would need a simplex search;
+        # the 2-family grid covers the current roster (lgbm + cb).
+        mus_cal = np.column_stack(
+            [np.mean([models[i].predict(ca[cols])
+                      for i in range(a, b)], axis=0)
+             for f, (a, b) in slices.items()])
+        cur = {"mus": mus_cal, "y": ca[target].to_numpy()}
+        _CAL_STASH[("count", head_key, cal_yr)] = cur
+        prior = (_CAL_STASH.get(("count", head_key, train_yrs[-1]))
+                 if MULTI_YEAR_CAL else None)
+        if prior is not None and prior["mus"].shape[1] == mus_cal.shape[1]:
+            pool = _pool_cal(cur, prior)
+        else:
+            pool = dict(cur, w=None)
+        y_pool = np.asarray(pool["y"], float)
+        best_w, best_dev = 1.0, np.inf
+        for w in np.linspace(0.0, 1.0, 21):
+            mu = np.clip(w * pool["mus"][:, 0] + (1 - w) * pool["mus"][:, 1],
+                         1e-6, None)
+            if tweedie:
+                dev = mean_tweedie_deviance(y_pool, mu, power=tweedie_power,
+                                            sample_weight=pool["w"])
+            else:
+                dev = mean_poisson_deviance(y_pool, mu,
+                                            sample_weight=pool["w"])
+            if dev < best_dev:
+                best_dev, best_w = dev, w
+        fam_w = {fam_order[0]: round(float(best_w), 3),
+                 fam_order[1]: round(float(1 - best_w), 3)}
+        model = F.FamilyBlendBag(models, slices, fam_w)
     pred = model.predict(te[cols])
     y = te[target].to_numpy()
     bl = baseline(te)
     metrics = {
         "n_train": len(tr), "n_test": len(te),
-        "best_iter": int(model.best_iteration_ or 0),
+        "best_iter": best_iters[0],
+        "families": {f: int(slices[f][1] - slices[f][0]) for f in fam_order},
+        "es_refit": bool(do_refit),
+        "recency_decay": decay,
         "mae": float(mean_absolute_error(y, pred)),
         "mae_baseline": float(mean_absolute_error(y, bl)),
         "mean_actual": float(y.mean()), "mean_pred": float(pred.mean()),
     }
+    if fam_w is not None:
+        metrics["fam_w"] = fam_w
     log(f"{name} [{test_yr}]: MAE {metrics['mae']:.3f} "
         f"(baseline {metrics['mae_baseline']:.3f}) | "
-        f"mean pred {metrics['mean_pred']:.2f} vs actual {metrics['mean_actual']:.2f}")
+        f"mean pred {metrics['mean_pred']:.2f} vs actual "
+        f"{metrics['mean_actual']:.2f}"
+        + (f" | fam_w {fam_w}" if fam_w is not None else ""))
     return model, metrics
 
 
@@ -863,13 +1316,13 @@ def naive_hr_baseline(te, slot_pa, league_hr_pa):
     return 1 - (1 - rate) ** exp_pa
 
 
-def fit_line_cals(mu_cal, y_cal, lines):
-    """Per-line logistic calibrators on the CAL year: P(over line) as a
+def fit_line_cals(mu_cal, y_cal, lines, w=None):
+    """Per-line logistic calibrators on the CAL support: P(over line) as a
     direct monotone 2-parameter function of mu. One shared implementation
     for every count-family (count heads, starter K, game total) so the
     pricing mechanism is identical across the whole line surface. Degenerate
-    lines (single-class cal year) are skipped — consumers fall back to
-    nb_over."""
+    lines (single-class cal support) are skipped — consumers fall back to
+    nb_over. w = optional sample weights (multi-year pooled support)."""
     mu_cal = np.asarray(mu_cal, dtype=float)
     y_cal = np.asarray(y_cal, dtype=float)
     out = {}
@@ -877,8 +1330,34 @@ def fit_line_cals(mu_cal, y_cal, lines):
         over = (y_cal > line).astype(int)
         if 0 < over.mean() < 1:
             out[line] = LogisticRegression(C=1e6, max_iter=1000).fit(
-                mu_cal.reshape(-1, 1), over)
+                mu_cal.reshape(-1, 1), over, sample_weight=w)
     return out
+
+
+def _disp(y, mu, w=None):
+    """(Possibly weighted) variance-to-mean dispersion factor."""
+    y = np.asarray(y, dtype=float)
+    mu = np.asarray(mu, dtype=float)
+    if w is None:
+        return float(np.mean((y - mu) ** 2) / np.mean(mu))
+    w = np.asarray(w, dtype=float)
+    return float(np.sum(w * (y - mu) ** 2) / np.sum(w * mu))
+
+
+def _pooled_lines(head_key, mu_cal, y_cal, cal_yr, prior_yr):
+    """(mu, y, w) line-calibrator/dispersion support for one count family:
+    stashes this suite's cal-year (mu, y), pools the prior year's when
+    MULTI_YEAR_CAL and the stash has it (selection suite feeds shipping),
+    older year discounted CAL_POOL_DECAY. w=None when nothing pooled."""
+    cur = {"mu": np.asarray(mu_cal, dtype=float),
+           "y": np.asarray(y_cal, dtype=float)}
+    _CAL_STASH[("lines", head_key, cal_yr)] = cur
+    prior = (_CAL_STASH.get(("lines", head_key, prior_yr))
+             if MULTI_YEAR_CAL else None)
+    if prior is None:
+        return cur["mu"], cur["y"], None
+    pool = _pool_cal(cur, prior)
+    return pool["mu"], pool["y"], pool["w"]
 
 
 def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
@@ -914,7 +1393,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
                                  train_yrs, cal_yr, test_yr, name.upper(),
                                  params=params,
                                  n_bags=LGBM_BAGS,
-                                 n_xgb=XGB_BAGS, n_cb=CB_BAGS)
+                                 n_xgb=XGB_BAGS, n_cb=CB_BAGS,
+                                 head_key=name)
         prop["cols"] = cols
         props[name] = prop
         metrics[f"{name}_{test_yr}"] = m
@@ -961,18 +1441,22 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     k_model, m = fit_poisson(sf, k_cols, "y_so", train_yrs, cal_yr, test_yr,
                              "K", k_baseline, n_bags=LGBM_BAGS,
                              n_xgb=XGB_BAGS, n_cb=CB_BAGS,
-                             params=COUNT_PARAMS.get("k"))
+                             params=COUNT_PARAMS.get("k"), head_key="k")
     metrics[f"k_{test_yr}"] = m
 
-    # Starter-K dispersion on the CALIBRATION year (never the holdout): real K
-    # counts run a touch over Poisson variance, so predict.py prices K P(over)
-    # with a negative binomial (nb_over) using this factor.
+    # Starter-K dispersion on the CALIBRATION support (never the holdout):
+    # real K counts run a touch over Poisson variance, so predict.py prices
+    # K P(over) with a negative binomial (nb_over) using this factor.
+    # 2026-07-15 PM: support is multi-year pooled when the stash has the
+    # prior year (_pooled_lines), like every line calibrator below.
     sf_cal = sf[sf["Season"] == cal_yr]
     kp_cal = k_model.predict(sf_cal[k_cols])
-    k_disp = float(np.mean((sf_cal["y_so"].to_numpy() - kp_cal) ** 2)
-                   / np.mean(kp_cal))
+    mu_k, y_k, w_k = _pooled_lines("k", kp_cal, sf_cal["y_so"].to_numpy(),
+                                   cal_yr, train_yrs[-1])
+    k_disp = _disp(y_k, mu_k, w_k)
     metrics[f"k_dispersion_{cal_yr}"] = k_disp
-    log(f"starter-K dispersion ({cal_yr} cal year): {k_disp:.2f} "
+    log(f"starter-K dispersion ({cal_yr} cal support, "
+        f"{'pooled' if w_k is not None else 'single-year'}): {k_disp:.2f} "
         f"(Poisson assumes 1.00)")
 
     # K per-line calibrators (2026-07-13 full-surface calibration pass): K
@@ -980,7 +1464,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     # tail; they now get the same cal-year logistic pricing as outs/pbb/pha
     # (predict.k_over consumes, NB fallback for old artifacts).
     from predict import K_LINES, TOTAL_LINES
-    k_line_cals = fit_line_cals(kp_cal, sf_cal["y_so"].to_numpy(), K_LINES)
+    k_line_cals = fit_line_cals(mu_k, y_k, K_LINES, w=w_k)
 
     # count heads (starter-K pattern): Poisson mean + cal-year dispersion
     count_models = {}
@@ -1015,19 +1499,22 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
                                n_bags=LGBM_BAGS,
                                params=COUNT_PARAMS.get(cname),
                                tweedie_power=ch.get("tweedie"),
-                               n_xgb=XGB_BAGS, n_cb=CB_BAGS)
+                               n_xgb=XGB_BAGS, n_cb=CB_BAGS,
+                               head_key=cname)
         ca = frame[frame["Season"] == cal_yr]
         mu_cal = model.predict(ca[cols])
         y_cal = ca[ch["target"]].to_numpy()
-        disp = float(np.mean((y_cal - mu_cal) ** 2) / np.mean(mu_cal))
+        mu_p, y_p, w_p = _pooled_lines(cname, mu_cal, y_cal,
+                                       cal_yr, train_yrs[-1])
+        disp = _disp(y_p, mu_p, w_p)
         m["dispersion_cal"] = round(disp, 4)
-        # per-line logistic calibrators on the CAL year (the count-head
+        # per-line logistic calibrators on the CAL support (the count-head
         # analog of the binary props' isotonic): P(over line) as a direct
         # monotone function of mu. Outs/batter-K counts run UNDER Poisson
         # variance (bounded by PA / the manager's hook), so nb_over — which
         # can only widen, never narrow — misprices their tails; consumers
         # fall back to nb_over only when a line has no calibrator.
-        line_cals = fit_line_cals(mu_cal, y_cal, ch["lines"])
+        line_cals = fit_line_cals(mu_p, y_p, ch["lines"], w=w_p)
         metrics[f"{cname}_{test_yr}"] = m
         count_models[cname] = {"model": model, "cols": cols, "disp": disp,
                                "lines": ch["lines"], "line_cals": line_cals,
@@ -1042,7 +1529,8 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
                                      test_yr, "TEAM RUNS", team_baseline,
                                      n_bags=LGBM_BAGS,
                                      n_xgb=XGB_BAGS, n_cb=CB_BAGS,
-                                     params=COUNT_PARAMS.get("total"))
+                                     params=COUNT_PARAMS.get("total"),
+                                     head_key="total")
     metrics[f"team_runs_{test_yr}"] = m
 
     # Game-total dispersion, also on the calibration year: real totals ran
@@ -1052,31 +1540,34 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     pr_cal = team_runs_model.predict(tg_cal[tg_cols])
     per_game = pd.DataFrame({"g": tg_cal["GamePk"].to_numpy(), "mu": pr_cal,
                              "y": tg_cal["y_runs"].to_numpy()}).groupby("g").sum()
-    total_disp = float(np.mean((per_game["y"] - per_game["mu"]) ** 2)
-                       / np.mean(per_game["mu"]))
+    mu_tot, y_tot, w_tot = _pooled_lines("total_game",
+                                         per_game["mu"].to_numpy(),
+                                         per_game["y"].to_numpy(),
+                                         cal_yr, train_yrs[-1])
+    total_disp = _disp(y_tot, mu_tot, w_tot)
     metrics[f"total_dispersion_{cal_yr}"] = total_disp
-    log(f"game-total dispersion ({cal_yr} cal year): {total_disp:.2f} "
+    log(f"game-total dispersion ({cal_yr} cal support): {total_disp:.2f} "
         f"(Poisson assumes 1.00)")
 
     # total-runs per-line calibrators (same 2026-07-13 pass): the raw NB
     # tail left the total lines the worst-calibrated family on the board
-    # (slopes .84-.95); per-game cal-year mu vs actual totals, predict.
+    # (slopes .84-.95); per-game cal mu vs actual totals, predict.
     # total_over consumes with NB fallback for exotic odds-store lines.
-    total_line_cals = fit_line_cals(per_game["mu"].to_numpy(),
-                                    per_game["y"].to_numpy(), TOTAL_LINES)
+    total_line_cals = fit_line_cals(mu_tot, y_tot, TOTAL_LINES, w=w_tot)
 
     # H5 team_total head-ification (2026-07-14): the per-TEAM line surface
     # off the same runs model. TEAM-level cal-year NB dispersion (the game
     # total's ~2.3 does NOT transfer — team variance is its own number) +
     # per-line calibrators for the team-total lines the books post.
     from predict import TEAM_TOTAL_LINES
-    team_total_disp = float(np.mean((tg_cal["y_runs"].to_numpy()
-                                     - pr_cal) ** 2) / np.mean(pr_cal))
+    mu_tt, y_tt, w_tt = _pooled_lines("team_total", pr_cal,
+                                      tg_cal["y_runs"].to_numpy(),
+                                      cal_yr, train_yrs[-1])
+    team_total_disp = _disp(y_tt, mu_tt, w_tt)
     metrics[f"team_total_dispersion_{cal_yr}"] = round(team_total_disp, 4)
-    log(f"team-total dispersion ({cal_yr} cal year): {team_total_disp:.2f} "
-        f"(Poisson assumes 1.00)")
-    team_line_cals = fit_line_cals(pr_cal, tg_cal["y_runs"].to_numpy(),
-                                   TEAM_TOTAL_LINES)
+    log(f"team-total dispersion ({cal_yr} cal support): "
+        f"{team_total_disp:.2f} (Poisson assumes 1.00)")
+    team_line_cals = fit_line_cals(mu_tt, y_tt, TEAM_TOTAL_LINES, w=w_tt)
 
     # dedicated winner model, blended with the runs-model Poisson win prob.
     # The suite's own runs model never trains on cal_yr (it early-stops
@@ -1089,6 +1580,11 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
               .rename(columns={0: "mu_away", 1: "mu_home"}))
     win_cols = _apply_keep("winner",
                            F.win_feature_cols() + shadow_cols_of(wf))
+    # WINNER_MIRROR's perspective flag rides OUTSIDE the keep-list (it is an
+    # augmentation artifact, not a selected feature); predict.predict_win
+    # pins it to 1.0 at serve time.
+    if WINNER_MIRROR and "persp_home" not in win_cols:
+        win_cols = win_cols + ["persp_home"]
     win_model, m = fit_winner(wf, win_cols, "y_home_win", mu_map,
                               train_yrs, cal_yr, test_yr, "WINNER")
     win_model["cols"] = win_cols
@@ -1122,14 +1618,21 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
         # role="superset" (and any shdw_ serving contract), so a superset
         # intermediate can never silently serve again.
         "meta_stamp": {
-            "artifact_version": 2,
+            "artifact_version": 3,
             "role": "keep" if _KEEP_TRAIN else "superset",
-            "lgbm_only_temp": LGBM_ONLY_TEMP,
             "bags": {"lgbm": LGBM_BAGS, "xgb": XGB_BAGS, "cb": CB_BAGS},
             "superset_sample": _SUPERSET_SAMPLE,
             "recency_decay": RECENCY_DECAY,
+            "recency_head_decay": dict(RECENCY_HEAD_DECAY),
             "blend_space": BLEND_SPACE,
             "auto_cal": AUTO_CAL,
+            # 2026-07-15 PM diversity/calibration batch flags
+            "family_stack": FAMILY_STACK,
+            "cal_bag_b": CAL_BAG_B,
+            "multi_year_cal": MULTI_YEAR_CAL,
+            "cal_pool_decay": CAL_POOL_DECAY,
+            "es_refit": ES_REFIT and _KEEP_TRAIN,
+            "winner_mirror": WINNER_MIRROR,
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         },
         "props": props,
@@ -1179,13 +1682,24 @@ def main():
                          "models on top.")
     ap.add_argument("--decay", type=float, default=None,
                     help="override RECENCY_DECAY for this run (used by "
-                         "decay_sweep.py; 1.0 = no recency weighting)")
+                         "decay_sweep.py; 1.0 = no recency weighting). "
+                         "Clears RECENCY_HEAD_DECAY too (sweep isolation).")
+    ap.add_argument("--prestash", action="store_true",
+                    help="train an extra throwaway suite one season further "
+                         "back FIRST, so the SELECTION suite gets multi-year "
+                         "calibration support too and the 2025 paired read "
+                         "adjudicates it (otherwise only the shipping suite "
+                         "pools and the 2026 confirm is the multi-year "
+                         "read). Costs ~one extra suite train.")
     args = ap.parse_args()
     if args.decay is not None:
         RECENCY_DECAY = args.decay
-    if RECENCY_DECAY < 1.0:
+        RECENCY_HEAD_DECAY.clear()
+    if RECENCY_DECAY < 1.0 or RECENCY_HEAD_DECAY:
         log(f"recency sample-weighting ON: decay {RECENCY_DECAY} per season "
-            f"back from each suite's cal year")
+            f"back from each suite's cal year"
+            + (f"; per-head overrides {RECENCY_HEAD_DECAY}"
+               if RECENCY_HEAD_DECAY else ""))
 
     # role banner (audit #8): superset runs write models_superset*.joblib and
     # never touch the serving artifacts; the temp-regime flag prints loudly so
@@ -1196,11 +1710,14 @@ def main():
            if _KEEP_TRAIN else
            "(no keep-list; writes models_superset_bt.joblib / "
            "models_superset.joblib — serving artifacts untouched)"))
-    if LGBM_ONLY_TEMP:
-        log("LGBM_ONLY_TEMP is ON: XGB/CB families disabled. STANDING "
-            "regime per user 2026-07-15 — the shipped ensemble is the LGBM "
-            "6-bag + LR blend for the foreseeable future; flip False only "
-            "when the 3-family ensemble is deliberately brought back.")
+    log(f"families: {LGBM_BAGS} LGBM + {XGB_BAGS} XGB + {CB_BAGS} CB "
+        f"(XGB retired permanently, CB restored — user 2026-07-15 PM) | "
+        f"fstack {'ON' if FAMILY_STACK else 'off'} | "
+        f"cal-bag {CAL_BAG_B or 'off'} | "
+        f"multi-year-cal {'ON' if MULTI_YEAR_CAL else 'off'} "
+        f"(pool decay {CAL_POOL_DECAY}) | "
+        f"es-refit {'ON (keep-trains)' if ES_REFIT else 'off'} | "
+        f"winner-mirror {'ON' if WINNER_MIRROR else 'off'}")
 
     cache = ART / "frames.joblib"
     if cache.exists() and not args.rebuild:
@@ -1260,11 +1777,29 @@ def main():
     wf = wf.sort_values("GamePk").reset_index(drop=True)  # canonical order
     wf = wf.copy()
     add_shadow_cols(wf, F.win_feature_cols(), SHADOW_N["wf"])
+    # WINNER_MIRROR perspective flag: 1 = the real home orientation (every
+    # served row), 0 = a train-time mirrored copy (_mirror_win flips it)
+    wf["persp_home"] = 1.0
 
     # season splits derived from the data — no code edit at the annual
     # rollover; the holdout promotes itself once the new season has games
     train_yrs, cal_yr, hold_yr = suite_years(bf)
     sel_tr, sel_cal, sel_te = train_yrs[:-1], train_yrs[-1], cal_yr
+
+    # -- optional prestash suite (multi-year cal for the SELECTION suite):
+    # one season further back again, trained ONLY to leave its cal-year
+    # scores in _CAL_STASH; nothing is written. Without it the selection
+    # suite prices on single-year support (its paired read still verdicts
+    # every non-pooling change) and only the shipping suite pools. --
+    if args.prestash and MULTI_YEAR_CAL:
+        ps_tr, ps_cal, ps_te = sel_tr[:-1], sel_tr[-1], sel_cal
+        if len(ps_tr) >= 2:
+            log(f"=== PRESTASH suite (train<={ps_tr[-1]}, cal {ps_cal}, "
+                f"test {ps_te}) — throwaway, feeds the selection suite's "
+                f"multi-year calibration ===")
+            train_suite(bf, sf, tg, wf, cat_levels, ps_tr, ps_cal, ps_te)
+        else:
+            log("--prestash skipped: not enough seasons for a third suite")
 
     # -- selection suite (always refreshed): iterate here, never vs the
     # holdout --

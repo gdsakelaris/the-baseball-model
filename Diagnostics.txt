@@ -1,0 +1,43 @@
+For standard/O-U count heads:
+    Lift
+    Edge%
+    Slope
+    Intercept
+    Dispersion
+        Dispersion Cals
+        Dispersion Obs
+    Brier
+        Brier Base Rate
+    ECE
+    Bias
+    MAE
+        MAE Baseline
+        MAE Gain
+    AUC
+    Base Rate
+    Top10%
+    LogLoss
+        Logloss Base Rate
+    Mean Actual
+    Mean Pred
+    Accuracy 
+
+Binary heads:
+    Lift
+    Edge%
+    Slope
+    Intercept
+    Brier
+        Brier Base Rate
+    ECE
+    AUC
+    Base Rate
+    Top10%
+    LogLoss
+        Logloss Base Rate
+    MAE
+        MAE Baseline
+        MAE Gain
+    Mean Actual
+    Mean Pred
+    Accuracy
