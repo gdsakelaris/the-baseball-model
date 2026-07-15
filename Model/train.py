@@ -93,7 +93,11 @@ LGB_WIN = dict(n_estimators=3000, learning_rate=0.02, num_leaves=7,
 # per run); bake the sweep winner here before the ship chain. Blend weights,
 # calibrators, and dispersions still fit UNWEIGHTED on the cal year — decay
 # shapes what the boosters learn, not how they are priced.
-RECENCY_DECAY = 1.0
+RECENCY_DECAY = 0.95   # swept 2026-07-15 {1.0,.95,.9,.8} on the selection
+                       # suite (decay_sweep.py, banked): best mean delta
+                       # (-0.00017) at the widest breadth (23/35 heads,
+                       # incl. k/outs/pbb/pha), worst harm +0.0005. The
+                       # ship chain's paired read verdicts it in-batch.
 
 
 def _recency_w(frame, cal_yr):

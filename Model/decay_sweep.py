@@ -91,7 +91,8 @@ def report(grid):
 
     colw = max(len(h) for h, _ in heads) + 2
     print("\nper-head " + "/".join(f"{BINARY_KEY}|{COUNT_KEY}".split("|"))
-          + " by decay (* = best, lower wins; Δ vs decay 1.00 where banked)")
+          + " by decay (* = best, lower wins; delta vs decay 1.00 where "
+            "banked)")
     print(" " * colw + "".join(f"{d:>10.2f}" for d in decays))
     wins = {d: 0 for d in decays}
     for (head, key), vals in sorted(heads.items()):
