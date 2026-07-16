@@ -536,7 +536,8 @@ def section_games(gf_y, art):
 
     # winner: dedicated model when the artifact has one
     win_cols = art.get("win_model", {}).get("cols", [])
-    if win_cols and all(c in gf_y.columns for c in win_cols):
+    if _win_scoreable(win_cols, gf_y):
+        _ensure_persp(gf_y, win_cols)
         Xw = prep(gf_y, win_cols, art["cat_levels"])
         p_home = predict_win(art["win_model"], Xw, mu_home, mu_away)
         print("\n  (winner probabilities from the dedicated win model)")
@@ -800,8 +801,9 @@ def _game_market_rows(gf_y, art, store, n_boot):
         if row:
             rows.append(row)
     win = art.get("win_model", {})
-    if not store[store["Market"] == "h2h"].empty and win.get("cols") \
-            and all(c in gf_y.columns for c in win["cols"]):
+    if not store[store["Market"] == "h2h"].empty \
+            and _win_scoreable(win.get("cols"), gf_y):
+        _ensure_persp(gf_y, win["cols"])
         p_home = predict_win(win, prep(gf_y, win["cols"], art["cat_levels"]),
                              mu_home, mu_away)
         cons = _game_consensus(store, "h2h", None)
@@ -1208,6 +1210,26 @@ def score_snapshot(gf_y, art):
         "keycols": ["Date", "GamePk", "Home"]}
 
 
+def _win_scoreable(win_cols, frame):
+    """Can the dedicated win model score this frame? persp_home is EXEMPT
+    from the presence check (2026-07-16 hotfix): it is the WINNER_MIRROR
+    augmentation flag that predict_win pins to 1.0 itself, so its absence
+    from an eval frame must not disqualify the model. Without the
+    exemption, every winner section here silently fell back to
+    Poisson-means and the paired snapshot lost its winner block (the
+    07-16 ship-morning reads scored winner from the fallback)."""
+    return bool(win_cols) and all(c in frame.columns for c in win_cols
+                                  if c != "persp_home")
+
+
+def _ensure_persp(frame, win_cols):
+    """Materialize persp_home before prep()'s strict column selection —
+    the VALUE is irrelevant (predict_win pins 1.0 itself), the COLUMN must
+    exist. In-place; a constant column on an eval frame is harmless."""
+    if "persp_home" in (win_cols or []) and "persp_home" not in frame.columns:
+        frame["persp_home"] = 1.0
+
+
 def winner_snapshot(gf_y, art):
     """Per-game served home-win probability + outcome for the paired
     snapshot — lets 5_prop_rankings grade the Win Prob column on the same
@@ -1215,8 +1237,9 @@ def winner_snapshot(gf_y, art):
     nothing to grade from). None when the artifact predates the dedicated
     win model. Same computation as section_games."""
     win_cols = art.get("win_model", {}).get("cols", [])
-    if not win_cols or not all(c in gf_y.columns for c in win_cols):
+    if not _win_scoreable(win_cols, gf_y):
         return None
+    _ensure_persp(gf_y, win_cols)
     tg = F.build_team_game_frame(gf_y)
     tp = art["team_runs_model"].predict(prep(tg, art["tg_cols"],
                                              art["cat_levels"]))

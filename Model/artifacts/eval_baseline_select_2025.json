@@ -109,6 +109,6 @@
   "xbb_dispersion": 0.9659,
   "total_mae": 3.5905,
   "total_dispersion": 2.2962,
-  "winner_acc": 0.5391,
-  "winner_logloss": 0.6847
+  "winner_acc": 0.5568,
+  "winner_logloss": 0.6795
 }
