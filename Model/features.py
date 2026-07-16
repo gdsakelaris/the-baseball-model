@@ -355,6 +355,20 @@ class BaggedCal:
         return np.mean([c.predict(p) for c in self.cals], axis=0)
 
 
+class BaggedLineCal:
+    """Day-block bootstrap bag for the per-line logistic calibrators (same
+    2026-07-15 PM rationale as BaggedCal, different serving contract: the
+    line-cal consumers — predict.count_over/k_over/total_over/team_over —
+    call predict_proba on a (n,1) mu column). Mean of member probabilities.
+    Lives here so pickles resolve from any entry point."""
+
+    def __init__(self, cals):
+        self.cals = list(cals)
+
+    def predict_proba(self, X):
+        return np.mean([c.predict_proba(X) for c in self.cals], axis=0)
+
+
 def blend(a, b, w, space="logit"):
     """w*a + (1-w)*b in probability space, or the same convex combination of
     LOG-ODDS mapped back through a sigmoid (space="logit"). With a Platt/beta
@@ -410,12 +424,26 @@ def _pav3(a, b, c):
     return out_a, out_b, out_c
 
 
-def enforce_ladders(p):
-    """Make the threshold-ladder heads coherent: for each ladder in
-    PROP_LADDERS whose heads are present in dict p (name -> probability
-    array), replace their entries with the monotone L2 projection. Heads a
-    ladder is missing (old artifacts) are skipped; the surviving prefix
-    still projects. Returns p (mutated in place)."""
+# Cross-family coherence DAG (2026-07-15 PM, the backlogged extension):
+# each (child, parent) edge is a PROVABLE event containment — the child
+# event implies the parent event — so calibrated prices must satisfy
+# P(child) <= P(parent). Every edge's proof, in order: a single/double/
+# triple/HR IS a hit; 2+ TB requires >=1 hit; a double is 2 TB, a triple 3,
+# a HR 4; 2+ hits is >=2 TB; a HR scores the batter (run) and credits >=1
+# RBI, and H(1)+R(1)+RBI(>=1) >= 3; 2+ hits alone gives H+R+RBI >= 2.
+# ENFORCE_DAG is read at PREDICT time (BAG_LOGIT_MEAN precedent), so it
+# also governs previously pickled artifacts; False restores ladder-only.
+ENFORCE_DAG = True
+PROP_DAG_EDGES = [
+    ("single", "hit"), ("double", "hit"), ("triple", "hit"), ("hr", "hit"),
+    ("tb2", "hit"),
+    ("double", "tb2"), ("triple", "tb3"), ("hr", "tb4"),
+    ("hits2", "tb2"), ("hits2", "hrr2"),
+    ("hr", "run"), ("hr", "rbi"), ("hr", "hrr3"),
+]
+
+
+def _apply_ladders(p):
     for ladder in PROP_LADDERS:
         names = [n for n in ladder if n in p]
         if len(names) == 2:
@@ -423,6 +451,38 @@ def enforce_ladders(p):
         elif len(names) == 3:
             p[names[0]], p[names[1]], p[names[2]] = _pav3(
                 p[names[0]], p[names[1]], p[names[2]])
+    return p
+
+
+def enforce_ladders(p):
+    """Make the threshold-ladder heads coherent: for each ladder in
+    PROP_LADDERS whose heads are present in dict p (name -> probability
+    array), replace their entries with the monotone L2 projection. Heads a
+    ladder is missing (old artifacts) are skipped; the surviving prefix
+    still projects. Returns p (mutated in place).
+
+    With ENFORCE_DAG on, the cross-family containment edges are then
+    enforced by alternating projections (POCS): rounds of pairwise edge
+    projections followed by a ladder re-projection, until the largest DAG
+    violation is numerically zero (capped at 12 rounds — post-calibration
+    violations are rare and small, so convergence is fast). The ladder
+    projection always runs LAST in a round, so the within-family chains
+    stay exact at exit."""
+    _apply_ladders(p)
+    if not ENFORCE_DAG:
+        return p
+    for _ in range(12):
+        for child, parent in PROP_DAG_EDGES:
+            if child in p and parent in p:
+                # project onto parent >= child (pool crossing pairs to mean)
+                p[parent], p[child] = _pav2(p[parent], p[child])
+        _apply_ladders(p)
+        viol = 0.0
+        for child, parent in PROP_DAG_EDGES:
+            if child in p and parent in p:
+                viol = max(viol, float(np.max(p[child] - p[parent])))
+        if viol <= 1e-9:
+            break
     return p
 
 

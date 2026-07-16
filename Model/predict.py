@@ -173,11 +173,31 @@ def _vmr_scaled_disp(art, disp, park_vmr):
     column ships live but the pricing change only activates once the 2025
     fit lands and clears the paired gate."""
     a = art.get("total_vmr_exp")
+    if a is None:
+        a = _vmr_sidecar()      # Phase-5 fit landed via Model/vmr_fit.py
     if a is None or park_vmr is None or not np.isfinite(park_vmr):
         return disp
     from features import PARK_VMR0
     scaled = disp * (float(park_vmr) / PARK_VMR0) ** float(a)
     return float(np.clip(scaled, 1.6, 3.0))
+
+
+_VMR_SIDECAR = "unset"
+
+
+def _vmr_sidecar():
+    """Cached read of artifacts/total_vmr_exp.json (Model/vmr_fit.py's 2025
+    evidence pass): the exponent when the fit cleared its gate, else None —
+    deleting the file or recommended:false keeps the mechanism inert."""
+    global _VMR_SIDECAR
+    if _VMR_SIDECAR == "unset":
+        try:
+            import json as _json
+            d = _json.loads((ART / "total_vmr_exp.json").read_text())
+            _VMR_SIDECAR = float(d["exp"]) if d.get("recommended") else None
+        except Exception:
+            _VMR_SIDECAR = None
+    return _VMR_SIDECAR
 
 
 def total_over(art, mu, line, park_vmr=None):

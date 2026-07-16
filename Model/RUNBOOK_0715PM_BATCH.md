@@ -20,6 +20,15 @@ changes land in ONE final retrain chain, adjudicated together.
 | 9 | Optuna HPO for the weak heads (evidence only, wired by hand) | `hpo_sweep.py` | don't wire |
 | 10 | LR member ridge picked per head on cal-year logloss (user add) | `LR_C_GRID = (0.3, 0.1, 1.0)` | `LR_C_GRID = (0.3,)` |
 | 11 | Full selection regen so CB votes on the keep-lists (user add) | chain steps 1-3 below; superset electorate carries both CB members | keep old `feature_keep.json` |
+| 12 | Calibration-stash sidecar: cal+test pricing designs persisted (`cal_stash.joblib`) so the pricing layer is re-fittable offline (user add) | dump in `train.main`, keep-trains only | delete the sidecar |
+| 13 | `Model/cal_lab.py`: offline knob sweeps (POOL_DECAY x FSTACK_C x CAL_BAG_B) on the stash, scored on the selection test year | new script | don't run |
+| 14 | Cross-family coherence DAG (single<=hit, hr<=tb4/run/rbi/hrr3, ...) via alternating projections in `enforce_ladders` | `features.ENFORCE_DAG` | `ENFORCE_DAG = False` |
+| 15 | Per-line calibrators day-block bagged (counts/K/totals/team), pooled support | `fit_line_cals(dates=...)`, reuses `CAL_BAG_B` | pass `dates=None` / `CAL_BAG_B = 0` |
+| 16 | Pooling depth generalized: up to `CAL_POOL_YEARS` of support (a --prestash chain leaves the shipping suite 3 deep); depth-3 adjudicable OFFLINE via cal_lab's pool-years knob | `CAL_POOL_YEARS = 2` (unchanged behavior) | n/a (2 = incumbent) |
+| 17 | `Model/cb_sweep.py`: first-ever CatBoost-side profile sweep (LGBM cached per fold, ensemble objective, global CB_CLS/CB_POIS decision over a representative panel) — chain-2 cargo | new script, run on free GPU | don't wire |
+| 18 | `Model/vmr_fit.py` + predict sidecar fallback: the Phase-5 `total_vmr_exp` evidence pass (NB fallback surface only; standard lines ride the line cals) | run after a keep-chain; `recommended:false`/delete sidecar = inert | delete `total_vmr_exp.json` |
+| 19 | `Tools/6_forward_calibration.py`: per-head slope/intercept/ECE on the graded FORWARD RECORD (+14-day drift column) — the #2/#3 diagnostics wired to the true test | read-only tool; meaningful after ~2 weeks of record | n/a |
+| 20 | `BAG_DIVERSIFY`: first N reseeded LGBM bags fit `extra_trees=True` (within-family decorrelation) — chain-2 candidate, OFF for this chain | `BAG_DIVERSIFY = 0` | 0 = off |
 
 Artifact contract: `meta_stamp.artifact_version = 3`; new prop keys
 `fstack`/`fstack_fams`/`fam_slices` (binaries/winner), `FamilyBlendBag`
@@ -91,6 +100,11 @@ the superset electorate at 2).
    keep-train and take its weights (fail-safe unchanged: sim failure
    degrades to the GBM alone). evaluate_deep verdicts the raw GBM heads
    either way — this step only affects the serving blend layer.
+7b. **cal_lab offline knob sweep** (minutes, CPU): `python Model/cal_lab.py`
+   on the fresh stash sidecar — CAL_POOL_DECAY x FSTACK_C x CAL_BAG_B
+   scored on the SELECTION test year. Evidence for the next chain's
+   constants (nothing auto-applies); include the global combo ranking in
+   the adjudication package.
 8. **Adjudication** (the standard bar, all 24+ heads read, no pre-declared
    targets):
    - `python Model/evaluate_deep.py --paired` (2025, selection suite)
@@ -120,11 +134,26 @@ the superset electorate at 2).
 
 ## Decision points still open (deliberately not decided in code)
 
-- **CAL_POOL_DECAY = 0.75** is a reasoned default, not swept. Sweepable
-  later the same way RECENCY_DECAY was.
+- **CAL_POOL_DECAY / FSTACK_C / CAL_BAG_B / CAL_POOL_YEARS**: shipped
+  defaults tonight; cal_lab.py sweeps all four OFFLINE tomorrow (minutes) —
+  wire winners as constants for chain 2.
 - **Winner re-tune under mirroring**: LGB_WIN params predate the mirrored
   regime; if the mirror survives adjudication, a later sweep can re-tune
   the winner on mirrored frames (the sweeps here run unmirrored).
+
+## CHAIN 2 (tomorrow night, keep-train only — no regen)
+
+Daytime runs on the free GPU/CPU after the morning package: cal_lab
+(pricing knobs incl. 3-year pooling), vmr_fit (2025 evidence), cb_sweep
+(CB_CLS/CB_POIS profiles), hpo_sweep --heads <count heads> (deviance
+objective), decay refinements if the 5-grid suggests finer per-head values.
+Daytime builds: init_score donor warm-starts (design note: donor logits on
+TRAIN rows are in-sample — needs the ES-fit-donor or OOF design settled
+first), winner-mirror-aware sweep machinery. Wire everything gate-clearing +
+`BAG_DIVERSIFY=2` -> one ordinary keep-chain (~2.5h) -> paired read ->
+USER adjudicates chain-2 per flag. The betting-decision layer (sizing,
+sim-joint correlation exposure) is a separate Tools project after the ship
+settles.
 
 ## Interactions worth knowing
 

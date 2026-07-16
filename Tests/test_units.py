@@ -470,6 +470,43 @@ class TestDiversityBatchUnits(unittest.TestCase):
         for c in ["home_x", "away_x", "d_x", "elo_prob_home", "y_home_win"]:
             np.testing.assert_allclose(mm[c], df[c])
 
+    def test_dag_coherence(self):
+        rng = np.random.default_rng(3)
+        n = 200
+        # deliberately incoherent: hr above hit/run/rbi on many rows
+        p = {"hit": rng.uniform(.4, .8, n), "single": rng.uniform(.3, .9, n),
+             "double": rng.uniform(.1, .5, n), "triple": rng.uniform(0, .2, n),
+             "hr": rng.uniform(.05, .6, n), "tb2": rng.uniform(.2, .6, n),
+             "tb3": rng.uniform(.1, .4, n), "tb4": rng.uniform(.02, .3, n),
+             "run": rng.uniform(.2, .6, n), "run2": rng.uniform(.05, .3, n),
+             "rbi": rng.uniform(.2, .6, n), "rbi2": rng.uniform(.05, .3, n),
+             "hits2": rng.uniform(.1, .5, n), "hrr2": rng.uniform(.2, .7, n),
+             "hrr3": rng.uniform(.1, .5, n), "hrr4": rng.uniform(.02, .3, n)}
+        F.enforce_ladders(p)
+        tol = 1e-9
+        for child, parent in F.PROP_DAG_EDGES:
+            self.assertTrue((p[child] <= p[parent] + 1e-6).all(),
+                            f"{child} <= {parent} violated")
+        # within-family ladders stay exact after the DAG passes
+        for ladder in F.PROP_LADDERS:
+            for a, b in zip(ladder, ladder[1:]):
+                if a in p and b in p:
+                    self.assertTrue((p[b] <= p[a] + tol).all(),
+                                    f"ladder {a}>={b} violated")
+
+    def test_bagged_line_cal_contract(self):
+        class C:
+            def __init__(self, k):
+                self.k = k
+
+            def predict_proba(self, X):
+                p = np.clip(np.asarray(X).ravel() * self.k, 0.01, 0.99)
+                return np.column_stack([1 - p, p])
+
+        bag = F.BaggedLineCal([C(0.1), C(0.3)])
+        p = bag.predict_proba(np.array([[1.0], [2.0]]))[:, 1]
+        np.testing.assert_allclose(p, [0.2, 0.4])
+
     def test_line_cals_weighted_and_degenerate_skip(self):
         T = importlib.import_module("train")
         mu = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
@@ -548,6 +585,27 @@ class TestDiversityBatchEndToEnd(unittest.TestCase):
         if T.MULTI_YEAR_CAL:
             self.assertEqual(m["cal_pool_years"], [2024, 2025])
         self.assertIn("fstack", prop)
+        # depth-3 pooling (CAL_POOL_YEARS=3): a third suite one season back
+        # feeds two prior years into the newest suite's support
+        saved_depth = T.CAL_POOL_YEARS
+        try:
+            T.CAL_POOL_YEARS = 3
+            T._CAL_STASH.clear()
+            T.fit_classifier(self.df, self.cols, "y", [2021, 2022], 2023,
+                             2024, "SMOKE", params=self.small, n_bags=2,
+                             n_cb=1, head_key="smoke3")
+            T.fit_classifier(self.df, self.cols, "y", [2021, 2022, 2023],
+                             2024, 2025, "SMOKE", params=self.small,
+                             n_bags=2, n_cb=1, head_key="smoke3")
+            _, m3 = T.fit_classifier(self.df, self.cols, "y",
+                                     [2021, 2022, 2023, 2024], 2025, 2026,
+                                     "SMOKE", params=self.small, n_bags=2,
+                                     n_cb=1, head_key="smoke3")
+            if T.MULTI_YEAR_CAL:
+                self.assertEqual(m3["cal_pool_years"], [2023, 2024, 2025])
+        finally:
+            T.CAL_POOL_YEARS = saved_depth
+            T._CAL_STASH.clear()
         self.assertEqual(m["families"], {"lgbm": 2, "cb": 1})
         self.assertIn(m["lr_C"], T.LR_C_GRID)   # per-head ridge pick landed
         if T.CAL_BAG_B:
