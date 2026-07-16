@@ -76,15 +76,16 @@ def _space(trial, kind):
     return p
 
 
-def _oof(job, params, folds, seed, X, y, groups, fold_splits):
+def _oof(job, params, folds, seed, X, y, groups, fold_splits, mir=None):
     """Honest OOF metrics for one params dict — param_sweep's cv_head inner
     loop for a single profile (no family cache: LGBM-only isolation, the
-    same regime the curated sweep runs in)."""
+    same regime the curated sweep runs in). mir: the winner job's mirrored
+    twin from PS._prep(mirror=True) (B2), passed through to the fold fit."""
     oof = np.full(len(y), np.nan)
     for (fit_idx, watch_idx, va_idx) in fold_splits:
         if job["kind"] == "binary":
             oof[va_idx] = PS._fold_fit_binary(X, y, fit_idx, watch_idx,
-                                              va_idx, params, seed)
+                                              va_idx, params, seed, mir=mir)
         else:
             oof[va_idx] = PS._fold_fit_count(X, y, fit_idx, watch_idx,
                                              va_idx, params, job["tweedie"],
@@ -157,8 +158,14 @@ def main():
     results = {}
     for name in order:
         j = jobs[name]
-        X, y, groups = PS._prep(j["frame"], j["cols"], j["target"], cutoff,
-                                args.max_rows, args.seed)
+        mir = None
+        if j.get("mirror"):
+            X, y, groups, mir = PS._prep(j["frame"], j["cols"], j["target"],
+                                         cutoff, args.max_rows, args.seed,
+                                         mirror=True)
+        else:
+            X, y, groups = PS._prep(j["frame"], j["cols"], j["target"],
+                                    cutoff, args.max_rows, args.seed)
         fold_splits = _fold_splits(X, y, groups, args.folds, args.seed)
         # the bar to clear = the head's CURRENT shipped config, not the
         # global base: PROP_PARAMS/COUNT_PARAMS override when present
@@ -167,16 +174,17 @@ def main():
                        or j["base"])
         t0 = time.time()
         m_def = _oof(j, current, args.folds, args.seed, X, y, groups,
-                     fold_splits)
+                     fold_splits, mir=mir)
         log(f"[{name}] {j['kind']} | rows {len(y):,} | current-config OOF "
             + (f"ll {m_def['logloss']:.5f} auc {m_def['auc']:.4f} "
                f"ece {m_def['ece']:.4f}" if j["kind"] == "binary" else
                f"dev {m_def['deviance']:.5f} mae {m_def['mae']:.4f}"))
 
         def objective(trial, _j=j, _cur=current, _fs=fold_splits,
-                      _X=X, _y=y, _g=groups):
+                      _X=X, _y=y, _g=groups, _mir=mir):
             params = dict(_j["base"], **_space(trial, _j["kind"]))
-            m = _oof(_j, params, args.folds, args.seed, _X, _y, _g, _fs)
+            m = _oof(_j, params, args.folds, args.seed, _X, _y, _g, _fs,
+                     mir=_mir)
             for k, v in m.items():
                 trial.set_user_attr(k, v)
             return (m["logloss"] if _j["kind"] == "binary"

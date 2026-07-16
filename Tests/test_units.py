@@ -583,7 +583,10 @@ class TestDiversityBatchEndToEnd(unittest.TestCase):
             self.df, self.cols, "y", [2021, 2022, 2023, 2024], 2025, 2026,
             "SMOKE", params=self.small, n_bags=2, n_cb=1, head_key="smoke")
         if T.MULTI_YEAR_CAL:
-            self.assertEqual(m["cal_pool_years"], [2024, 2025])
+            # pool depth tracks the shipped constant (chain 2 set it to 1;
+            # the depth-3 block below still exercises real pooling)
+            expect = [2024, 2025][-min(T.CAL_POOL_YEARS, 2):]
+            self.assertEqual(m["cal_pool_years"], expect)
         self.assertIn("fstack", prop)
         # depth-3 pooling (CAL_POOL_YEARS=3): a third suite one season back
         # feeds two prior years into the newest suite's support
@@ -618,6 +621,78 @@ class TestDiversityBatchEndToEnd(unittest.TestCase):
         self.assertTrue(np.all((p > 0) & (p < 1)))
         # ranking sanity: the true signal is x1
         self.assertGreater(np.corrcoef(p, te["x1"])[0, 1], 0.1)
+
+    def test_init_donor_serve_branch(self):
+        """predict_prop's init_donor branch reproduces the fit-side
+        arithmetic exactly: residual member mean logit + scale * donor
+        bag-mean logit, hand-built end to end (B1, chain 2)."""
+        import lightgbm as lgb
+        from sklearn.linear_model import LogisticRegression
+        rng = np.random.default_rng(3)
+        n = 400
+        X = pd.DataFrame({"x1": rng.normal(size=n),
+                          "x2": rng.normal(size=n)})
+        y = (rng.uniform(size=n)
+             < 1 / (1 + np.exp(-X["x1"]))).astype(int).to_numpy()
+        donor = lgb.LGBMClassifier(**self.small).fit(X, y)
+        zd = F.logit(donor.predict_proba(X)[:, 1], lo=1e-7)
+        scale = 0.5
+        member = lgb.LGBMClassifier(**self.small)
+        member.fit(X, y, init_score=scale * zd)
+        lr = LogisticRegression(max_iter=200).fit(X, y)
+        z_lgbm = F.logit(member.predict_proba(X)[:, 1], lo=1e-7) + scale * zd
+        Z = np.column_stack([z_lgbm, F.logit(lr.predict_proba(X)[:, 1])])
+        fstack = LogisticRegression(max_iter=200).fit(Z, y)
+        s = fstack.predict_proba(Z)[:, 1]
+        iso = F.PlattCal().fit(s, y)
+        prop = {"gbm": member, "lr": lr, "lr_cols": ["x1", "x2"],
+                "iso": iso, "cols": ["x1", "x2"],
+                "fstack": fstack, "fstack_fams": ["lgbm"],
+                "fam_slices": {"lgbm": (0, 1)},
+                "init_donor": {"head": "d", "scale": scale,
+                               "models": [donor], "cols": ["x1", "x2"]}}
+        p = P.predict_prop(prop, X)
+        self.assertTrue(np.allclose(p, iso.predict(s), atol=1e-12))
+
+    def test_init_score_donor_ladder_parity(self):
+        """Two-head ladder through fit_classifier with INIT_SCORE_DONORS
+        live: the donor stashes, the recipient records its cal-year scale
+        pick, and the served test-year probabilities reproduce the fit-side
+        logloss exactly (any fit/serve offset drift breaks this)."""
+        from sklearn.metrics import log_loss
+        T = self.T
+        T._CAL_STASH.clear()
+        T._DONOR_STASH.clear()
+        saved, saved_grid = T.INIT_SCORE_DONORS, T.INIT_SCALE_GRID
+        try:
+            T.INIT_SCORE_DONORS = {"thin": "thick"}
+            T.INIT_SCALE_GRID = (0.5, 1.0)
+            df = self.df.copy()
+            rng = np.random.default_rng(7)
+            p_thin = 1 / (1 + np.exp(-(1.6 * df["x1"].to_numpy() - 2.5)))
+            df["y_thin"] = (rng.uniform(size=len(df)) < p_thin).astype(int)
+            T.fit_classifier(df, self.cols, "y", [2021, 2022, 2023, 2024],
+                             2025, 2026, "THICK", params=self.small,
+                             n_bags=2, n_cb=1, head_key="thick")
+            self.assertIn("thick", T._DONOR_STASH)
+            prop, m = T.fit_classifier(df, self.cols, "y_thin",
+                                       [2021, 2022, 2023, 2024], 2025, 2026,
+                                       "THIN", params=self.small,
+                                       n_bags=2, n_cb=1, head_key="thin")
+            self.assertIn(m["init_donor"]["scale"],
+                          (0.0,) + T.INIT_SCALE_GRID)
+            self.assertEqual(m["init_donor"]["donor"], "thick")
+            self.assertEqual("init_donor" in prop,
+                             m["init_donor"]["scale"] > 0)
+            prop["cols"] = self.cols
+            te = df[df["Season"] == 2026]
+            p = P.predict_prop(prop, te)
+            self.assertAlmostEqual(log_loss(te["y_thin"], p), m["logloss"],
+                                   places=10)
+        finally:
+            T.INIT_SCORE_DONORS, T.INIT_SCALE_GRID = saved, saved_grid
+            T._CAL_STASH.clear()
+            T._DONOR_STASH.clear()
 
     def test_fit_winner_mirror_and_serve(self):
         T = self.T

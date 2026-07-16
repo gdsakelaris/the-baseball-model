@@ -80,12 +80,17 @@ LGB_POIS = dict(n_estimators=2000, learning_rate=0.03, num_leaves=63,
 # prior reg_up base). CAVEAT: a single-bag pick for a 5-bag ship on a
 # ~10k-row head — the one most prone to over-regularization — so confirm on
 # the keep-train via evaluate_deep --paired before trusting the deeper cut.
-LGB_WIN = dict(n_estimators=3000, learning_rate=0.03, num_leaves=7,
-               min_child_samples=200, subsample=0.9, subsample_freq=1,
+LGB_WIN = dict(n_estimators=3000, learning_rate=0.03, num_leaves=15,
+               min_child_samples=300, subsample=0.9, subsample_freq=1,
                colsample_bytree=0.7, reg_lambda=6.0, objective="binary",
                verbose=-1)
 # lr .02->.03 = the 2026-07-15 chain sweep's 'lr_up' (winner's biggest
 # guarded win: CV logloss -0.0030, AUC +0.0007 on the new 18-col keep-list)
+# nl 7->15, mcs 200->300 = the 2026-07-16 chain-2 'reg_up' from the FIRST
+# MIRROR-AWARE winner sweep (B2: fold-train+watch rows mirrored, persp_home
+# in cols — the regime the winner actually ships in): ensemble ll -0.0006
+# vs the shipped config, gates cleared; lr_up/leaves7 scored identical to
+# default because they're already baked in here. USER-approved 07-16.
 
 # Recency sample-weighting (2026-07-15, tier-1 mechanics batch): every
 # booster and LR fit weights row i by RECENCY_DECAY ** (cal_yr - Season_i),
@@ -151,7 +156,11 @@ FSTACK_C = 50.0
 # curve (features.BaggedCal). Targets the observed 2025->2026 ECE decay:
 # part of it is single-year calibrator variance, which bagging shrinks.
 # 0 = off (single full-year fit, the incumbent).
-CAL_BAG_B = 25
+# 2026-07-16 chain 2: 25 -> 0 per cal_lab on the chain-1 ship stash — every
+# top global combo is bag=0 (the mean-logloss cost of bagging is small but
+# consistent; per-head bests are mixed, so the paired read arbitrates).
+# USER-approved 07-16; revert = 25.
+CAL_BAG_B = 0
 # Multi-year calibration support: pool the PRIOR year's honest out-of-sample
 # scores (from the suite trained one season back — the selection suite's
 # boosters, captured in _CAL_STASH at zero extra train cost) into the
@@ -169,7 +178,12 @@ CAL_POOL_DECAY = 0.75
 # chain leaves the shipping suite three deep: prestash-cal + selection-cal +
 # own cal). Adjudicate a depth change OFFLINE first via cal_lab.py's
 # pool-years knob — the stash sidecar makes it a minutes-scale experiment.
-CAL_POOL_YEARS = 2
+# 2026-07-16 chain 2: 2 -> 1 per cal_lab TWICE (chain-1 eve run + the
+# 07-16 ship-stash run): pool=1 wins mean logloss and posts broad ECE
+# gains (hr .0037->.0005, rbi .0063->.0015, tb2 .0083->.0019). Depth 1 =
+# current-year-only support; the stash machinery stays live for reverts
+# and for cal_lab experiments. USER-approved 07-16; revert = 2.
+CAL_POOL_YEARS = 1
 # Early-stop refit: after each booster member early-stops on its ~10%
 # GamePk holdout (audit fix #2), refit that member at its chosen iteration
 # count on 100% of the training rows — recovering the 10% data sacrifice.
@@ -242,7 +256,10 @@ LGBM_BAGS = 6   # shipped keep-train (6 bags, user 07-15); superset overridden t
 # thresholds decorrelate members beyond what reseeding can, cheap
 # within-family diversity with no new dependencies. Flip to e.g. 2 and
 # adjudicate on the next keep-chain's paired read.
-BAG_DIVERSIFY = 0
+# 2026-07-16 chain 2 (B3): flipped 0 -> 2 for this chain's adjudication,
+# per the ratified CHAIN2_PLAN. Members b=1,2 of every LGBM bag train with
+# extra_trees=True; member 0 stays the bit-identical incumbent seed.
+BAG_DIVERSIFY = 2
 
 # Family bagging (2026-07-10 experiment, FULL BOARD per user): XGBoost
 # members appended to every GBM head's bag — binaries, count heads (k
@@ -311,8 +328,14 @@ CB_POIS = dict(iterations=2000, learning_rate=0.03, depth=7,
 CB_WIN = dict(iterations=3000, learning_rate=0.02, depth=4,
               l2_leaf_reg=10.0, loss_function="Logloss",
               eval_metric="Logloss", early_stopping_rounds=150,
+              bagging_temperature=2.0,
               verbose=0, allow_writing_files=False,
               task_type="GPU", devices="0")
+# bagging_temperature=2.0 = cb_sweep 'bayes_hot' (2026-07-16, the first
+# CB-side sweep): winner-panel ll -0.0020 vs default, gates cleared —
+# hotter Bayesian bootstrap buys the data-starved winner more member
+# diversity. CB_CLS/CB_POIS stay default (6/8 binary + 3/3 count panel
+# heads recommended no change). USER-approved 07-16.
 
 # Per-prop LightGBM overrides — RE-SWEPT 2026-07-15 (chain sweep) with
 # param_sweep (LGBM-only isolation, K=4 day-grouped CV, Season<=2024) on
@@ -377,7 +400,36 @@ _CNT_HEAVY = dict(num_leaves=31, min_child_samples=300,
 # (k lr_slow, total med, xhrr/xrbi heavy, xtb med) cleared the deviance
 # gate. Wholesale-replace semantics -> all dropped; raw LGB_POIS ships.
 # The fragments above stay (param_sweep.CNT_PROFILES mirrors them).
-COUNT_PARAMS = {}
+# RE-SWEPT 2026-07-16 (chain 2): hpo_sweep 60-trial Optuna over the 13
+# count heads — 9 cleared LGBM-solo gates, then the ensemble tiebreak
+# (2 CB cached/fold, identical folds) killed 6, the same macro-lesson as
+# chain 1. The 3 survivors below cleared deviance+MAE gates ENSEMBLE-
+# scored (outs dev -.0015, per -.0017, k -.0017). xhrr/xtb/pbb/pha/total/
+# xrbi stay on raw LGB_POIS; for xrbi (chain 1's replicated MAE harm)
+# BOTH its Optuna winner and the old _CNT_HEAVY failed the ensemble read
+# — base is best on MAE, so the harm suspect moves elsewhere (chain-2
+# paired read re-measures). USER-approved 07-16; delete an entry to
+# revert that head to LGB_POIS.
+COUNT_PARAMS = {   # Optuna dicts verbatim from artifacts/hpo_sweep.json
+    "outs": dict(LGB_POIS, learning_rate=0.019936849536100608,
+                 num_leaves=33, min_child_samples=24,
+                 colsample_bytree=0.5322641785198797,
+                 reg_lambda=3.119486926286563,
+                 subsample=0.8553474347283905, max_bin=127,
+                 min_split_gain=0.05407620105358256),
+    "per":  dict(LGB_POIS, learning_rate=0.019329001499361304,
+                 num_leaves=8, min_child_samples=25,
+                 colsample_bytree=0.984140790945196,
+                 reg_lambda=9.98763058156031,
+                 subsample=0.6008065801810717, max_bin=127,
+                 min_split_gain=0.09042365691059093),
+    "k":    dict(LGB_POIS, learning_rate=0.023690837108114676,
+                 num_leaves=9, min_child_samples=44,
+                 colsample_bytree=0.7230251013296163,
+                 reg_lambda=20.616220635769253,
+                 subsample=0.7021555285549907, max_bin=127,
+                 min_split_gain=0.2511961562678737),
+}
 
 # Per-prop feature routing was REMOVED 2026-07-15 (audit fix #11). The
 # hand-curated PROP_EXCLUDE tables had been dead code since the 2026-07-10
@@ -532,6 +584,40 @@ STACK_DONORS = {
     "rbi2":   ("rbi",),
     "run2":   ("run",),
 }
+
+# B1 init_score donor warm-starts (2026-07-16, chain 2) — the STACK_DONORS
+# idea INSIDE the trees. Each thin deep-threshold head's LGBM members boost
+# from scale * (its ladder lower rung's bag-mean logit) and learn only the
+# residual: the lower rung sees the same features at 5-20x the positive
+# support, so its logit is a shrinkage prior the thin head's own trees
+# cannot manufacture. The donor's train-row logits are IN-SAMPLE (the donor
+# trained on those rows), which makes the raw offset optimistically sharp —
+# so the per-head scale is picked on the CAL YEAR (donors never train
+# there) by one probe member per grid point; scale 0.0 is always probed
+# first and recovers the incumbent member exactly, so the mechanism
+# self-gates per head. (USER design call 07-16: in-sample + scale grid,
+# over a K-fold OOF donor pass; if winners plateau at the low scales,
+# the honest-OOF pass is the chain-3 upgrade.) Serving: the offset rides
+# at the FAMILY-LOGIT level — residual members' mean logit + scale *
+# donor bag-mean logit — computed by the same arithmetic in
+# fit_classifier's cal/test designs and predict.predict_prop's
+# "init_donor" branch (donor member references in the artifact; joblib
+# dedupes shared objects, ~zero size cost). CB members stay offset-free;
+# the family stack re-weights around the sharpened LGBM family. Keep-trains
+# only (superset/selection-regen paths untouched); empty dict = OFF.
+INIT_SCORE_DONORS = {
+    "hits2":  "hit",
+    "tb4":    "tb3",
+    "hrr4":   "hrr3",
+    "rbi2":   "rbi",
+    "run2":   "run",
+    "triple": "double",
+}
+INIT_SCALE_GRID = (0.25, 0.5, 0.75, 1.0)    # 0.0 (incumbent) always probed
+# serve-side donor logits are rebuilt from the donor's members alone, so a
+# donor that is itself offset-boosted would serve wrong — forbid chaining
+assert not set(INIT_SCORE_DONORS) & set(INIT_SCORE_DONORS.values())
+_DONOR_STASH = {}   # donor head_key -> {models, cols, z_tr, z_ca, z_te}
 
 # Calibrator choice per head. Default = cal-year isotonic. PLATT_CAL heads
 # use features.PlattCal (2-parameter logistic on the blended logit) instead:
@@ -826,11 +912,13 @@ def _fit_logistic(tr, cols, target, w=None, ca=None):
     return best_pipe, num_cols, best_C
 
 
-def _refit_lgbm(ctor, p, best_iter, X, y, w):
+def _refit_lgbm(ctor, p, best_iter, X, y, w, init_score=None):
     """ES-refit: same params/seed at the ES-chosen iteration count, fit on
-    100% of the training rows (recovers the ~10% ES holdout sacrifice)."""
+    100% of the training rows (recovers the ~10% ES holdout sacrifice).
+    init_score: scaled donor offset on the refit rows (INIT_SCORE_DONORS)."""
     m = ctor(**{**p, "n_estimators": max(int(best_iter), 1)})
-    m.fit(X, y, sample_weight=w)
+    kw = {} if init_score is None else {"init_score": init_score}
+    m.fit(X, y, sample_weight=w, **kw)
     return m
 
 
@@ -858,6 +946,41 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
                    _recency_w(es, cal_yr, decay))
     w_tr = _recency_w(tr, cal_yr, decay)
     do_refit = ES_REFIT and _KEEP_TRAIN
+
+    # B1 donor offset: resolve the lower rung's stashed logits and pick the
+    # offset scale on the cal year BEFORE the bag loop — one probe member
+    # per grid point, scored on raw-sigmoid cal-year logloss (pre-cal
+    # sharpness is what the offset buys; the calibrator layer is fit later
+    # on whatever wins). The winning probe IS bag member 0 (its s=0 probe
+    # is bit-identical to the incumbent member-0 fit), so the grid costs
+    # len(INIT_SCALE_GRID) extra fits per recipient head, nothing more.
+    init_scale, probe_keep = 0.0, None
+    zd_fit = zd_es = zd_tr = zd_ca = zd_te = None
+    donor_key = INIT_SCORE_DONORS.get(head_key) if _KEEP_TRAIN else None
+    donor = _DONOR_STASH.get(donor_key) if donor_key else None
+    if donor is not None:
+        zd_fit = donor["z_tr"].loc[fit.index].to_numpy()
+        zd_es = donor["z_tr"].loc[es.index].to_numpy()
+        zd_tr = donor["z_tr"].loc[tr.index].to_numpy()
+        zd_ca, zd_te = donor["z_ca"], donor["z_te"]
+        y_ca_probe = ca[target].to_numpy()
+        base_p = dict(params or LGB_CLS)
+        best_ll = np.inf
+        for s in (0.0,) + INIT_SCALE_GRID:
+            m = lgb.LGBMClassifier(**base_p)
+            ikw = ({"init_score": s * zd_fit,
+                    "eval_init_score": [s * zd_es]} if s else {})
+            m.fit(fit[cols], fit[target], sample_weight=w_fit,
+                  eval_set=[(es[cols], es[target])],
+                  eval_sample_weight=None if w_es is None else [w_es],
+                  eval_metric="binary_logloss",
+                  callbacks=[lgb.early_stopping(150, verbose=False)], **ikw)
+            z = m.predict(ca[cols], raw_score=True) + s * zd_ca
+            ll = log_loss(y_ca_probe, 1.0 / (1.0 + np.exp(-z)))
+            if ll < best_ll - 1e-7:     # ties break toward the smaller scale
+                best_ll, init_scale = ll, s
+                probe_keep = (m, int(m.best_iteration_ or 0))
+
     models, best_iters = [], []
     slices, pos = {}, 0             # family -> (start, end) into models
     for b in range(n_bags):
@@ -866,16 +989,24 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
             p["random_state"] = b
             if b <= BAG_DIVERSIFY:
                 p["extra_trees"] = True
-        m = lgb.LGBMClassifier(**p)
-        m.fit(fit[cols], fit[target], sample_weight=w_fit,
-              eval_set=[(es[cols], es[target])],
-              eval_sample_weight=None if w_es is None else [w_es],
-              eval_metric="binary_logloss",
-              callbacks=[lgb.early_stopping(150, verbose=False)])
-        bi = int(m.best_iteration_ or 0)
+        if b == 0 and probe_keep is not None:
+            m, bi = probe_keep      # the winning scale probe IS member 0
+        else:
+            m = lgb.LGBMClassifier(**p)
+            ikw = ({"init_score": init_scale * zd_fit,
+                    "eval_init_score": [init_scale * zd_es]}
+                   if init_scale else {})
+            m.fit(fit[cols], fit[target], sample_weight=w_fit,
+                  eval_set=[(es[cols], es[target])],
+                  eval_sample_weight=None if w_es is None else [w_es],
+                  eval_metric="binary_logloss",
+                  callbacks=[lgb.early_stopping(150, verbose=False)], **ikw)
+            bi = int(m.best_iteration_ or 0)
         if do_refit and bi:
             m = _refit_lgbm(lgb.LGBMClassifier, p, bi,
-                            tr[cols], tr[target], w_tr)
+                            tr[cols], tr[target], w_tr,
+                            init_score=(init_scale * zd_tr
+                                        if init_scale else None))
         models.append(m)
         best_iters.append(bi)
     slices["lgbm"] = (pos, len(models))
@@ -917,6 +1048,8 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
     fam_order = list(slices)
     yca = ca[target].to_numpy()
     zf_cal = F.family_logits(models, slices, ca[cols])
+    if init_scale:      # B1: residual members' family logit + donor offset
+        zf_cal["lgbm"] = zf_cal["lgbm"] + init_scale * zd_ca
     zl_cal = F.logit(lr.predict_proba(ca[num_cols])[:, 1])
     Z_cal = np.column_stack([zf_cal[f] for f in fam_order] + [zl_cal])
 
@@ -958,6 +1091,8 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
                                      dates=pool["dates"], w=pool["w"])
 
     zf_te = F.family_logits(models, slices, te[cols])
+    if init_scale:      # B1 twin of the cal-design offset
+        zf_te["lgbm"] = zf_te["lgbm"] + init_scale * zd_te
     zl_te = F.logit(lr.predict_proba(te[num_cols])[:, 1])
     Z_te = np.column_stack([zf_te[f] for f in fam_order] + [zl_te])
     # test-year design stashed too (2026-07-15 PM): with cal+test designs
@@ -1015,12 +1150,32 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
     day = pd.DataFrame({"d": te["Date"].values, "p": p_te, "y": y})
     top = day.sort_values("p", ascending=False).groupby("d").head(10)
     metrics["top10_daily_hit_rate"] = float(top["y"].mean())
+    # B1 donor bookkeeping: recipients record the pick (scale 0.0 = the
+    # grid chose the incumbent — self-gate visible in metrics); donor heads
+    # stash their LGBM bag-mean logits for the recipients that follow them
+    # in the PROPS loop. z_ca/z_te are free (the pure LGBM family logits
+    # just computed — donors are never offset themselves, the module-level
+    # assert forbids chaining); z_tr costs one bag predict on the train
+    # rows, donors-with-recipients only.
+    init_str = ""
+    if donor is not None:
+        metrics["init_donor"] = {"donor": donor_key, "scale": init_scale}
+        init_str = f" | init {donor_key}@{init_scale:g}"
+    if _KEEP_TRAIN and head_key in set(INIT_SCORE_DONORS.values()):
+        lo, hi = slices["lgbm"]
+        lgbm_members = models[lo:hi]
+        z_tr_d = np.mean([F.logit(m.predict_proba(tr[cols])[:, 1], lo=1e-7)
+                          for m in lgbm_members], axis=0)
+        _DONOR_STASH[head_key] = {
+            "models": lgbm_members, "cols": list(cols),
+            "z_tr": pd.Series(z_tr_d, index=tr.index),
+            "z_ca": zf_cal["lgbm"], "z_te": zf_te["lgbm"]}
     log(f"{name} [{test_yr}]: AUC {metrics['auc']:.4f} | "
         f"logloss {metrics['logloss']:.4f} (base {metrics['logloss_baserate']:.4f}) | "
         f"brier {metrics['brier']:.4f} (base {metrics['brier_baserate']:.4f}) | "
         f"top10/day {metrics['top10_daily_hit_rate']:.3f} vs base "
         f"{metrics['base_rate']:.3f} | {wt_str} | cal {cal_kind} | "
-        f"cal-yrs {cal_years}")
+        f"cal-yrs {cal_years}{init_str}")
     prop = {"gbm": model, "lr": lr, "lr_cols": num_cols,
             "iso": iso, "blend_space": BLEND_SPACE}
     if FAMILY_STACK:
@@ -1028,6 +1183,10 @@ def fit_classifier(df, cols, target, train_yrs, cal_yr, test_yr, name,
                      "fam_slices": slices})
     else:
         prop["w"] = best_w
+    if init_scale:      # serve-side twin data: predict.predict_prop re-adds
+        prop["init_donor"] = {"head": donor_key, "scale": init_scale,
+                              "models": donor["models"],
+                              "cols": donor["cols"]}
     return prop, metrics
 
 
@@ -1509,6 +1668,7 @@ def train_suite(bf, sf, tg, wf, cat_levels, train_yrs, cal_yr, test_yr):
     tg_cols = _apply_keep("total",
                           F.team_game_feature_cols() + _shadow(tg))
     metrics, props = {}, {}
+    _DONOR_STASH.clear()    # B1 donors are per-suite (tr/cal rows differ)
 
     for name, (target, _desc) in PROPS.items():
         cols = _apply_keep(name, [c for c in bat_cols

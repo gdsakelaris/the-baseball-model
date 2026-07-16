@@ -177,10 +177,14 @@ def load_frames():
     return bf, sf, tg, wf
 
 
-def _prep(df, cols, target, cutoff, max_rows, seed):
+def _prep(df, cols, target, cutoff, max_rows, seed, mirror=False):
     """Rows the selection model may see (Season<=cutoff), target present, columns
     sliced, day groups factorized. Row-subsampled (day integrity preserved — each
-    surviving row keeps its Date, folds still group by day) when over budget."""
+    surviving row keeps its Date, folds still group by day) when over budget.
+    mirror=True (B2, winner only): also returns a positionally-aligned
+    home/away-mirrored twin (train._mirror_win on the SAME selected rows, so
+    a mirrored row inherits its original's fold/day membership) as a fourth
+    element (X_mir, y_mir)."""
     d = df[df["Season"] <= cutoff].dropna(subset=[target]).copy()
     if max_rows and len(d) > max_rows:
         d = d.sample(n=max_rows, random_state=seed)
@@ -188,20 +192,33 @@ def _prep(df, cols, target, cutoff, max_rows, seed):
     X = d[cols]
     y = d[target].to_numpy()
     groups = pd.factorize(d["Date"])[0]
-    return X, y, groups
+    if not mirror:
+        return X, y, groups
+    dm = T._mirror_win(d)
+    return X, y, groups, (dm[cols], dm[target].to_numpy())
 
 
 def _fit_families_fold(kind, X, y, fit_idx, watch_idx, va_idx, cat_here,
-                       xgb_params, cb_params, n_xgb, n_cb, tweedie):
+                       xgb_params, cb_params, n_xgb, n_cb, tweedie, mir=None):
     """Fit the XGBoost + CatBoost members ONCE for a fold and return the SUM of
     their watch- and val-block predictions plus the member count. Their outputs
     are independent of the LGBM profile, so this is cached and reused across
     every profile — fitting the GPU families once per fold instead of once per
     profile is the trick that keeps an ensemble-aware sweep tractable. Mirrors
-    train.py's family fit path exactly (InfSafe/CatSafe, Poisson/Tweedie)."""
+    train.py's family fit path exactly (InfSafe/CatSafe, Poisson/Tweedie).
+    mir (B2, winner only): fit/watch rows get their mirrored twins appended —
+    watch predictions run on the DOUBLED watch so the family sums align with
+    _fold_fit_binary's mirrored raw_w; val stays unmirrored (persp_home=1,
+    the serving perspective)."""
     Xf, yf = X.iloc[fit_idx], y[fit_idx]
     Xw, Xv, yw = X.iloc[watch_idx], X.iloc[va_idx], y[watch_idx]
-    watch_sum, val_sum, n = (np.zeros(len(watch_idx)), np.zeros(len(va_idx)), 0)
+    if mir is not None:
+        Xm, ym = mir
+        Xf = pd.concat([Xf, Xm.iloc[fit_idx]], ignore_index=True)
+        yf = np.concatenate([yf, ym[fit_idx]])
+        Xw = pd.concat([Xw, Xm.iloc[watch_idx]], ignore_index=True)
+        yw = np.concatenate([yw, ym[watch_idx]])
+    watch_sum, val_sum, n = (np.zeros(len(Xw)), np.zeros(len(va_idx)), 0)
     for b in range(n_xgb):
         if kind == "binary":
             m = F.InfSafe(T.xgb_lib.XGBClassifier(**xgb_params, random_state=b))
@@ -242,25 +259,35 @@ def _fit_families_fold(kind, X, y, fit_idx, watch_idx, va_idx, cat_here,
 
 
 def _fold_fit_binary(X, y, fit_idx, watch_idx, va_idx, params, seed,
-                     fam=None, w_lgbm=1):
+                     fam=None, w_lgbm=1, mir=None):
     """Fit one fold: LGBM early-stopped on watch. When `fam` (cached XGB+CB
     prediction sums) is given, MeanBag the LGBM member with them — LGBM weighted
     `w_lgbm` to match its real bag size — so the scored preds are the ENSEMBLE's.
     Isotonic on watch, applied to the held-out val block. Returns calibrated val
-    predictions."""
+    predictions. mir (B2, winner only): (X_mir, y_mir) positionally-aligned
+    mirrored twin — fit and watch rows get their mirrors appended
+    (train.fit_winner's WINNER_MIRROR regime), the scored val block stays
+    unmirrored at persp_home=1, the serving perspective."""
+    Xf, yf = X.iloc[fit_idx], y[fit_idx]
+    Xw, yw = X.iloc[watch_idx], y[watch_idx]
+    if mir is not None:
+        Xm, ym = mir
+        Xf = pd.concat([Xf, Xm.iloc[fit_idx]], ignore_index=True)
+        yf = np.concatenate([yf, ym[fit_idx]])
+        Xw = pd.concat([Xw, Xm.iloc[watch_idx]], ignore_index=True)
+        yw = np.concatenate([yw, ym[watch_idx]])
     m = lgb.LGBMClassifier(**params)
-    m.fit(X.iloc[fit_idx], y[fit_idx],
-          eval_set=[(X.iloc[watch_idx], y[watch_idx])],
+    m.fit(Xf, yf, eval_set=[(Xw, yw)],
           eval_metric="binary_logloss",
           callbacks=[lgb.early_stopping(150, verbose=False)])
-    raw_w = m.predict_proba(X.iloc[watch_idx])[:, 1]
+    raw_w = m.predict_proba(Xw)[:, 1]
     raw_v = m.predict_proba(X.iloc[va_idx])[:, 1]
     if fam is not None:
         fw, fv, n_fam = fam
         raw_w = (w_lgbm * raw_w + fw) / (w_lgbm + n_fam)
         raw_v = (w_lgbm * raw_v + fv) / (w_lgbm + n_fam)
     iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-4, y_max=1 - 1e-4)
-    iso.fit(raw_w, y[watch_idx])
+    iso.fit(raw_w, yw)
     return iso.predict(raw_v)
 
 
@@ -299,7 +326,8 @@ def _ece(y, p, n_bins=10):
 
 def cv_head(kind, X, y, groups, base, profiles, folds, seed,
             mono_cols=None, tweedie=None, ensemble=False, cat_cols=None,
-            xgb_params=None, cb_params=None, n_xgb=0, n_cb=0, w_lgbm=1):
+            xgb_params=None, cb_params=None, n_xgb=0, n_cb=0, w_lgbm=1,
+            mir=None):
     """Run day-block CV for every profile on one head. Returns {profile: metrics}.
     ensemble=True MeanBags each LGBM profile with the head's XGB+CatBoost members
     (fit once per fold, cached) so the objective is the ENSEMBLE's OOF error —
@@ -318,7 +346,7 @@ def cv_head(kind, X, y, groups, base, profiles, folds, seed,
         for k, (fit_idx, watch_idx, va_idx) in enumerate(fold_splits):
             fam_cache[k] = _fit_families_fold(
                 kind, X, y, fit_idx, watch_idx, va_idx, cat_here,
-                xgb_params, cb_params, n_xgb, n_cb, tweedie)
+                xgb_params, cb_params, n_xgb, n_cb, tweedie, mir=mir)
     out = {}
     for pname, override in profiles.items():
         params = dict(base, **override)
@@ -330,7 +358,7 @@ def cv_head(kind, X, y, groups, base, profiles, folds, seed,
             if kind == "binary":
                 oof[va_idx] = _fold_fit_binary(X, y, fit_idx, watch_idx, va_idx,
                                                params, seed, fam=fam_cache[k],
-                                               w_lgbm=w_lgbm)
+                                               w_lgbm=w_lgbm, mir=mir)
             else:
                 oof[va_idx] = _fold_fit_count(X, y, fit_idx, watch_idx, va_idx,
                                               params, tweedie, seed,
@@ -448,9 +476,22 @@ def build_jobs(bf, sf, tg, wf):
                      xgb_params=T.XGB_POIS, cb_params=T.CB_POIS,
                      n_xgb=T.XGB_BAGS, n_cb=T.CB_BAGS, w_lgbm=1))
     win_cols = T._apply_keep("winner", F.win_feature_cols())
+    # B2 (2026-07-16 chain 2): WINNER_MIRROR survived chain 1, so the sweep
+    # tunes LGB_WIN for the data regime it actually ships in — fold-train and
+    # watch rows get home/away-mirrored twins (train._mirror_win) and the
+    # persp_home flag joins the columns (train.py's win_cols twin). Val
+    # blocks stay unmirrored at persp_home=1, the serving perspective.
+    # Flag rides the job dict; WINNER_MIRROR=False restores the old sweep.
+    mirror_win = bool(getattr(T, "WINNER_MIRROR", False))
+    if mirror_win:
+        if "persp_home" not in win_cols:
+            win_cols = win_cols + ["persp_home"]
+        if "persp_home" not in wf.columns:
+            wf = wf.copy()
+            wf["persp_home"] = 1.0
     jobs.append(dict(name="winner", kind="binary", frame=wf, cols=win_cols,
                      target="y_home_win", base=T.LGB_WIN, profiles=WIN_PROFILES,
-                     mono=None, tweedie=None,
+                     mono=None, tweedie=None, mirror=mirror_win,
                      xgb_params=T.XGB_WIN, cb_params=T.CB_WIN,
                      n_xgb=T.XGB_BAGS, n_cb=T.CB_BAGS, w_lgbm=1))
     return jobs
@@ -505,8 +546,14 @@ def main():
     results = {}
     for name in order:
         j = jobs[name]
-        X, y, groups = _prep(j["frame"], j["cols"], j["target"], cutoff,
-                             args.max_rows, args.seed)
+        mir = None
+        if j.get("mirror"):
+            X, y, groups, mir = _prep(j["frame"], j["cols"], j["target"],
+                                      cutoff, args.max_rows, args.seed,
+                                      mirror=True)
+        else:
+            X, y, groups = _prep(j["frame"], j["cols"], j["target"], cutoff,
+                                 args.max_rows, args.seed)
         n_days = len(np.unique(groups))
         log(f"[{name}] {j['kind']} | rows {len(y):,} | days {n_days} | "
             f"cols {len(j['cols'])} | base_rate/mean "
@@ -518,7 +565,7 @@ def main():
                         tweedie=j["tweedie"], ensemble=args.ensemble,
                         cat_cols=F.CAT_COLS, xgb_params=j["xgb_params"],
                         cb_params=j["cb_params"], n_xgb=j["n_xgb"],
-                        n_cb=j["n_cb"], w_lgbm=j["w_lgbm"])
+                        n_cb=j["n_cb"], w_lgbm=j["w_lgbm"], mir=mir)
         rec = _recommend(j["kind"], table)
         d = table["default"]
         if j["kind"] == "binary":

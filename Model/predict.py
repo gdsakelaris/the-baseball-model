@@ -124,7 +124,12 @@ NB_PRICED_TARGETS = {"y_per", "y_so", "total_runs"}
 # files alongside the 07-15 parts — fixed in pa_grade); the clean re-fit
 # moved only score (0.65 -> 0.60), and the ratified verbatim rule was
 # applied to the corrected fit.
-SIM_BLEND = {"score": 0.60, "total": 0.55, "winner": 0.30}
+# 2026-07-16 re-fit against the ef45689 heads (fit-2025 verbatim, 2026
+# same-sign SIM+ confirm): the diversity-batch GBM game heads got
+# stronger, so the sim earns less — score 0.60 -> 0.40, total 0.55 ->
+# 0.15, winner unchanged. USER call 07-16: bake pre-slate so day 1 of
+# the forward record serves the fitted weights.
+SIM_BLEND = {"score": 0.40, "total": 0.15, "winner": 0.30}
 
 
 def _sim_logit(p):
@@ -264,6 +269,16 @@ def predict_prop(prop, X):
         Xp = X[prop["cols"]] if "cols" in prop else X
         members = getattr(prop["gbm"], "models", [prop["gbm"]])
         zf = F.family_logits(members, prop["fam_slices"], Xp)
+        if "init_donor" in prop:
+            # B1 (chain 2): the LGBM members were trained on residuals from
+            # scale * donor bag-mean logit (train.INIT_SCORE_DONORS) — re-add
+            # the offset at the family-logit level, the exact fit-side
+            # arithmetic of fit_classifier's cal/test designs. The donor's
+            # members ride in the artifact (shared references, deduped).
+            d = prop["init_donor"]
+            zd = np.mean([F.logit(m.predict_proba(X[d["cols"]])[:, 1],
+                                  lo=1e-7) for m in d["models"]], axis=0)
+            zf["lgbm"] = zf["lgbm"] + d["scale"] * zd
         zl = F.logit(prop["lr"].predict_proba(Xp[prop["lr_cols"]])[:, 1])
         Z = np.column_stack([zf[f] for f in prop["fstack_fams"]] + [zl])
         return prop["iso"].predict(prop["fstack"].predict_proba(Z)[:, 1])
