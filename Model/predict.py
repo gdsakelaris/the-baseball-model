@@ -958,7 +958,14 @@ class Predictor:
         date = pd.Timestamp(spec["date"])
         season = date.year
         s = self.stores
-        row = {"Season": season, "month": date.month,
+        # persp_home: WINNER_MIRROR's synthetic orientation flag — no data
+        # source produces it, so the row builder materializes the serving
+        # value (1.0 = real home orientation; only train-time mirrored
+        # copies are ever 0). Without it the audit-#12 drift guard warns
+        # and fills NaN; predict_win's pin then corrects it, so outputs
+        # were never wrong — but the guard should stay meaningful.
+        # Serving twin of evaluate_deep._ensure_persp (f09bcfd).
+        row = {"Season": season, "month": date.month, "persp_home": 1.0,
                **s.park(spec["venue"], date), **self._weather(spec)}
         for side, team, starter in (("away", spec["away_team"],
                                      spec["away_starter"]),
